@@ -24,19 +24,26 @@ static void mem_write(void *userdata, uint16_t addr, uint8_t value) {
 }
 
 /* IM2 CALLs the word stored at (I<<8)|vector - here that word is usually
- * the address of a small fixed "JP nn" trampoline (e.g. $FE04/$FE07, per
- * the static IM2 template), whose *operand* is the real, sometimes
- * runtime-patched destination (see ../README.md and
+ * the address of a small fixed "JP nn" trampoline (e.g. $FE04/$FE07 for
+ * the IPL's own table at page $FE), whose *operand* is the real,
+ * sometimes runtime-patched destination (see ../README.md and
  * ../../ROM Dumps/CPU-Card-Boot-EPROM/disassembly/findings.md).
  *
- * The only remaining gate (TODO.md T11): register I must have reached
- * $FE, the real, established table page this whole investigation is
- * anchored on. Until the ROM's own init code runs "LD A,$FE / LD I,A" (or
- * equivalent), I is still 0 (or otherwise stale), so (I<<8)|vector points
- * into whatever happens to be at low/incidental addresses - the reset
- * vector table, in-progress boot-sector code, etc. Delivering there
- * hijacks flow into memory that was never meant to be an interrupt
- * handler at all.
+ * The table page is NOT a fixed constant: the IPL sets I=$FE, but once
+ * control passes into CP/M's own CBIOS (Phase 2, TODO.md ISSUE-4's
+ * postscript) it sets up its own IM2 table at I=$FF instead - confirmed
+ * live (SYSPBI.PHI's own RECALIBRATE interrupt was being silently
+ * suppressed here when this was still hardcoded to $FE). So this reads
+ * I live off the CPU on every delivery instead of assuming one program's
+ * choice of page.
+ *
+ * The only remaining gate (TODO.md T11): I must be genuinely initialized
+ * to *some* real table page, not the z80 core's power-on reset value of
+ * $00. Until whichever program is running executes "LD A,nn / LD I,A",
+ * I is still $00, so (I<<8)|vector points into whatever happens to be at
+ * the very start of RAM - the reset vector table, in-progress boot code,
+ * etc. Delivering there hijacks flow into memory that was never meant to
+ * be an interrupt handler at all.
  *
  * Earlier versions of this function also suppressed delivery into the
  * ROM's $03DB no-op stub or into unpatched/zeroed memory ($FF/$00) - a
@@ -46,13 +53,11 @@ static void mem_write(void *userdata, uint16_t addr, uint8_t value) {
  * command completion), that workaround is gone; if a target still looks
  * wrong it means an upstream model is wrong, not something to paper over
  * here. */
-#define IM2_TABLE_PAGE 0xFE
-
 static bool resolve_im2_target(P2500Machine *m, uint8_t vector, uint16_t *call_target_out,
                                 uint16_t *final_dest_out) {
     *call_target_out = 0;
     *final_dest_out = 0;
-    if (m->cpu.i != IM2_TABLE_PAGE) return false;
+    if (m->cpu.i == 0x00) return false;
     uint16_t slot_addr = (uint16_t)((m->cpu.i << 8) | vector);
     uint16_t call_target = (uint16_t)(m->ram[slot_addr] | (m->ram[(uint16_t)(slot_addr + 1)] << 8));
     uint16_t final_dest = call_target;
@@ -66,8 +71,8 @@ static bool resolve_im2_target(P2500Machine *m, uint8_t vector, uint16_t *call_t
 }
 
 static void log_suppressed(P2500Machine *m, const char *source, uint8_t vector) {
-    fprintf(stderr, "[irq] %s interrupt vector=$%02X - suppressed, I=$%02X not yet at "
-                    "table page $%02X\n", source, vector, m->cpu.i, IM2_TABLE_PAGE);
+    fprintf(stderr, "[irq] %s interrupt vector=$%02X - suppressed, I=$%02X not yet "
+                    "initialized\n", source, vector, m->cpu.i);
 }
 
 /* Interrupt delivery relies on the z80 core's native IFF1 gating (see
