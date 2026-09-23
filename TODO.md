@@ -411,56 +411,76 @@ not `$04D5` as `main.c`'s landmark list assumes. Full table:
 
 - **ISSUE-3: a live run now gets all the way to programming the DMA
   correctly for READ DATA, then deadlocks *before* the actual `READ
-  DATA` opcode is ever written to port `$15` — root cause found, not yet
-  fixed.** Found immediately after ISSUE-2's fix let the boot run far
-  enough to reach this point for the first time.
+  DATA` opcode is ever written to port `$15` — root cause found, fix
+  identified but not yet applied.** Found immediately after ISSUE-2's fix
+  let the boot run far enough to reach this point for the first time.
+  Original write-up here proposed two candidate fixes inside `fdc.c`
+  (narrow `CB` to `COMMAND`-phase-only, and/or let a fresh command byte
+  abandon a stale unread result); `Datasheets and manuals/NEC UPD765.PDF`
+  (the *real* µPD765 datasheet — `NEC UPD765C.PDF` is mislabeled and is
+  actually a µPD780/Z80-clone CPU datasheet with no FDC content at all,
+  worth renaming/flagging) rules **both of those out directly**:
 
-  Sequence observed (`--verbose-io`, added `[fdc]` logging for SENSE
-  INTERRUPT STATUS results and result-phase reads): SPECIFY, one
-  defensive SENSE INTERRUPT STATUS (Invalid Command), three ISSUE-1
-  synthetic startup interrupts each draining a real SENSE INTERRUPT
-  STATUS (ST0=$20, 2 bytes, both read), then `$059C`'s own handler issues
-  a **fourth** SENSE INTERRUPT STATUS, which correctly returns Invalid
-  Command (1 byte, nothing left pending) — and that one byte is **never
-  read**. No `[fdc] read result byte` line follows it anywhere in the
-  run. `fdc->phase` stays `P2500_FDC_RESULT` forever.
+  > "It is important to note that during the Result Phase all bytes
+  > shown in the Command Table must be read... The µPD765 will not
+  > accept a new command until all seven bytes have been read."
 
-  The ROM then builds the READ DATA command buffer at `$FEA2` (length 9,
-  opcode `$46` = `$06` READ DATA with the MFM modifier bit set — correct,
-  `find_command` already masks that off) and calls `sub_0a87h` (`$07DF:
-  CALL $0A87`) to stream it to port `$15`. That routine's first step is
-  `sub_0ac2h`: busy-wait until Main Status Register bit 4 (CB, "FDC
-  busy") clears. Since T10 made `CB = (phase != IDLE)`, and phase is
-  stuck at `RESULT` from the unread SIS byte above, `CB` never clears —
-  `sub_0ac2h` spins forever, and the READ DATA opcode byte is never even
-  attempted. (If it were attempted: `fdc.c`'s `p2500_fdc_write_data`
-  silently drops any byte written while `phase` is `RESULT` — logged
-  under `--verbose-io` as `unexpected write ... while phase=2`, but nothing
-  in this run ever reaches that log line, confirming the hang is entirely
-  at the `sub_0ac2h` wait, one step earlier.)
+  This is explicit, unambiguous, and confirms `fdc.c`'s current behavior
+  (refusing a new command while a result byte sits unread) is *correct*,
+  real hardware fidelity - not a bug to soften. So the real question
+  isn't "should fdc.c tolerate this," it's "why does the ROM leave that
+  byte unread when a real board evidently boots fine."
 
-  **Two compounding, unconfirmed-against-real-hardware modeling choices**
-  are implicated, either of which could be the actual fix:
-  1. T10's `CB = (phase != IDLE)` may be too broad. The Main Status
-     Register's real meaning for bit 4 is "a read or write command is in
-     progress" — arguably that should only cover `COMMAND` phase (still
-     accumulating parameter bytes) and active execution, not sitting in
-     `RESULT` phase with a byte parked and waiting to be read. Narrowing
-     it to `cb = (phase == P2500_FDC_COMMAND)` would make `sub_0ac2h`
-     pass immediately here.
-  2. Separately, `p2500_fdc_write_data` currently treats a command byte
-     arriving during an unread `RESULT` phase as invalid and drops it.
-     Real hardware almost certainly can't permanently wedge itself from
-     one skipped defensive status read — a driver bug that fragile
-     wouldn't have shipped — so real silicon likely either (a) doesn't
-     actually reach this state the way our model does (supporting fix 1
-     above instead), or (b) accepts the new command byte as implicitly
-     abandoning the stale result. Neither is confirmed; this project
-     doesn't have a µPD765 datasheet on hand the way it now does for the
-     Z8410 DMA (see ISSUE-2) to check against.
-  Status: open, root cause pinned down precisely (down to the exact
-  missing read), fix withheld pending a decision on which of the two
-  above to apply — or both.
+  Tracing the exact instruction that never gets executed answers it. The
+  ISR that issues this unread SENSE INTERRUPT STATUS is at `$0798` -
+  reached as the **third** delivery of TODO.md ISSUE-1's synthetic
+  "post-reset unsolicited interrupt" (budgeted at 4, one per PIO-arm
+  event). Disassembling `$0798`:
+  ```
+  $0798  LD ($FF26),SP / LD SP,$FF26 / CALL $0853
+  $07A3  LD A,$73 / DI / OUT ($12),A / EI      ; PIO int off, then on
+  $07A9  CALL $0A87                             ; <- streams SIS, direct
+  $07AC  LD A,($FEAC) / AND $C0 / CP $C0 / JR Z,$07C3
+  $07B5  LD A,$01 / LD ($FED5),A / ... / JP $FEC9
+  $07C3  ... / JP $03D9
+  ```
+  `$0A87` (`sub_0a87h`) is the **raw command streamer only** - it writes
+  bytes out, full stop, with no result read anywhere in its body (verified
+  by full disassembly: `PUSH AF/BC/HL`, `CALL $0AC2` wait-not-busy,
+  stream loop, `POP HL/BC/AF`, `RET` - nothing touches port `$15` for
+  input). Contrast with `$0883` and `$0752`'s ISRs, which both `CALL
+  $0A78` (`sub_0a78h`) instead - the higher-level wrapper that streams
+  *and then reads back* the result via `sub_0aa0h`. `$0798` is simply
+  built differently: it re-issues a SENSE INTERRUPT STATUS as a bare
+  nudge and inspects `($FEAC)` - the *previous* result, from whichever
+  earlier SIS last wrote there - never the one it just issued. Nothing
+  downstream of `$0798` ever reads the fresh result either.
+
+  Put together: `$0798` is not a generic "drain the next pending startup
+  interrupt" handler at all, unlike `$0883`/`$0752` - it's a
+  differently-shaped handler for what's almost certainly a **different
+  real interrupt source** (a drive-ready or timing-related event, given
+  it specifically checks `($FEAC)` for the Drive Not Ready code `$C0`),
+  and it was only reached here because ISSUE-1 fix 2's budget (4, generic,
+  fired on every PIO-arm event) doesn't distinguish "another one of the
+  same post-reset batch" from "a structurally different later event."
+  The first two synthetic firings (→ `$0883`, → `$0752`) are the ones
+  this ROM's own structure actually confirms need to happen this way
+  (see ISSUE-1); this third one is very likely the fix 2 approximation
+  overreaching past where it's warranted.
+
+  **Not yet applied**: lowering the fix-2 budget from 4 to 2 is the
+  obvious next experiment, but it only trades this hang for an earlier
+  one (`$06C6`'s third wait, now fed by nothing) unless whatever *real*
+  event `$0798` is meant to respond to gets modeled too - and this
+  project doesn't yet know what that event is. Worth investigating
+  alongside T4's own open note (confirm which PIO bit - PA0 or PA1 -
+  actually carries the FDC's `INT`; `$0798`'s trigger may be a related,
+  still-unconfirmed wiring question) rather than guessed at blind.
+  Status: open, root cause pinned down precisely (the exact unread byte,
+  the exact ISR, and the exact reason ISSUE-1 fix 2 over-fires into it);
+  the actual fix needs a correct model of whatever event `$0798` expects,
+  not a change to `fdc.c`.
 
 ---
 
