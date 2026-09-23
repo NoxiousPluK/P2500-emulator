@@ -153,9 +153,11 @@ static void finish_command(P2500Fdc *fdc) {
             uint8_t res[2] = {st0, fdc->cylinder};
             set_result(fdc, res, 2);
             fdc->seek_int_pending = false;
+            if (fdc->verbose) fprintf(stderr, "[fdc] SENSE INTERRUPT STATUS -> ST0=$%02X PCN=$%02X (2 bytes)\n", st0, fdc->cylinder);
         } else {
             uint8_t res[1] = {0x80};
             set_result(fdc, res, 1);
+            if (fdc->verbose) fprintf(stderr, "[fdc] SENSE INTERRUPT STATUS -> Invalid Command $80 (1 byte)\n");
         }
         break;
     case 0x04: { /* SENSE DRIVE STATUS */
@@ -186,6 +188,8 @@ uint8_t p2500_fdc_read_data(P2500Fdc *fdc) {
         return 0x00;
     }
     uint8_t v = fdc->result[fdc->result_pos++];
+    if (fdc->verbose)
+        fprintf(stderr, "[fdc] read result byte %zu/%zu = $%02X\n", fdc->result_pos, fdc->result_len, v);
     if (fdc->result_pos >= fdc->result_len) {
         fdc->phase = P2500_FDC_IDLE;
         /* Real hardware clears /INT once the host has read through the

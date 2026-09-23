@@ -7,26 +7,78 @@
 
 /*
  * Z80A-DMA (Z8410) model for port $16 - the FDD card's data path between
- * the uPD765 (fixed I/O address $15) and RAM. See ../TODO.md
- * "2. Port $16 is the Z80A-DMA" for the evidence this decode is built on.
+ * the uPD765 (fixed I/O address $15) and RAM.
  *
- * The IPL only ever programs the DMA with one 20-byte register-load
- * template (copied from ROM $0B74, patched at three fields, then OTIR'd to
- * this port) - never the fully general WR0-WR6 byte stream the real chip
- * accepts in principle. This model tracks byte position within that fixed
- * template and decodes exactly the fields TODO.md cross-validated against
- * the RAM scratch area the ROM patches before sending (the offsets line
- * up 1:1 with $FEB4+n), rather than a byte-exact general decode of the
- * Z8410's WR0/WR1/WR2/WR4/WR5 bit fields - TODO.md T5 flags that fuller
- * decode as a stretch goal, not a blocker, since nothing in this firmware
- * exercises any other register sequence.
+ * An earlier version of this model assumed the IPL always sends one fixed
+ * 20-byte register-load template at fixed byte positions. That assumption
+ * broke on the READ DATA path (TODO.md ISSUE-2), which legitimately sends
+ * a shorter, different stream - and reading the real datasheet (see
+ * below) showed why: the Z80-DMA's register-load protocol was never
+ * positional to begin with. Every byte the chip receives at the "top
+ * level" (i.e. not already expected as a follow-up data byte for a
+ * register group already in progress) is self-describing: specific bits
+ * in that byte identify which of the seven write-register groups
+ * (WR0-WR6) it belongs to, and other bits in that same byte say how many
+ * of the following bytes carry more data for that group, and in what
+ * order. This lets real firmware send short, incremental "only
+ * reprogram what changed" streams instead of always resending
+ * everything - an intentional, documented Z80-DMA feature ("Next-
+ * operation loading without disturbing current operations", per the
+ * Zilog Component Data Book's product summary for the Z8410).
  *
- * WR6 command bytes ARE decoded by exact value - cross-checked against
- * both the IPL (sends $83 x6 to disable) and CP/M's SYSPBI.PHI (sends $C3
- * x6 then $AF). Recognizing them only at template position 0 (a fresh,
- * standalone command burst) or position >=17 (the trailer of the 20-byte
- * template) avoids misreading the direction byte at position 2 - $CF also
- * happens to be the WRITE-direction template's byte there.
+ * This model implements that real, general, self-describing protocol -
+ * not a position-based template - based on:
+ *   "Zilog Z80 Family CPU Peripherals User Manual" (UM008101-0601),
+ *   chapter "Direct Memory Access", section "Write Registers"
+ *   (Figures 39-46, manual pp. 92-107) - a clean, modern, typeset
+ *   document. Trusted here, unlike an earlier OCR'd scan this project
+ *   had already flagged as unreliable for this same chip (see TODO.md
+ *   T5's original caveat about the WR0 bit layout).
+ * Every group's identification bits and follow-byte rules below were
+ * additionally cross-checked, byte by byte, against two independent,
+ * real, captured streams from this ROM (see TODO.md ISSUE-2) and matched
+ * exactly - including two standalone WR6 "RESET AND DISABLE INTERRUPTS"
+ * ($A3) commands sent *in the middle* of the register stream, which only
+ * makes sense under a self-describing reading, never a fixed template.
+ *
+ * Group identification (checked in this order in p2500_dma_write's
+ * P2500_DMA_NEXT_BASE state - WR6 first since it's a simple, disjoint
+ * bit pattern; the two D7=0 groups next; the D7=1 groups last):
+ *   WR6: D7,D1,D0 = 1,1,1  (16 single-byte commands, D6-D2 select which -
+ *        already fully validated independently, see execute_command)
+ *   WR0: D7=0, D1D0 in {01,10,11} (not 00)      - class of operation
+ *   WR1: D7,D2,D1,D0 = 0,1,0,0                   - Port A device/timing
+ *   WR2: D7,D2,D1,D0 = 0,0,0,0                   - Port B device/timing
+ *   WR3: D7,D1,D0 = 0,0,0                        - match/mask, fast enables
+ *        NOTE: this pattern overlaps WR2's whenever WR3's own D2 ("stop
+ *        on match") happens to be 0 - the manual doesn't resolve this,
+ *        and neither real captured stream from this ROM ever sends a
+ *        WR3 byte, so it's only tried after WR2 fails to match
+ *        (documented judgment call, not confirmed against real
+ *        hardware - see TODO.md ISSUE-2's write-up).
+ *   WR4: D7,D1,D0 = 1,0,1                        - mode, Port B addr, ints
+ *   WR5: D7,D6,D2,D1,D0 = 1,0,0,1,0               - Ready/CE/EOB behavior
+ *
+ * Follow-byte rules (each base byte's own bits independently say which
+ * of its group's optional data bytes come next, always in the fixed
+ * order listed below - this is what replaces the old fixed-position
+ * template):
+ *   WR0: Port A addr low (D3), Port A addr high (D4),
+ *        block length low (D5), block length high (D6)
+ *   WR1/WR2: variable-timing byte (D6)
+ *   WR3: mask byte (D3), match byte (D4)
+ *   WR4: Port B addr low + high (D2 AND D3 together), then interrupt
+ *        control byte (D4) - which, when IT arrives, is itself decoded
+ *        the same way: pulse control byte follows if ITS D2 AND D3 are
+ *        both set, then the interrupt vector follows if ITS D4 is set.
+ *   WR5, WR6: no follow bytes (pure data byte / immediate command)
+ *
+ * Not implemented: WR3's mask/match bytes and WR4's pulse-control byte
+ * are correctly *parsed* (consumed in the right position, so the stream
+ * never desyncs if the ROM ever sends them) but their values are
+ * discarded - this model has no search-mode or pulse-counting behavior
+ * to feed them into, since nothing this project has traced ever uses
+ * either feature.
  */
 
 typedef enum {
@@ -35,20 +87,50 @@ typedef enum {
     P2500_DMA_DIR_MEMORY_TO_IO,  /* WRITE DATA: RAM (Port B) -> FDC ($15) */
 } P2500DmaDirection;
 
+/* What the next incoming byte means. P2500_DMA_NEXT_BASE (the queue
+ * empty) means a fresh, self-describing base register byte is expected;
+ * every other value means the byte is a follow-up data byte for the
+ * group currently being programmed. */
+typedef enum {
+    P2500_DMA_NEXT_BASE = 0,
+    P2500_DMA_NEXT_A_ADDR_LO,
+    P2500_DMA_NEXT_A_ADDR_HI,
+    P2500_DMA_NEXT_BLOCKLEN_LO,
+    P2500_DMA_NEXT_BLOCKLEN_HI,
+    P2500_DMA_NEXT_WR1_TIMING,
+    P2500_DMA_NEXT_WR2_TIMING,
+    P2500_DMA_NEXT_WR3_MASK,
+    P2500_DMA_NEXT_WR3_MATCH,
+    P2500_DMA_NEXT_B_ADDR_LO,
+    P2500_DMA_NEXT_B_ADDR_HI,
+    P2500_DMA_NEXT_INT_CTRL,
+    P2500_DMA_NEXT_PULSE_CTRL,
+    P2500_DMA_NEXT_VECTOR,
+} P2500DmaByteRole;
+
+/* WR4's own worst case (Port B addr low+high, interrupt control, pulse
+ * control, vector) is the deepest chain - 5 is enough headroom. */
+#define P2500_DMA_QUEUE_CAP 8
+
 typedef void (*P2500DmaInterruptCallback)(void *userdata, uint8_t vector);
 
 typedef struct {
-    uint8_t template_bytes[20];
-    int pos;
+    /* Parser state: a small FIFO of "what does the next raw byte mean"
+     * roles, queued by whichever base register byte is currently being
+     * expanded. Empty (queue_len==0) means the next byte is a fresh base
+     * register byte - see P2500DmaByteRole. */
+    P2500DmaByteRole queue[P2500_DMA_QUEUE_CAP];
+    int queue_len;
 
     P2500DmaDirection direction;
-    uint16_t block_length;   /* byte count, already +1'd from the wire value */
-    uint16_t port_b_addr;    /* RAM buffer address */
-    uint8_t vector;          /* end-of-block interrupt vector */
+    uint16_t block_length_raw; /* wire value (count-1), byte-addressable */
+    uint16_t block_length;     /* = block_length_raw + 1, recomputed live */
+    uint16_t port_b_addr;      /* RAM buffer address, byte-addressable */
+    uint8_t vector;            /* end-of-block interrupt vector */
 
     bool loaded;             /* WR6 $CF (Load) seen since last reset */
-    bool interrupts_enabled; /* WR6 $AB seen, cleared by $AF */
-    bool dma_enabled;        /* WR6 $87 seen, cleared by $83 */
+    bool interrupts_enabled; /* WR6 $AB seen, cleared by $AF (or WR3 D5) */
+    bool dma_enabled;        /* WR6 $87 seen, cleared by $83 (or WR3 D6) */
 
     P2500DmaInterruptCallback on_interrupt;
     void *interrupt_userdata;
