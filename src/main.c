@@ -88,6 +88,13 @@ int main(int argc, char **argv) {
     const char *vram_dump_path = NULL;
     unsigned long max_steps = 2000000UL;
     bool verbose_io = false;
+    /* --peek ADDR:LEN - hex-dump `len` bytes at `addr` (bank-aware, same
+     * view the CPU has) at exit. For live debugging of whatever region a
+     * stuck run's PC/DE/HL point at, when no static disassembly of that
+     * region exists yet. */
+    #define MAX_PEEKS 8
+    struct { uint16_t addr; uint16_t len; } peeks[MAX_PEEKS];
+    int num_peeks = 0;
     /* --poke ADDR:HEXBYTES - directly seed RAM before running, e.g. to
      * test a synthetic request block the way ../roms/sesam_banner_test.bin
      * did for the SESAM mechanism. See README.md "Reaching READ DATA". */
@@ -102,6 +109,16 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--dump-vram") && i + 1 < argc) vram_dump_path = argv[++i];
         else if (!strcmp(argv[i], "--max-steps") && i + 1 < argc) max_steps = strtoul(argv[++i], NULL, 0);
         else if (!strcmp(argv[i], "--verbose-io")) verbose_io = true;
+        else if (!strcmp(argv[i], "--peek") && i + 1 < argc) {
+            if (num_peeks >= MAX_PEEKS) { fprintf(stderr, "too many --peek args\n"); return 1; }
+            char *arg = argv[++i];
+            char *colon = strchr(arg, ':');
+            if (!colon) { fprintf(stderr, "bad --peek syntax, want ADDR:LEN (hex addr)\n"); return 1; }
+            *colon = '\0';
+            peeks[num_peeks].addr = (uint16_t)strtoul(arg, NULL, 16);
+            peeks[num_peeks].len = (uint16_t)strtoul(colon + 1, NULL, 0);
+            num_peeks++;
+        }
         else if (!strcmp(argv[i], "--poke") && i + 1 < argc) {
             if (num_pokes >= MAX_POKES) { fprintf(stderr, "too many --poke args\n"); return 1; }
             char *arg = argv[++i];
@@ -296,6 +313,17 @@ int main(int argc, char **argv) {
            "the ROM's own reset vector table whenever the EPROM is banked in): ");
     for (int i = 0; i < 16; i++) printf("%02X ", p2500_peek(&m, (uint16_t)i));
     printf("\n");
+
+    for (int p = 0; p < num_peeks; p++) {
+        printf("\n--peek $%04X:%u\n", peeks[p].addr, peeks[p].len);
+        for (int row = 0; row * 16 < peeks[p].len; row++) {
+            uint16_t base = (uint16_t)(peeks[p].addr + row * 16);
+            printf("  $%04X: ", base);
+            for (int col = 0; col < 16 && row * 16 + col < peeks[p].len; col++)
+                printf("%02X ", p2500_peek(&m, (uint16_t)(base + col)));
+            printf("\n");
+        }
+    }
 
     if (vram_dump_path) {
         FILE *f = fopen(vram_dump_path, "wb");
