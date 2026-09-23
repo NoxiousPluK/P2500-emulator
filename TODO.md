@@ -334,22 +334,44 @@ not `$04D5` as `main.c`'s landmark list assumes. Full table:
   blocking CBIOS are completely gone (`--verbose-io` confirms zero
   unhandled ports for the rest of the run).
 
-  **What's next isn't a CTC bug**: the boot now runs substantially
-  further into CBIOS and settles into a tight poll loop at `$E46C`
-  (`LD A,($E551) / INC A / RET Z`, called repeatedly from `$E48C` while
-  Z stays set - i.e. `($E551)` stays permanently `$FF`). Nothing in this
-  project's existing CBIOS disassembly notes covers this address range
-  yet. Shape strongly suggests a console-input wait (CBIOS's `CONST`
-  polling for a keypress that never comes, via whatever real interrupt -
-  quite possibly one of the COUNTER-mode CTC channels CBIOS armed with
-  interrupts enabled, per the `--verbose-io` log - would signal a
-  received serial byte) rather than a timing/hardware-model bug: running
-  20,000,000 steps instead of the usual ~1,000,000 changes nothing, and
-  the stuck-detector already confirms a genuine tight loop, not merely
-  "needs more time." Most likely next real blocker is keyboard/terminal
-  input, not another chip to reverse-engineer - worth confirming by
-  reading whichever CBIOS routine `$E46C` actually is before doing
-  anything else.
+  **What's next isn't a CTC bug - confirmed and pinned down further.**
+  The boot runs substantially further into CBIOS and settles into a
+  tight poll loop at `$E46C`. Using the new `--peek ADDR:LEN` flag (main.c)
+  to inspect memory this project has no static disassembly for yet:
+
+  - `$E200` is CP/M's standard BIOS jump table, byte-for-byte: index 2
+    (`$E206`) = `JP $E46C`, index 3 (`$E209`) = `JP $E48C`. These *are*
+    `CONST` (console status) and `CONIN` (console input) - not a guess,
+    the whole table's layout (BOOT/WBOOT/CONST/CONIN/CONOUT/LIST/PUNCH/
+    READER, in that order) matches the standard CP/M 2.2 vector exactly.
+  - `$CC00`+ holds live CCP (Console Command Processor) data, including
+    its embedded `"COPYRIGHT (C) 1979, DIGITAL RESEARCH"` sign-on string
+    - this is genuinely the CCP, loaded and running, not a stray jump
+    into the weeds.
+  - **`CONOUT` (`$E4C3`) is never called anywhere in the run** - checked
+    directly with a full, unsampled instruction trace over all 1.3M
+    steps, not inferred from the blank VRAM dump alone. So this isn't a
+    video-rendering gap; nothing was ever asked to be printed. This is a
+    **pre-banner gate**, not CCP's normal "print prompt, read command"
+    loop.
+  - The caller (`$D4FB`) is a small primitive: read-and-clear a flag byte
+    at `$D70E`, return immediately if it was already nonzero ("a
+    character is already buffered"), otherwise block on `CONIN`. That
+    flag is almost certainly set by a console-receive interrupt this
+    emulator doesn't generate - very likely tied to one of the CTC's
+    COUNTER-mode channels CBIOS armed with interrupts enabled (confirmed
+    via `--verbose-io`), which needs a real external clock pulse (the
+    actual incoming serial bit stream on port `$06`) that nothing
+    produces yet.
+
+  **Conclusion**: this is very likely a missing *input source* (real
+  keyboard/serial data feeding the emulator), not another chip to
+  reverse-engineer or another timing bug to chase. Confirmed not simply
+  "needs more time": running 20,000,000 steps instead of ~1,000,000
+  changes nothing, and the stuck-detector's own 200,000-step window
+  already confirms a genuine, stable tight loop. Next step, if picked up,
+  is almost certainly building a way to feed the emulator real
+  keystrokes on port `$06`, not more ROM archaeology.
 
 ---
 
