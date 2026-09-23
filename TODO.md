@@ -366,63 +366,101 @@ not `$04D5` as `main.c`'s landmark list assumes. Full table:
   for the first time ever. `$4A00` is still not reached; see ISSUE-2,
   encountered immediately after this fix while chasing the next stall.
 
-- **ISSUE-2: the READ DATA DMA-program stream starts 3 bytes late,
-  dropping WR0/WR1/direction-byte-1 — root cause found, not yet fixed.**
-  Found by extending the same trace technique into `sub_0b32h` (the `$06`
-  READ DATA DMA-setup routine, called from `$05CD`) once ISSUE-1 stopped
-  blocking it.
+- **ISSUE-2: the READ DATA DMA-program stream "starts 3 bytes late" —
+  RESOLVED, and it turned out not to be a bug at all.** Originally found
+  by tracing `sub_0b32h` (the `$06` READ DATA DMA-setup routine) sending
+  what looked like a 17-byte stream instead of the "full" 20-byte
+  template, starting 3 bytes in. The fix-1-then-2 write-up first read
+  this as a ROM control-flow bug (`sub_0b32h` leaving `HL=$FEB6` instead
+  of resetting it to `$FEB3` before the shared streaming routine).
 
-  `sub_0b32h` patches the DMA template's direction bytes *directly*,
-  skipping the normal `$0B96`/`$0BB4` field-patch path for that field:
-  ```
-  $0B36  LD HL,$FEB7 / LD (HL),$6D    ; payload offset 3 (direction byte 2)
-  $0B3B  DEC HL / LD (HL),$11         ; payload offset 2 (direction byte 1)
-  $0B3E  CALL $0B96                   ; byte-count / field-patch / stream chain
-  ```
-  This leaves `HL=$FEB6` going into `$0B96`. `$0B96` **preserves HL across
-  its whole body** (`PUSH HL` at entry, `POP HL` right before the final
-  `CALL $0B89`) purely to compute the transfer byte count into a
-  *different* register pair and to `CALL $0BB4` (which patches block
-  length/Port B address/vector by absolute address, not via HL) — so the
-  `HL=$FEB6` from `sub_0b32h` survives unchanged and gets handed straight
-  to `$0B89` (`sub_0b89h`, `LD B,(HL) / INC HL / LD C,$16 / OTIR`). `$0B89`
-  therefore reads `B=($FEB6)=$11=17` as its byte count and streams 17
-  bytes starting at `$FEB7=$6D` — **silently dropping the template's first
-  3 bytes** (`$0D` WR0, `$15` WR1, `$11` direction-byte-1) instead of
-  streaming the full, correctly-patched 20-byte block from `$FEB3`
-  (count)/`$FEB4` (payload). Confirmed live: `--verbose-io` now logs every
-  `[dma] write $XX at pos N]`, and the captured sequence for this call is
-  exactly `6D 15 FF 0F 2C A3 10 A3 9D 00 10 12 02 8A CF AB 87` (17 bytes,
-  matching `$FEB7`-`$FEC7` in a RAM dump) — while the RAM template itself,
-  independently checked, is fully correct end-to-end (`$FEB3`=`$14`=20,
-  `$FEB4`-`$FEC7` = `0D 15 11 6D 15 FF 0F 2C A3 10 A3 9D 00 10 12 02 8A CF
-  AB 87`, matching every field this document's own T5 decode expects).
-  This is a control-flow/register bug in the ROM's own ID=4 READ DATA
-  path, not a wrong assumption in `dma.c`'s decode offsets (which are
-  correct against the full template and unchanged).
+  That reading was wrong. Reading the real datasheet the project has on
+  hand for this exact part (`Datasheets and manuals/Zilog Z80 Family CPU
+  Peripherals User Manual.pdf`, chapter "Direct Memory Access", "Write
+  Registers", Figures 39-46) shows the Z80-DMA's register-load protocol
+  was never positional to begin with: every byte the chip receives at the
+  top level is **self-describing** — specific bits say which of WR0-WR6
+  it is, other bits say how many follow-up bytes come next. The chip
+  explicitly supports short, incremental "only reprogram what changed"
+  loads (the Data Book calls this out by name: "Next-operation loading
+  without disturbing current operations"), and the manual states plainly
+  that WR0 should specifically **not** be the first byte sent when only
+  changing direction. `sub_0b32h`'s 17-byte stream is exactly that: a
+  valid, complete, self-contained short reprogram (new direction + new
+  block length via one WR0 byte, `$6D`) that correctly omits re-sending
+  Port A's address, since Port A (the FDC, `$15`) never changes between
+  reads. Decoding the full stream byte-by-byte against the manual's bit
+  rules confirms it exactly, including two standalone WR6 `$A3` ("RESET
+  AND DISABLE INTERRUPTS") commands sent *mid-stream* — something a fixed
+  20-byte template could never explain, but which falls straight out of
+  the self-describing reading.
 
-  `sub_0b43h` (`$05` WRITE DATA, "template unmodified" per this doc's own
-  earlier read) never repoints HL away from `$FEB3` in the first place, so
-  it's very likely unaffected — not yet verified live, since nothing has
-  driven a WRITE DATA in any run so far.
+  **Fix**: `dma.c` was rewritten from a fixed-position template decoder
+  into a real self-describing parser (WR0/WR1/WR2/WR4/WR5/WR6 fully
+  implemented and cross-checked against two independent live-captured
+  streams; WR3 implemented defensively — see the file's own doc comment
+  for the one open bit-pattern ambiguity between WR2 and WR3 that the
+  manual doesn't resolve, and which nothing in this ROM's traced behavior
+  exercises anyway). Verified live: block length now decodes as the
+  correct, clean `4096` bytes (was `4260`), Port B address as `$1000`
+  (was `$8A02`, and `$1000` is exactly the boot sector's own load
+  address — sensible where the old value wasn't), and the interrupt
+  vector as `$02` (was `$AB`, actually a WR6 command byte misread as
+  data). `--verbose-io` now logs every decoded WR group and field.
+  Status: resolved and committed.
 
-  **Open question, not yet resolved**: is this a genuine ROM bug (the boot
-  IPL's on-board driver reading a stale/partial stream that a real
-  Z80-DMA would also mis-program from), or does a real Z80-DMA legitimately
-  accept a "continuation" load that only updates registers from WR1
-  onward, relying on WR0 already being programmed identically from
-  something earlier in this run? Nothing in this run ever sent a *full*
-  20-byte DMA load before this point (only the six standalone `$83`
-  DISABLE DMA bytes at boot, confirmed via the same `[dma] write` log), so
-  if a real chip requires a byte matching WR0's actual bit pattern to
-  (re)arm register loading, `$11` would need to happen to satisfy that
-  pattern for this to work on real hardware too — genuinely uncertain
-  without the Z80-DMA datasheet's WR-select bit layout, which this project
-  has already flagged as unreliable to trust from OCR alone (see T5).
-  Deliberately not guess-fixed. `dma.c`'s `p2500_dma_write` now logs every
-  byte + position under `--verbose-io` for whoever investigates next.
-  Status: open, root cause pinned down precisely, fix withheld pending a
-  decision on the open question above.
+- **ISSUE-3: a live run now gets all the way to programming the DMA
+  correctly for READ DATA, then deadlocks *before* the actual `READ
+  DATA` opcode is ever written to port `$15` — root cause found, not yet
+  fixed.** Found immediately after ISSUE-2's fix let the boot run far
+  enough to reach this point for the first time.
+
+  Sequence observed (`--verbose-io`, added `[fdc]` logging for SENSE
+  INTERRUPT STATUS results and result-phase reads): SPECIFY, one
+  defensive SENSE INTERRUPT STATUS (Invalid Command), three ISSUE-1
+  synthetic startup interrupts each draining a real SENSE INTERRUPT
+  STATUS (ST0=$20, 2 bytes, both read), then `$059C`'s own handler issues
+  a **fourth** SENSE INTERRUPT STATUS, which correctly returns Invalid
+  Command (1 byte, nothing left pending) — and that one byte is **never
+  read**. No `[fdc] read result byte` line follows it anywhere in the
+  run. `fdc->phase` stays `P2500_FDC_RESULT` forever.
+
+  The ROM then builds the READ DATA command buffer at `$FEA2` (length 9,
+  opcode `$46` = `$06` READ DATA with the MFM modifier bit set — correct,
+  `find_command` already masks that off) and calls `sub_0a87h` (`$07DF:
+  CALL $0A87`) to stream it to port `$15`. That routine's first step is
+  `sub_0ac2h`: busy-wait until Main Status Register bit 4 (CB, "FDC
+  busy") clears. Since T10 made `CB = (phase != IDLE)`, and phase is
+  stuck at `RESULT` from the unread SIS byte above, `CB` never clears —
+  `sub_0ac2h` spins forever, and the READ DATA opcode byte is never even
+  attempted. (If it were attempted: `fdc.c`'s `p2500_fdc_write_data`
+  silently drops any byte written while `phase` is `RESULT` — logged
+  under `--verbose-io` as `unexpected write ... while phase=2`, but nothing
+  in this run ever reaches that log line, confirming the hang is entirely
+  at the `sub_0ac2h` wait, one step earlier.)
+
+  **Two compounding, unconfirmed-against-real-hardware modeling choices**
+  are implicated, either of which could be the actual fix:
+  1. T10's `CB = (phase != IDLE)` may be too broad. The Main Status
+     Register's real meaning for bit 4 is "a read or write command is in
+     progress" — arguably that should only cover `COMMAND` phase (still
+     accumulating parameter bytes) and active execution, not sitting in
+     `RESULT` phase with a byte parked and waiting to be read. Narrowing
+     it to `cb = (phase == P2500_FDC_COMMAND)` would make `sub_0ac2h`
+     pass immediately here.
+  2. Separately, `p2500_fdc_write_data` currently treats a command byte
+     arriving during an unread `RESULT` phase as invalid and drops it.
+     Real hardware almost certainly can't permanently wedge itself from
+     one skipped defensive status read — a driver bug that fragile
+     wouldn't have shipped — so real silicon likely either (a) doesn't
+     actually reach this state the way our model does (supporting fix 1
+     above instead), or (b) accepts the new command byte as implicitly
+     abandoning the stale result. Neither is confirmed; this project
+     doesn't have a µPD765 datasheet on hand the way it now does for the
+     Z8410 DMA (see ISSUE-2) to check against.
+  Status: open, root cause pinned down precisely (down to the exact
+  missing read), fix withheld pending a decision on which of the two
+  above to apply — or both.
 
 ---
 
