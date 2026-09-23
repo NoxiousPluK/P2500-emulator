@@ -324,54 +324,60 @@ not `$04D5` as `main.c`'s landmark list assumes. Full table:
   separately confirmed by continuity on this board but the only sane
   option). Control-word bits, the shared interrupt-vector register
   (channel-identifier bits auto-inserted per real hardware), and TIMER
-  mode's down-counter/auto-reload/ZC-TO-interrupt are modeled directly
-  off "Zilog Z80 Family CPU Peripherals User Manual" (the same manual
-  that resolved the DMA's real protocol - see ISSUE-2), not inferred from
-  ROM behavior. COUNTER mode is recognized but doesn't tick - it needs a
-  real external CLK/TRG pulse source this emulator doesn't generate (see
-  ctc.h; nothing in this project has identified what drives it yet).
-  Verified live: the repeated unhandled `OUT ($00)`-`OUT ($03)` that was
-  blocking CBIOS are completely gone (`--verbose-io` confirms zero
-  unhandled ports for the rest of the run).
+  mode's down-counter/auto-reload/ZC-TO-interrupt, and (see below)
+  channel-to-channel ZC/TO->CLK/TRG chaining, are modeled directly off
+  "Zilog Z80 Family CPU Peripherals User Manual" (the same manual that
+  resolved the DMA's real protocol - see ISSUE-2), not inferred blind
+  from ROM behavior. Verified live: the repeated unhandled `OUT ($00)`-
+  `OUT ($03)` that was blocking CBIOS are completely gone.
 
-  **What's next isn't a CTC bug - confirmed and pinned down further.**
-  The boot runs substantially further into CBIOS and settles into a
-  tight poll loop at `$E46C`. Using the new `--peek ADDR:LEN` flag (main.c)
-  to inspect memory this project has no static disassembly for yet:
-
+  **Investigated the resulting `$E46C` stall thoroughly before concluding
+  anything.** Using a new `--peek ADDR:LEN` flag (main.c) to inspect
+  memory this project had no static disassembly for:
   - `$E200` is CP/M's standard BIOS jump table, byte-for-byte: index 2
-    (`$E206`) = `JP $E46C`, index 3 (`$E209`) = `JP $E48C`. These *are*
-    `CONST` (console status) and `CONIN` (console input) - not a guess,
-    the whole table's layout (BOOT/WBOOT/CONST/CONIN/CONOUT/LIST/PUNCH/
-    READER, in that order) matches the standard CP/M 2.2 vector exactly.
-  - `$CC00`+ holds live CCP (Console Command Processor) data, including
-    its embedded `"COPYRIGHT (C) 1979, DIGITAL RESEARCH"` sign-on string
-    - this is genuinely the CCP, loaded and running, not a stray jump
-    into the weeds.
-  - **`CONOUT` (`$E4C3`) is never called anywhere in the run** - checked
-    directly with a full, unsampled instruction trace over all 1.3M
-    steps, not inferred from the blank VRAM dump alone. So this isn't a
-    video-rendering gap; nothing was ever asked to be printed. This is a
-    **pre-banner gate**, not CCP's normal "print prompt, read command"
-    loop.
-  - The caller (`$D4FB`) is a small primitive: read-and-clear a flag byte
-    at `$D70E`, return immediately if it was already nonzero ("a
-    character is already buffered"), otherwise block on `CONIN`. That
-    flag is almost certainly set by a console-receive interrupt this
-    emulator doesn't generate - very likely tied to one of the CTC's
-    COUNTER-mode channels CBIOS armed with interrupts enabled (confirmed
-    via `--verbose-io`), which needs a real external clock pulse (the
-    actual incoming serial bit stream on port `$06`) that nothing
-    produces yet.
+    (`$E206`) = `JP $E46C` = `CONST` (console status), index 3 (`$E209`)
+    = `JP $E48C` = `CONIN` (console input) - the whole table's layout
+    (BOOT/WBOOT/CONST/CONIN/CONOUT/LIST/PUNCH/READER) matches the
+    standard CP/M 2.2 vector exactly. `$CC00`+ holds live CCP data
+    including its embedded `"COPYRIGHT (C) 1979, DIGITAL RESEARCH"`
+    sign-on string - this is genuinely the CCP, loaded and running.
+  - Checked (and ruled out) two specific alternative explanations before
+    settling on "needs real input": (1) `CONOUT` (`$E4C3`) is never
+    called anywhere in the run (checked with a full, unsampled
+    instruction trace over all 1.3M steps) - so this isn't a stalled
+    banner-print waiting behind a rendering gap, it's a genuine
+    *pre*-banner gate. (2) CBIOS does perform a real SESAM check right
+    beforehand (`$E448`: `OUTI` sends `$03` to port `$0F`, `INIR` reads 3
+    bytes back, matching the IPL's own dongle protocol exactly) - but it
+    runs to completion and returns normally ("not present", a flag set
+    to 1), it doesn't gate whether `CONST`/`CONIN` get called.
+  - The `CONST`/`CONIN` caller (`$D4FB`) is a small primitive:
+    read-and-clear a flag at `$D70E`, return immediately if it was
+    already nonzero, otherwise block on `CONIN`.
 
-  **Conclusion**: this is very likely a missing *input source* (real
-  keyboard/serial data feeding the emulator), not another chip to
-  reverse-engineer or another timing bug to chase. Confirmed not simply
-  "needs more time": running 20,000,000 steps instead of ~1,000,000
-  changes nothing, and the stuck-detector's own 200,000-step window
-  already confirms a genuine, stable tight loop. Next step, if picked up,
-  is almost certainly building a way to feed the emulator real
-  keystrokes on port `$06`, not more ROM archaeology.
+  **Root cause, confirmed by fixing it**: that flag is set by a
+  console-receive interrupt that depends on CTC channels 1-3 (all
+  COUNTER mode, `tc=1`, interrupts enabled) ticking - and they never did,
+  because `p2500_ctc_tick()` only advanced TIMER-mode channels. The
+  control words CBIOS actually programs are the textbook Z80-CTC
+  baud-generator pattern: channel 0 is always TIMER mode with interrupts
+  *disabled* (`tc=$D0` - it only needs to produce pulses, not interrupt
+  the CPU), while channels 1-3 are COUNTER mode expecting to fire on
+  every incoming pulse. Real hardware wires channel 0's ZC/TO output pin
+  into channels 1-3's CLK/TRG input pins; `p2500_ctc_tick()` now does the
+  same (not confirmed by board continuity, but the only source of pulses
+  this emulator has, and the control-word shapes fit it exactly).
+
+  **Verified live**: with the chain wired up, the `$E46C` tight loop is
+  completely gone - CTC channels 1/2/3 fire real interrupts
+  (vectors `$92`/`$94`/`$96`), and the run moves into a *different*,
+  correct pattern: **19,014 reads of the documented RX port `$06`**
+  (TODO.md's own port map: `$04` TX / `$06` RX, 9600-8N-2), all
+  currently unhandled (returning the default `$FF`). This is no longer a
+  hardware-timing bug - it's CBIOS correctly, actively polling for real
+  serial/keyboard data that nothing supplies yet. Next step, if picked
+  up, is building a way to feed the emulator real keystrokes on port
+  `$06`, not more chip modeling.
 
 ---
 

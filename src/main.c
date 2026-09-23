@@ -225,10 +225,10 @@ int main(int argc, char **argv) {
             unsigned long from = strtoul(getenv("P2500_TRACE_FROM"), NULL, 0);
             unsigned long to = strtoul(getenv("P2500_TRACE_TO"), NULL, 0);
             if (step >= from && step <= to)
-                fprintf(stderr, "[trace %lu] PC=$%04X op=%02X %02X %02X SP=$%04X DE=$%02X%02X HL=$%02X%02X\n",
+                fprintf(stderr, "[trace %lu] PC=$%04X op=%02X %02X %02X SP=$%04X BC=$%02X%02X DE=$%02X%02X HL=$%02X%02X A=$%02X\n",
                         step, pc, p2500_peek(&m, pc), p2500_peek(&m, (uint16_t)(pc+1)),
                         p2500_peek(&m, (uint16_t)(pc+2)),
-                        m.cpu.sp, m.cpu.d, m.cpu.e, m.cpu.h, m.cpu.l);
+                        m.cpu.sp, m.cpu.b, m.cpu.c, m.cpu.d, m.cpu.e, m.cpu.h, m.cpu.l, m.cpu.a);
         }
 
         if (pc == 0x0000) {

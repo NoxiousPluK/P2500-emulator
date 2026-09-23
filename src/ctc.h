@@ -34,15 +34,23 @@
  * (shared per-chip, channel identifier bits auto-inserted per Table 3),
  * TIMER mode's down-counter with auto-reload and ZC/TO interrupt.
  *
- * What's NOT modeled: COUNTER mode's external CLK/TRG pulse counting
- * (nothing in this emulator generates such pulses - the P2500's own
- * source, presumably a UART-adjacent baud clock, isn't identified yet);
- * real prescaler-accurate timing (there's no cycle-accurate clock in
+ * COUNTER mode's external CLK/TRG pulse counting is modeled for one
+ * specific, well-evidenced case: channel 0's ZC/TO output feeding
+ * channels 1-3's CLK/TRG input (see p2500_ctc_tick()) - the standard
+ * "one baud-rate generator feeds several per-line dividers" Z80-CTC
+ * pattern, and the only pulse source this emulator can supply at all.
+ * Not confirmed by schematic/continuity on this specific board, but
+ * strongly indicated by the actual control words CBIOS programs (see
+ * p2500_ctc_tick()'s own comment). A COUNTER-mode channel with no such
+ * driver (e.g. one meant to count real external device pulses unrelated
+ * to another CTC channel) will never tick.
+ *
+ * There is no real prescaler-accurate timing (no cycle-accurate clock in
  * this emulator, just one z80_step() per host call) - p2500_ctc_tick(),
  * called once per instruction from p2500_step(), decrements active
- * TIMER-mode channels by one time-constant-scaled unit per call, close
- * enough to let CTC-driven delay loops and interrupts terminate rather
- * than exact real-world baud timing.
+ * channels by one time-constant-scaled unit per call, close enough to
+ * let CTC-driven delay loops and interrupts terminate rather than exact
+ * real-world baud timing.
  */
 
 #define P2500_CTC_CHANNELS 4

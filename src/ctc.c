@@ -78,19 +78,45 @@ uint8_t p2500_ctc_read(P2500Ctc *ctc, int channel) {
     return (uint8_t)(ctc->prescaler_256[channel] ? raw / 4 : raw);
 }
 
-void p2500_ctc_tick(P2500Ctc *ctc) {
-    for (int ch = 0; ch < P2500_CTC_CHANNELS; ch++) {
-        if (ctc->counter_mode[ch] || !ctc->started[ch]) continue; /* COUNTER mode needs a real CLK/TRG pulse this emulator doesn't generate - see ctc.h */
-        if (ctc->counter[ch] == 0) continue;
-        ctc->counter[ch]--;
-        if (ctc->counter[ch] != 0) continue;
+/* Decrements one channel by one pulse. Returns true if it just crossed
+ * zero (a ZC/TO pulse), having already reloaded and fired its interrupt
+ * if enabled. */
+static bool pulse_channel(P2500Ctc *ctc, int ch) {
+    if (!ctc->started[ch] || ctc->counter[ch] == 0) return false;
+    ctc->counter[ch]--;
+    if (ctc->counter[ch] != 0) return false;
 
-        reload(ctc, ch);
-        if (ctc->int_enabled[ch] && ctc->on_interrupt) {
-            uint8_t vector = (uint8_t)(ctc->vector_base | (ch << 1));
-            if (ctc->verbose)
-                fprintf(stderr, "[ctc] channel %d ZC/TO, vector=$%02X\n", ch, vector);
-            ctc->on_interrupt(ctc->interrupt_userdata, vector);
+    reload(ctc, ch);
+    if (ctc->int_enabled[ch] && ctc->on_interrupt) {
+        uint8_t vector = (uint8_t)(ctc->vector_base | (ch << 1));
+        if (ctc->verbose)
+            fprintf(stderr, "[ctc] channel %d ZC/TO, vector=$%02X\n", ch, vector);
+        ctc->on_interrupt(ctc->interrupt_userdata, vector);
+    }
+    return true;
+}
+
+void p2500_ctc_tick(P2500Ctc *ctc) {
+    /* Channel 0's ZC/TO output pin is wired into channels 1-3's CLK/TRG
+     * input on real hardware - the textbook Z80-CTC "one channel as baud-
+     * rate generator, the rest as per-line dividers" pattern (see ctc.h).
+     * Not confirmed by schematic/continuity on this board, but strongly
+     * indicated by the actual control words CBIOS programs: channel 0 is
+     * always TIMER mode with interrupts *disabled* (it only needs to
+     * produce pulses, not interrupt the CPU itself), while channels 1-3
+     * are COUNTER mode with interrupts enabled and a time constant of 1
+     * (fire on every incoming pulse) - exactly what "bit-bang the serial
+     * line against CTC timing" (TODO.md T16) needs, and otherwise
+     * unreachable, since nothing else in this emulator ever drives a
+     * COUNTER-mode channel's CLK/TRG pin. */
+    bool ch0_pulse = false;
+    if (!ctc->counter_mode[0]) ch0_pulse = pulse_channel(ctc, 0);
+
+    for (int ch = 1; ch < P2500_CTC_CHANNELS; ch++) {
+        if (ctc->counter_mode[ch]) {
+            if (ch0_pulse) pulse_channel(ctc, ch);
+        } else {
+            pulse_channel(ctc, ch);
         }
     }
 }
