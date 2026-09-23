@@ -321,7 +321,12 @@ not `$04D5` as `main.c`'s landmark list assumes. Full table:
 - [ ] **T16. Add a CTC at `$00`–`$03`** — not needed for disk boot, but
   needed the moment you want the keyboard or printer, both of which are
   bit-banged against CTC timing (HWTEST V100: port `$04` TX, port `$06`
-  RX, 9600-8N-2).
+  RX, 9600-8N-2). **Confirmed needed now**: with Phase 1 complete and
+  `machine.c`'s IM2 table-page fix landed (see ROADMAP.md), a live
+  `--disk` run now runs deep into CP/M's own CBIOS (`SYSPBI.PHI`) and
+  stalls on repeated unhandled `OUT` to ports `$00`-`$03` (`--verbose-io`
+  confirms it) - this is now the concrete next blocker, not a
+  hypothetical future one.
 
 ---
 
