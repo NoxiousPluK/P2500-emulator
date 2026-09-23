@@ -80,7 +80,18 @@ static void do_read_data(P2500Fdc *fdc) {
     /* command[0]=opcode, [1]=unit/head, [2]=C, [3]=H, [4]=R, [5]=N, ... */
     uint8_t c = fdc->command[2];
     uint8_t r = fdc->command[4];
-    size_t lba = (size_t)c * P2500_FDC_SECTORS_PER_TRACK + (r - 1);
+    /* Philips' own P2500/P2000M disk format writes the on-disk track ID
+     * one higher than the physical track (documented directly by a P2500
+     * owner debugging this exact mismatch against stock 22DISK: "Logische
+     * Tracknummer ist immer um 1 hoeher als die physische" - see
+     * "Information from the internet/...Diskettenhandling...VzEkC..." and
+     * TODO.md ISSUE-4). The ROM issues C matching what's recorded on the
+     * disk (the logical ID), so the physical track - and this flat .raw
+     * dump's own track order - is C-1, not C. Confirmed: C=1,R=1 (the
+     * IPL's real first read) resolves to byte offset 0, the disk's
+     * well-established, byte-exact boot sector content. */
+    size_t physical_track = c > 0 ? (size_t)(c - 1) : 0;
+    size_t lba = physical_track * P2500_FDC_SECTORS_PER_TRACK + (r - 1);
     size_t off = lba * P2500_FDC_SECTOR_SIZE;
 
     if (!fdc->disk || off + P2500_FDC_SECTOR_SIZE > fdc->disk_size) {
