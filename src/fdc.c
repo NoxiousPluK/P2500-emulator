@@ -1,0 +1,219 @@
+#include "fdc.h"
+#include <stdio.h>
+#include <string.h>
+
+typedef struct {
+    uint8_t opcode;
+    const char *name;
+    size_t total_len; /* including opcode byte */
+} CmdInfo;
+
+static const CmdInfo COMMANDS[] = {
+    {0x03, "SPECIFY", 3},
+    {0x04, "SENSE DRIVE STATUS", 2},
+    {0x06, "READ DATA", 9},
+    {0x07, "RECALIBRATE", 2},
+    {0x08, "SENSE INTERRUPT STATUS", 1},
+    {0x0F, "SEEK", 3},
+};
+#define NUM_COMMANDS (sizeof(COMMANDS) / sizeof(COMMANDS[0]))
+
+static const CmdInfo *find_command(uint8_t opcode_byte) {
+    uint8_t opcode = opcode_byte & 0x1F;
+    for (size_t i = 0; i < NUM_COMMANDS; i++)
+        if (COMMANDS[i].opcode == opcode) return &COMMANDS[i];
+    return NULL;
+}
+
+void p2500_fdc_init(P2500Fdc *fdc, const uint8_t *disk, size_t disk_size) {
+    memset(fdc, 0, sizeof(*fdc));
+    fdc->phase = P2500_FDC_IDLE;
+    fdc->cylinder = 0;
+    fdc->last_seek_ok = true;
+    fdc->disk = disk;
+    fdc->disk_size = disk_size;
+    fdc->startup_interrupts_remaining = 4; /* see fdc.h - real max drive count */
+}
+
+uint8_t p2500_fdc_read_status(P2500Fdc *fdc) {
+    uint8_t rqm = 1; /* always ready for the next byte in this simplified model */
+    uint8_t dio = (fdc->phase == P2500_FDC_RESULT) ? 1 : 0;
+    /* CB (FDC Busy): set for the whole command+execution+result phase, not
+     * just while it's IDLE waiting for the next opcode byte - visible to a
+     * driver that polls $14 mid-command (e.g. between a multi-byte
+     * command's parameter writes). EXM (bit 5, "execution phase, non-DMA
+     * transfer in progress") is not modeled: this FDC's READ DATA hands
+     * its whole block to the DMA in one memcpy (dma.c) rather than
+     * byte-at-a-time through port $15, so there is no CPU-visible window
+     * where EXM would read 1 (TODO.md T10). */
+    uint8_t cb = (fdc->phase != P2500_FDC_IDLE) ? 1 : 0;
+    return (uint8_t)((rqm << 7) | (dio << 6) | (cb << 4));
+}
+
+static void fire_interrupt(P2500Fdc *fdc) {
+    fdc->int_line = true;
+    if (fdc->on_interrupt) fdc->on_interrupt(fdc->interrupt_userdata);
+}
+
+void p2500_fdc_raise_startup_interrupt(P2500Fdc *fdc) {
+    if (fdc->real_operation_started || fdc->startup_interrupts_remaining <= 0) return;
+    fdc->startup_interrupts_remaining--;
+    fdc->seek_int_pending = true;
+    if (fdc->verbose)
+        fprintf(stderr, "[fdc] post-reset unsolicited interrupt (ISSUE-1 fix 2, %d remaining)\n",
+                fdc->startup_interrupts_remaining);
+    fire_interrupt(fdc);
+}
+
+static void set_result(P2500Fdc *fdc, const uint8_t *bytes, size_t n) {
+    memcpy(fdc->result, bytes, n);
+    fdc->result_len = n;
+    fdc->result_pos = 0;
+    fdc->phase = n ? P2500_FDC_RESULT : P2500_FDC_IDLE;
+}
+
+static void do_read_data(P2500Fdc *fdc) {
+    /* command[0]=opcode, [1]=unit/head, [2]=C, [3]=H, [4]=R, [5]=N, ... */
+    uint8_t c = fdc->command[2];
+    uint8_t r = fdc->command[4];
+    size_t lba = (size_t)c * P2500_FDC_SECTORS_PER_TRACK + (r - 1);
+    size_t off = lba * P2500_FDC_SECTOR_SIZE;
+
+    if (!fdc->disk || off + P2500_FDC_SECTOR_SIZE > fdc->disk_size) {
+        if (fdc->verbose)
+            fprintf(stderr, "[fdc] READ DATA C=%u R=%u out of range (off=0x%zx)\n",
+                    c, r, off);
+        uint8_t res[7] = {0x40, 0x00, 0x00, c, fdc->command[3], r, fdc->command[5]};
+        set_result(fdc, res, 7);
+        fire_interrupt(fdc);
+        return;
+    }
+
+    if (fdc->ram && fdc->dma) {
+        size_t avail = fdc->disk_size - off;
+        p2500_dma_deliver(fdc->dma, fdc->ram, fdc->disk + off, avail);
+        if (fdc->verbose)
+            fprintf(stderr, "[fdc] READ DATA C=%u R=%u -> disk offset 0x%zx, "
+                            "handed to DMA\n", c, r, off);
+    } else if (fdc->verbose) {
+        fprintf(stderr, "[fdc] READ DATA C=%u R=%u -> sector ready but no "
+                        "RAM/DMA wired up, dropped\n", c, r);
+    }
+
+    uint8_t res[7] = {0x00, 0x00, 0x00, c, fdc->command[3], (uint8_t)(r + 1), fdc->command[5]};
+    set_result(fdc, res, 7);
+    fire_interrupt(fdc);
+}
+
+static void finish_command(P2500Fdc *fdc) {
+    uint8_t opcode = fdc->command[0] & 0x1F;
+    const CmdInfo *info = find_command(fdc->command[0]);
+    if (fdc->verbose) {
+        fprintf(stderr, "[fdc] command %s (opcode $%02X) args=[",
+                info ? info->name : "UNKNOWN", opcode);
+        for (size_t i = 1; i < fdc->command_len; i++)
+            fprintf(stderr, "$%02X ", fdc->command[i]);
+        fprintf(stderr, "]\n");
+    }
+
+    /* Once a real disk operation is under way, stop synthesizing startup
+     * interrupts (TODO.md ISSUE-1 fix 2) - they exist only to unblock the
+     * driver's post-reset drain loop, not to stand in for real completions. */
+    if (opcode == 0x07 || opcode == 0x0F || opcode == 0x06)
+        fdc->real_operation_started = true;
+
+    switch (opcode) {
+    case 0x07: /* RECALIBRATE */
+        fdc->cylinder = 0;
+        fdc->last_seek_ok = true;
+        fdc->phase = P2500_FDC_IDLE;
+        fdc->result_len = 0;
+        fdc->seek_int_pending = true;
+        fire_interrupt(fdc);
+        break;
+    case 0x0F: /* SEEK */
+        fdc->cylinder = fdc->command_len > 2 ? fdc->command[2] : 0;
+        fdc->last_seek_ok = true;
+        fdc->phase = P2500_FDC_IDLE;
+        fdc->result_len = 0;
+        fdc->seek_int_pending = true;
+        fire_interrupt(fdc);
+        break;
+    case 0x08: /* SENSE INTERRUPT STATUS */
+        /* Real uPD765: SENSE INTERRUPT STATUS reports (and clears) a
+         * Recalibrate/Seek completion that's actually pending - ST0 +
+         * PCN, 2 result bytes. Issued with nothing pending (this ROM
+         * does exactly that once, defensively, right after SPECIFY -
+         * see TODO.md ISSUE-1), it returns Invalid Command, 1 byte, not
+         * a fabricated "Seek End". Previously this always returned the
+         * 2-byte Seek End form regardless of whether anything was
+         * pending, which is what ISSUE-1's fix (1) targets. */
+        if (fdc->seek_int_pending) {
+            uint8_t st0 = fdc->last_seek_ok ? 0x20 : 0x40;
+            uint8_t res[2] = {st0, fdc->cylinder};
+            set_result(fdc, res, 2);
+            fdc->seek_int_pending = false;
+        } else {
+            uint8_t res[1] = {0x80};
+            set_result(fdc, res, 1);
+        }
+        break;
+    case 0x04: { /* SENSE DRIVE STATUS */
+        uint8_t st3 = (fdc->cylinder == 0) ? 0x28 : 0x20;
+        uint8_t res[1] = {st3};
+        set_result(fdc, res, 1);
+        break;
+    }
+    case 0x03: /* SPECIFY */
+        fdc->phase = P2500_FDC_IDLE;
+        fdc->result_len = 0;
+        break;
+    case 0x06: /* READ DATA */
+        do_read_data(fdc);
+        break;
+    default: {
+        uint8_t res[1] = {0x80}; /* abnormal termination, invalid command */
+        set_result(fdc, res, 1);
+        break;
+    }
+    }
+}
+
+uint8_t p2500_fdc_read_data(P2500Fdc *fdc) {
+    if (fdc->phase != P2500_FDC_RESULT || fdc->result_pos >= fdc->result_len) {
+        if (fdc->verbose)
+            fprintf(stderr, "[fdc] read past end of result phase\n");
+        return 0x00;
+    }
+    uint8_t v = fdc->result[fdc->result_pos++];
+    if (fdc->result_pos >= fdc->result_len) {
+        fdc->phase = P2500_FDC_IDLE;
+        /* Real hardware clears /INT once the host has read through the
+         * result phase - the same read that hands back SENSE INTERRUPT
+         * STATUS's ST0/PCN for the seek/recalibrate case, or the READ
+         * DATA/etc. status bytes otherwise (see TODO.md T9). */
+        fdc->int_line = false;
+    }
+    return v;
+}
+
+void p2500_fdc_write_data(P2500Fdc *fdc, uint8_t value) {
+    if (fdc->phase == P2500_FDC_IDLE) {
+        const CmdInfo *info = find_command(value);
+        fdc->command[0] = value;
+        fdc->command_len = 1;
+        fdc->command_expected = info ? info->total_len : 1;
+        if (fdc->command_expected <= 1) {
+            finish_command(fdc);
+        } else {
+            fdc->phase = P2500_FDC_COMMAND;
+        }
+    } else if (fdc->phase == P2500_FDC_COMMAND) {
+        if (fdc->command_len < sizeof(fdc->command))
+            fdc->command[fdc->command_len++] = value;
+        if (fdc->command_len >= fdc->command_expected)
+            finish_command(fdc);
+    } else if (fdc->verbose) {
+        fprintf(stderr, "[fdc] unexpected write $%02X while phase=%d\n", value, fdc->phase);
+    }
+}
