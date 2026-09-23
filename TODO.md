@@ -318,15 +318,38 @@ not `$04D5` as `main.c`'s landmark list assumes. Full table:
   `$01C3`, never read) and confirm whether anything reads port `$05`
   (`SYSPBI.PHI` does, the IPL does not).
 
-- [ ] **T16. Add a CTC at `$00`–`$03`** — not needed for disk boot, but
-  needed the moment you want the keyboard or printer, both of which are
-  bit-banged against CTC timing (HWTEST V100: port `$04` TX, port `$06`
-  RX, 9600-8N-2). **Confirmed needed now**: with Phase 1 complete and
-  `machine.c`'s IM2 table-page fix landed (see ROADMAP.md), a live
-  `--disk` run now runs deep into CP/M's own CBIOS (`SYSPBI.PHI`) and
-  stalls on repeated unhandled `OUT` to ports `$00`-`$03` (`--verbose-io`
-  confirms it) - this is now the concrete next blocker, not a
-  hypothetical future one.
+- [x] **T16. Add a CTC at `$00`–`$03`.** Done: `src/ctc.{c,h}`, a real
+  Z80A-CTC model (4 independently-programmed channels, one per port -
+  `channel = port & 3`, the standard Z80 CS0/CS1-from-A0/A1 wiring, not
+  separately confirmed by continuity on this board but the only sane
+  option). Control-word bits, the shared interrupt-vector register
+  (channel-identifier bits auto-inserted per real hardware), and TIMER
+  mode's down-counter/auto-reload/ZC-TO-interrupt are modeled directly
+  off "Zilog Z80 Family CPU Peripherals User Manual" (the same manual
+  that resolved the DMA's real protocol - see ISSUE-2), not inferred from
+  ROM behavior. COUNTER mode is recognized but doesn't tick - it needs a
+  real external CLK/TRG pulse source this emulator doesn't generate (see
+  ctc.h; nothing in this project has identified what drives it yet).
+  Verified live: the repeated unhandled `OUT ($00)`-`OUT ($03)` that was
+  blocking CBIOS are completely gone (`--verbose-io` confirms zero
+  unhandled ports for the rest of the run).
+
+  **What's next isn't a CTC bug**: the boot now runs substantially
+  further into CBIOS and settles into a tight poll loop at `$E46C`
+  (`LD A,($E551) / INC A / RET Z`, called repeatedly from `$E48C` while
+  Z stays set - i.e. `($E551)` stays permanently `$FF`). Nothing in this
+  project's existing CBIOS disassembly notes covers this address range
+  yet. Shape strongly suggests a console-input wait (CBIOS's `CONST`
+  polling for a keypress that never comes, via whatever real interrupt -
+  quite possibly one of the COUNTER-mode CTC channels CBIOS armed with
+  interrupts enabled, per the `--verbose-io` log - would signal a
+  received serial byte) rather than a timing/hardware-model bug: running
+  20,000,000 steps instead of the usual ~1,000,000 changes nothing, and
+  the stuck-detector already confirms a genuine tight loop, not merely
+  "needs more time." Most likely next real blocker is keyboard/terminal
+  input, not another chip to reverse-engineer - worth confirming by
+  reading whichever CBIOS routine `$E46C` actually is before doing
+  anything else.
 
 ---
 

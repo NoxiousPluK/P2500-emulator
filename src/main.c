@@ -149,6 +149,7 @@ int main(int argc, char **argv) {
     }
     m.pio.verbose = verbose_io;
     m.dma.verbose = verbose_io;
+    m.ctc.verbose = verbose_io;
 
     uint8_t *sesam_buf = NULL;
     size_t sesam_size = 0;

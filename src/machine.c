@@ -118,9 +118,24 @@ static void dma_interrupt_trampoline(void *userdata, uint8_t vector) {
     z80_gen_int(&m->cpu, vector);
 }
 
+static void ctc_interrupt_trampoline(void *userdata, uint8_t vector) {
+    P2500Machine *m = (P2500Machine *)userdata;
+    uint16_t call_target, final_dest;
+    if (!resolve_im2_target(m, vector, &call_target, &final_dest)) {
+        log_suppressed(m, "CTC", vector);
+        return;
+    }
+    fprintf(stderr, "[irq] CTC interrupt -> z80_gen_int(vector=$%02X) at PC=$%04X IFF1=%d "
+                    "(-> $%04X -> $%04X)\n",
+            vector, m->cpu.pc, m->cpu.iff1, call_target, final_dest);
+    z80_gen_int(&m->cpu, vector);
+}
+
 static uint8_t port_in(z80 *cpu, uint8_t port) {
     P2500Machine *m = (P2500Machine *)cpu->userdata;
     switch (port) {
+    case 0x00: case 0x01: case 0x02: case 0x03:
+        return p2500_ctc_read(&m->ctc, port);
     case 0x09:
         return m->crtc_regs[m->crtc_index & 0x0F];
     case 0x0F:
@@ -143,6 +158,9 @@ static uint8_t port_in(z80 *cpu, uint8_t port) {
 static void port_out(z80 *cpu, uint8_t port, uint8_t value) {
     P2500Machine *m = (P2500Machine *)cpu->userdata;
     switch (port) {
+    case 0x00: case 0x01: case 0x02: case 0x03:
+        p2500_ctc_write(&m->ctc, port, value);
+        break;
     case 0x05:
         m->bank = value;
         if (m->verbose_unknown_ports)
@@ -235,6 +253,10 @@ void p2500_init(P2500Machine *m) {
     m->dma.on_interrupt = dma_interrupt_trampoline;
     m->dma.interrupt_userdata = m;
 
+    p2500_ctc_init(&m->ctc);
+    m->ctc.on_interrupt = ctc_interrupt_trampoline;
+    m->ctc.interrupt_userdata = m;
+
     m->bank = 0x07; /* EPROM visible at $0000-$0FFF, as at power-on */
     m->verbose_unknown_ports = false;
 }
@@ -250,5 +272,6 @@ bool p2500_load_rom(P2500Machine *m, const char *path) {
 void p2500_step(P2500Machine *m) {
     z80_step(&m->cpu);
     p2500_pio_set_input_bit(&m->pio, P2500_FDC_PIO_PORT, P2500_FDC_PIO_BIT, m->fdc.int_line);
+    p2500_ctc_tick(&m->ctc);
     m->total_instructions++;
 }

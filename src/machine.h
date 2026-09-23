@@ -8,6 +8,7 @@
 #include "sesam.h"
 #include "pio.h"
 #include "dma.h"
+#include "ctc.h"
 
 /*
  * P2500 CPU-card machine model. Port $05 bank-switches the low 4KB between
@@ -17,6 +18,9 @@
  * EPROM out first) works without erasing it.
  *
  * Port dispatch, reverse-engineered from the ROM itself (see ../TODO.md):
+ *   $00-$03  Z80A-CTC, one channel per port (HWTEST V100; TODO.md T16) -
+ *            not touched by the IPL, needed once CP/M's CBIOS starts
+ *            bit-banging the keyboard/printer serial lines against it
  *   $05      bank select ($07 normal, $0F EPROM-out/RAM-in, $00 video RAM
  *            window at $8000-$BFFF - the video-bank distinction isn't
  *            modeled yet, see TODO.md T1 "Extra")
@@ -52,6 +56,7 @@ typedef struct {
     P2500Sesam sesam;
     P2500Pio pio;
     P2500Dma dma;
+    P2500Ctc ctc;
 
     /* MC6845 CRTC: 16 8-bit registers, selected by $08, read/written via $09 */
     uint8_t crtc_regs[16];
