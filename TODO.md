@@ -239,15 +239,13 @@ not `$04D5` as `main.c`'s landmark list assumes. Full table:
 - [x] **T6. Wire `READ DATA` to the DMA.** Done: `fdc.c`'s `do_read_data`
   now calls `p2500_dma_deliver`, which writes into RAM at the DMA's own
   programmed Port B address for its own programmed block length; `dest_ram`
-  is gone. **Not yet reached in practice** — a live `--disk` run gets as
-  far as PIO/FDC setup (mode config, `SPECIFY`, `SENSE INTERRUPT STATUS`,
-  interrupt-enable) and then deadlocks in the `$06C6` busy-wait on `$FED5`
-  *before* any `RECALIBRATE`/`SEEK`/`READ DATA` command is ever written to
-  port `$15` — so no interrupt ever arrives to set `$FED5`. `$4A00` (the
-  phase's actual success criterion) is still open; whatever ROM logic is
-  supposed to run between "interrupt enabled" and issuing `RECALIBRATE`
-  needs tracing next (T8's landmark-gating and a `P2500_TRACE_FROM`/`_TO`
-  window around that point are the way in).
+  is gone. **Confirmed reached in practice** — see ISSUE-1 through
+  ISSUE-4 below for the full chase (several compounding bugs sat between
+  this being wired up and it actually running): a live `--disk` run now
+  issues real `RECALIBRATE`/`READ DATA` commands, the DMA delivers a real
+  4096-byte transfer, and execution reaches **`$4A00`** — the phase's own
+  success criterion — for real, un-gated. Phase 1 is done; the boot goes
+  on to load and jump into CP/M's own CBIOS.
 
 - [x] **T7. Load the boot sector at `$1000`, not `$1100`,** and remove the
   `--poke` workaround for the `$1030` descriptor (keep the flag itself —
@@ -466,56 +464,52 @@ not `$04D5` as `main.c`'s landmark list assumes. Full table:
   Status: resolved and committed.
 
 - **ISSUE-4: the first real `READ DATA` reads the wrong disk location —
-  open, not yet investigated.** Found immediately after ISSUE-3's fix
-  while confirming `$4A00` was reached for real.
+  RESOLVED. PHASE 1 COMPLETE.** The `READ DATA` command ISSUE-3 unblocked
+  read C=1, H=0, R=1 into RAM at `$1000` - and the disk's known boot
+  sector (`00 00 FB 11 30 10 CD 03 00 ...`) sits at raw-file byte offset
+  0, which `do_read_data`'s naive `lba = C * 16 + (R-1)` mapped to C=0,
+  not C=1. Guessing at the geometry wasn't necessary: the user pointed at
+  `Information from the internet/...Diskettenhandling für PHILIPS
+  Computer P2000M, P2500...VzEkC...`, a P2500 owner's own writeup of
+  debugging this *exact* mismatch against stock 22DISK:
 
-  The `READ DATA` command ISSUE-3 unblocked reads C=1 (cylinder 1),
-  H=0, R=1, length 4096 bytes (16 sectors), into RAM at `$1000`:
-  ```
-  [fdc] command READ DATA (opcode $06) args=[$00 $01 $00 $01 $01 $10 $0E $00]
-  [dma] delivered 4096 bytes to RAM $1000
-  ```
-  But the disk's actual, known boot-sector content (`00 00 FB 11 30 10
-  CD 03 00 ...` — established back in `TODO.md`'s original decode, and
-  directly re-confirmed by reading the `.raw` file) sits at **C=0, R=1**
-  (byte offset 0), not C=1 (offset `0x1000`, confirmed to be unrelated
-  program-looking bytes, not the boot stub). T8's landmark gating
-  correctly flagged the resulting `$1000`/`$4A00` landmark hits as not
-  matching expected boot-sector bytes - real progress (PC did reach
-  those addresses) but not yet the real thing.
+  > "Philips hat hier ein etwas abgeändertes Diskettenformat verwendet,
+  > bei dem sich die physische und die logische Tracknummern
+  > unterscheiden. Logische Tracknummer ist immer um 1 höher als die
+  > physische." (*Philips used a slightly modified diskette format here,
+  > where the physical and logical track numbers differ. The logical
+  > track number is always 1 higher than the physical.*)
 
-  This `READ DATA` is issued by `sub_0333h`'s outer sequencer processing
-  the **`$FE5E`** request block - a *different* request from `$FE45`,
-  which this document's own earlier decode already identified as the
-  one whose status `$00` specifically triggers `JP $1000` (see "Where
-  the boot sector really goes"). `$FE5E`'s read is very likely for a
-  different, legitimate purpose (loading more of the system beyond the
-  boot sector itself) and just happens to target RAM `$1000` too,
-  overwriting where the real boot sector will eventually go. `$FE45`'s
-  own request hasn't been reached yet in any traced run.
+  So `C` in every READ/SEEK/RECALIBRATE command is the disk's own
+  recorded (logical) track ID, one higher than the physical track this
+  flat `.raw` dump is ordered by. Fixed in `do_read_data`: physical track
+  = `C - 1`. Verified live: C=1,R=1 (the IPL's actual first real read)
+  now resolves to byte offset 0 - exactly the disk's known, byte-exact
+  boot sector - confirming this was never a "wrong request" (ISSUE-4's
+  original framing) but this project's own geometry assumption being off
+  by one track the whole time.
 
-  The cylinder value (`C=1`) is computed, not hardcoded: `$09B4`'s
-  command-builder calls a shared linear-block-to-CHS routine
-  (`sub_0a50h`) with inputs from `($FE91)`/`($FE98)` for the cylinder
-  field and `($FE92)`/`($FE99)` for the sector field - both pairs read
-  from RAM state this project hasn't traced the origin of yet.
-  Consistent with the disk's confirmed single-sided, 16-sectors/track,
-  256B/sector geometry (`Disk Images/README.md`), a computed C=1,R=1
-  corresponds to linear block 16 - suggesting `$FE5E`'s request is
-  asking to start reading at block 16, not block 0, which may be
-  entirely correct for whatever `$FE5E` is actually for.
+  **Result — the full boot now works**: the boot sector loads at `$1000`
+  for real (`$1000`/`$1002`/`$1003`/`$1006` landmarks all hit,
+  un-gated), execution reaches **`$4A00`** for real (un-gated - the
+  actual Phase 1 success criterion), and the IPL goes on to load and
+  jump into **CP/M's own CBIOS (`SYSPBI.PHI`)** - confirmed by its
+  distinctly different `SPECIFY` parameters, DMA interrupt vector, and
+  RAM target from the IPL's own. This is well past Phase 1 territory.
 
-  **Not yet investigated**: what `$FE5E` (and its sibling `$FE19`/`$FE59`)
-  requests actually are, where their block-number fields get set, and
-  whether the run should be expected to continue on afterward to process
-  `$FE45` (the real boot-sector request) - or whether something about
-  `$FE5E`'s read landing on `$1000` is itself a problem (e.g. clobbering
-  memory `$FE45`'s handler still needs). The run's final state after this
-  point was PC back at `$014D` (the RAM-test-failure banner+halt loop),
-  meaning *something* after `$4A00` causes what looks like a full reset -
-  not yet traced.
-  Status: open, not yet investigated beyond identifying which request
-  block is responsible and confirming the geometry math checks out.
+  **What it runs into next** (already diagnosed, not yet fixed): CBIOS
+  issues its own `RECALIBRATE` and waits for the completion interrupt,
+  but the interrupt never arrives because `machine.c`'s
+  `resolve_im2_target` hardcodes the IM2 vector table page to `$FE`
+  (`#define IM2_TABLE_PAGE 0xFE`) - correct for the IPL, but CBIOS sets
+  up its own IM2 table at register `I = $FF` instead, so every interrupt
+  it generates is silently suppressed
+  (`log_suppressed`: `"I=$FF not yet at table page $FE"`). This is a
+  straightforward next fix (read `I` live instead of assuming a fixed
+  page) but belongs to Phase 2 (CBIOS/CP/M), not this document's P0-P2
+  IPL-focused work queue - worth its own entry once picked up.
+  Status: resolved and committed. Phase 1's own success criterion
+  (`$4A00`) is met.
 
 ---
 

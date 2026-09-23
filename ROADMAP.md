@@ -61,7 +61,14 @@ above.
 
 ---
 
-## Phase 1 — a correct floppy path (`TODO.md` T1–T12)
+## Phase 1 — a correct floppy path (`TODO.md` T1–T12) — COMPLETE
+
+Confirmed live: the boot sector's own `READ DATA` runs for real, the DMA
+delivers a real transfer, and execution reaches `$4A00` un-gated. See
+`TODO.md`'s ISSUE-1 through ISSUE-4 for the four compounding bugs that
+sat between "wired up" (T1–T12 all checked off) and "actually runs" -
+none were in the T1-T12 wiring itself. The boot goes on to load and jump
+into CP/M's own CBIOS (`SYSPBI.PHI`), i.e. Phase 2 has already begun.
 
 The one milestone that matters: **the boot sector's own
 `LD DE,$1030 / CALL $0003` produces a real `READ DATA`, the DMA delivers
