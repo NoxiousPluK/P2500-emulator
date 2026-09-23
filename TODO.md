@@ -6,8 +6,17 @@ since been shown to be wrong, and following its "next steps" will waste
 time. `ROADMAP.md` has the longer-term shape; this file is the work queue.
 
 Everything below is derived from evidence already in this repository — the
-boot IPL EPROM dump, the CP/M `SYSPBI.PHI` disassembly, and the disk
-images. **No new hardware measurements are needed to do any of it.**
+boot IPL EPROM dump, the CP/M `SYSPBI.PHI` disassembly, the disk images,
+and live traces of this emulator. Nothing in the queue is *blocked* on new
+hardware measurements, though **P3 is the first section with questions
+firmware genuinely cannot answer** (the IM2 daisy-chain order, and what
+pulses the CTC's CLK/TRG pins) — see `ROADMAP.md`'s measurement list.
+
+**If you are picking up work now, start at the P3 section.** T1–T12 (P0/P1)
+are complete; T13–T16 (P2) are IPL-era cleanup. P3 is Phase 2 and holds the
+current blocker (T17). The "Background" section immediately below is the
+original IPL decode and is still accurate; its conclusions have all been
+implemented.
 
 ---
 
@@ -355,6 +364,17 @@ not `$04D5` as `main.c`'s landmark list assumes. Full table:
     read-and-clear a flag at `$D70E`, return immediately if it was
     already nonzero, otherwise block on `CONIN`.
 
+  > **Superseded in part — read T19 before acting on the rest of this
+  > entry.** The `channel 0 ZC/TO -> channels 1-3 CLK/TRG` chain below,
+  > and the `channel3_rx_ready` patch that follows it, were arrived at by
+  > trying a mechanism and keeping what moved - the exact pattern
+  > `ROADMAP.md`'s guiding principle warns against. A later review found
+  > direct evidence against the chain (channel 2 counts the opposite
+  > CLK/TRG edge from channels 1 and 3) and, more usefully, found the
+  > CBIOS handlers that identify all three channels. The narrative below
+  > is kept because the *symptoms* it records are real and reproducible;
+  > its hardware conclusion is not.
+
   **Root cause, confirmed by fixing it**: that flag is set by a
   console-receive interrupt that depends on CTC channels 1-3 (all
   COUNTER mode, `tc=1`, interrupts enabled) ticking - and they never did,
@@ -383,7 +403,13 @@ not `$04D5` as `main.c`'s landmark list assumes. Full table:
   Live disassembly of CBIOS's own port-`$06` ISR (traced via `--peek`,
   not guessed) showed no bit-shift/accumulate logic anywhere in it: it
   reads one complete byte from port `$06` and pushes it straight into a
-  32-byte circular buffer (count at `$ED8F`, data from `$ED92`). Modeled
+  32-byte circular buffer (count at `$ED8F`, data from `$ED92`).
+  *(Correction, see T19/T20: the conclusion drawn from this - that the
+  console receive path is not bit-banged - was drawn from the wrong
+  handler. The **channel 1** ISR at `$F597` samples port `$05` bit 6
+  bit-by-bit, and channel 0's ISR re-arms channel 1 as a per-bit-cell
+  TIMER. Port `$06` and this byte-level model may well still be right for
+  whatever feeds that buffer, but they are not the whole receive path.)* Modeled
   port `$06`/`$04` at the byte level to match (`p2500_keyboard_in`
   delivers one queued byte per read, `$FF` idle; `p2500_serial_out`
   captures TX bytes - this project's only window into program output,
@@ -433,6 +459,296 @@ not `$04D5` as `main.c`'s landmark list assumes. Full table:
   measurable progress (committed); reliable keystroke delivery needs
   either a priority-queued interrupt model or a narrower fix for this
   specific collision - not yet done.
+
+### P3 — Phase 2: CP/M / CBIOS
+
+Written 2026-09-23 after an evidence review of the post-T16 tree. Every
+claim in this section was verified live against this build, with the
+reproduction given alongside it — nothing here is inferred from the docs.
+
+The boot now gets much further than `$4A00`: CP/M's page zero is real
+(`$0000` = `C3 03 E2` = `JP $E203`, the CBIOS warm-boot vector), CBIOS's
+own `$E200` jump table is live, and the CCP is loaded at `$CC00`. It then
+**deadlocks** at `$EB02` (`LD A,$01 / CP (HL) / JR NZ,$EB02` with
+`HL=$EB70`) — a semaphore wait that never clears. See ISSUE-5.
+
+Reproduce the whole picture with:
+
+```
+./p2500-emu --disk "../Disk Images/extracted/P25K_B/P25K_B.raw" \
+            --max-steps 5000000 --peek FF90:16 --peek F37F:32 \
+            --peek F597:32 --peek F669:32 --peek FF33:32
+```
+
+- [ ] **T17. Replace `z80_gen_int()` with a real IM2 daisy-chain
+  interrupt controller.** *This is the top blocker; several items below
+  are unresolvable without it, and it is currently silently discarding an
+  entire device's interrupt stream.*
+
+  The vendored core (`src/vendor/superzazu_z80/z80.c`) has a **single**
+  pending-interrupt slot — `int_pending` / `int_data`. Every
+  `z80_gen_int()` call overwrites the previous one, with no queue, no
+  priority, and no concept of a device holding `/INT` asserted until its
+  own INTA cycle. Two independently measured consequences in the current
+  build:
+
+  1. **CTC channel 1's interrupt never reaches its handler — 0 of
+     19,106 requests.** `p2500_ctc_tick()` pulses channels 1 and 2 in the
+     same call, so channel 1's `z80_gen_int($92)` is always immediately
+     overwritten by channel 2's `z80_gen_int($94)`. Measured over a
+     5,000,000-step run: 38,213 CTC interrupt requests (19,106 × `$92`,
+     19,107 × `$94`); `$94`'s handler body (`$F382`) executes 18,925
+     times; `$92`'s handler body (`$F59A`) executes **zero** times.
+  2. **The IPL's DMA end-of-block interrupt is lost too**, and always
+     has been. Trace steps 791,658–791,675 (`P2500_TRACE_FROM=791100
+     P2500_TRACE_TO=792000`): `OUT ($15)` at `$0A98` raises DMA vector
+     `$02` (handler `$07F3`) with `IFF1=0`; seven instructions later
+     `OUT ($12),$F3` at `$07E4` raises PIO vector `$00`, overwriting it;
+     the `EI` at `$06B9` then dispatches `$00` only. `$07F3` is never
+     executed in any run. Phase 1 reaching `$4A00` was not affected, so
+     this went unnoticed — but it means *every* claim in this document of
+     the form "interrupt X is delivered" is only true when nothing else
+     asked at the same time.
+
+  What to build, in `machine.c`, from the Z80 peripheral manual's
+  interrupt chapter rather than by trial:
+  - Each peripheral (PIO port A, PIO port B, DMA, CTC ×4) gets an
+    explicit `int_requested` and `int_under_service` state, plus its
+    vector. Peripherals set `int_requested` and **hold it** until
+    acknowledged; they must not call into the CPU core directly.
+  - `p2500_step()` acknowledges at most one interrupt per instruction
+    boundary: the highest-priority device with `int_requested` and no
+    higher-priority device `int_under_service`, and only when `IFF1` is
+    set. That is the daisy chain's whole behaviour.
+  - `int_under_service` clears on `RETI`. The vendored core does not
+    expose `RETI` — either snoop `ED 4D` at the fetch (the same trick
+    real peripherals use, since they watch the bus for the opcode) or
+    patch the core to call a callback. **Note the IPL does not use
+    `RETI`** (its handlers exit via `LD SP,($FF26)` + `JP`, see the RAM
+    address table below), so IPL-side devices need a fallback release
+    condition; CBIOS's own handlers should be checked for `RETI` before
+    assuming either way.
+  - Delete `resolve_im2_target`'s logging-only decode of the trampoline
+    chain from the acknowledge path, or keep it strictly as a log.
+
+  **Unknown that this exposes, and that only hardware can settle:** the
+  physical daisy-chain order. The CTC is on the CPU card; the PIO and DMA
+  are on the FDD card. Which is `IEI`-upstream of which decides whether a
+  CTC tick can pre-empt a disk transfer's end-of-block. Added to
+  `ROADMAP.md`'s measurement list. Until it is known, pick one order,
+  name it in a single constant, and say in the code that it is a choice.
+
+- [ ] **T18. Drive the CTC from T-states, not instruction counts, and
+  model the prescaler honestly.** `ctc.c`'s `scaled_time_constant()`
+  folds the prescaler in as a **×4** tick multiplier for `/256` and ×1
+  for `/16` — the real ratio is 16:1, and the unit is "one
+  `p2500_ctc_tick()` per instruction" rather than a clock. The file's own
+  comment calls this "close enough", which makes every timing conclusion
+  drawn from this emulator's CTC unreliable, and is precisely the class
+  of tuning constant `ROADMAP.md`'s guiding principle says should not
+  exist.
+
+  The fix is cheap and removes the fudge entirely: the vendored core
+  already maintains `z->cyc`, a monotonic T-state counter that
+  `z80_step()` never resets. Pass the elapsed T-state delta into
+  `p2500_ctc_tick()` and decrement by `delta / prescaler` with a carried
+  remainder. Channel 0 as CBIOS programs it (`tc=$D0`, `/16`) then
+  becomes a real 3,328-T-state period (≈1.2 kHz at 4 MHz) instead of
+  "208 instructions", which is also what makes T19 answerable at all.
+
+- [ ] **T19. Re-derive the CTC channel wiring from CBIOS's own ISRs. The
+  current `ch0 ZC/TO → ch1/ch2/ch3 CLK/TRG` chain is very likely wrong,
+  and `channel3_rx_ready` is a patch on top of it.** T16's write-up is
+  honest that the chain is unconfirmed; the review found direct evidence
+  against it, and — more importantly — found the handlers that settle it.
+
+  The control words CBIOS actually programs (from `--verbose-io`):
+
+  | Ch | Control | Decode | TC |
+  |---|---|---|---|
+  | 0 | `$07` | int **off**, TIMER, `/16`, reset | `$D0` |
+  | 1 | `$C7` | int on, COUNTER, **falling** edge | `$01` |
+  | 2 | `$D5` | int on, COUNTER, **rising** edge | `$01` |
+  | 3 | `$C5` | int on, COUNTER, **falling** edge | `$01` |
+
+  Evidence against the chain:
+  - **Channel 2 counts the opposite edge from channels 1 and 3.** If all
+    three were wired to the same channel-0 `ZC/TO` pin, that would buy
+    nothing but a half-period phase shift. Different edges is what you
+    get when three CLK/TRG pins are wired to three *different* external
+    signals — which is also the canonical Z80-CTC idiom for "turn an
+    external edge into an IM2 interrupt" (COUNTER, `tc=1`, int enabled).
+  - Three ISRs firing in permanent lockstep on one event is not a design
+    a real board would have; it is an artifact of the chain.
+  - `ctc.c` parses `rising_edge` and then never uses it, which is the
+    code admitting the same thing.
+
+  Evidence for what the channels really are — CBIOS's own IM2 table at
+  `I=$FF` (`--peek FF90:16`) is `0C FF 15 FF 03 FF FA FE …`, i.e.
+  vector `$90`→`$FF0C`→`$F669`, `$92`→`$FF15`→`$F597`,
+  `$94`→`$FF03`→`$F37F`, `$96`→`$FEFA`:
+  - **`$F669` (channel 0)** does `LD A,($F731) / OR $87 / OUT ($01),A /
+    LD A,($F732) / RRA / OUT ($01),A` — it **reprograms channel 1** with
+    `$87` (int on, **TIMER**, `/16`, tc follows, reset) plus a computed
+    time constant. That is the second half of a textbook bit-banged async
+    receive: COUNTER mode to catch the start-bit edge, then TIMER mode
+    re-armed per bit cell. A channel that is *reprogrammed* by another
+    channel's ISR is not a channel being clocked by it.
+  - **`$F597` (channel 1)** does `LD HL,$F733 / BIT 6,(HL) / JR Z,… /
+    IN A,($05) / BIT 6,A / JR Z,…` — it samples **port `$05` bit 6**.
+    See T20: that is almost certainly RXD, and it means the console
+    receive path really is bit-banged, contradicting `keyboard.h`'s
+    current "no bit-shift logic anywhere in it" conclusion (which was
+    drawn from the *channel 3* handler, a different routine).
+  - **`$F37F` (channel 2)** does `CALL $EBE2 / LD B,3 / LD HL,$F436 /
+    INC (HL) / …` — an incrementing multi-byte counter, i.e. a real-time
+    clock tick.
+  - Note channel 0 has a **registered handler** (`$F669`) but is
+    programmed with interrupts **disabled** (`$07`). Either something
+    else vectors to `$90`, or a control word this project has not traced
+    re-enables it. Worth resolving — it is the one loose end in the
+    reading above.
+
+  Deliverable: identify each of the three CLK/TRG sources, model them as
+  explicit device strobes, and delete both the unconditional `ch0 → ch1/
+  ch2` chaining and the `channel3_rx_ready` parameter. If a channel turns
+  out to have no source this emulator can supply yet, it should simply
+  never tick — not be fed a substitute pulse.
+
+- [ ] **T20. Make port `$05` readable. It is a live, polled input, not
+  just the bank latch.** Supersedes T15's open question ("confirm whether
+  anything reads port `$05`"): `$F5A4` executes `IN A,($05)` and tests
+  **bit 6**, inside the CTC channel-1 (serial receive) ISR. Today
+  `port_in` has no `$05` case, so it falls through to the `0xFF` default
+  — bit 6 reads as a permanent 1, i.e. a permanently-idle (or
+  permanently-asserted, depending on polarity) receive line.
+
+  This is currently masked by T17: the ISR that reads it never executes,
+  which is why a `--verbose-io` run reports **no** unhandled `IN` at all.
+  Expect it to start appearing the moment T17 lands. Model bit 6 as RXD
+  driven by `keyboard.c`'s queue, and check the remaining bits against
+  `../Tracing/P2500-predicted-wiring-from-firmware.md` §C1–C4 before
+  guessing at them.
+
+- [ ] **T21. Fix `dma.c`'s WR3 base-register pattern.** `dma.c` decodes
+  WR3 as `D7,D1,D0 = 0,0,0`, which makes the branch **dead code**: every
+  such byte is claimed by the WR1 (`D2=1`) or WR2 (`D2=0`) test above it.
+  `dma.h`'s comment treats the overlap as an unresolvable ambiguity in
+  UM008101 — it is resolvable: the Zilog **Component Data Book (1985)**
+  DMA write-register bit map (`Datasheets and manuals/Zilog Component
+  Data Book (1985) (OCR).pdf`, the WR3 figure carrying "DMA ENABLE /
+  INTERRUPT ENABLE / STOP ON MATCH") shows WR3 as **`D7=1`, `D1=D0=0`**,
+  which is unambiguous against WR1/WR2 and matches every other Z80-DMA
+  implementation. UM008101's Figure 43 printing `D7=0` is the erratum.
+
+  Consequence worth fixing before Phase 2 exercises it: WR3 bit 6 is
+  **DMA Enable** and bit 5 is **Interrupt Enable** — the documented
+  "fast one-byte enabling" alternative to WR6 `$87`/`$AB`. A driver that
+  uses it would today be logged as `unrecognized base register byte`, and
+  the transfer would be silently dropped by `p2500_dma_deliver`'s
+  `dma_enabled` guard. Nothing traced so far sends WR3, so this is
+  latent, not active.
+
+- [ ] **T22. Invert the DMA↔FDC data path, and give the DMA real
+  end-of-block semantics.** Today `fdc.c`'s `do_read_data()` *calls*
+  `p2500_dma_deliver()` and hands it a raw pointer into the disk image;
+  the DMA never checks that its Port A address is `$15`, that Port A is
+  programmed as I/O-fixed, or that Port B is memory-incrementing (`$15`
+  is parsed and logged as "not modeled", 88 times per run). This
+  inversion cannot express `WRITE DATA` or `FORMAT A TRACK`, where the
+  DMA must **push** bytes from RAM into the FDC. Restructure so the DMA
+  owns the transfer and pulls from / pushes to whichever device its
+  programmed Port A address selects.
+
+  While there: on end-of-block the model neither advances `port_b_addr`
+  nor clears `dma_enabled`. A real Z80-DMA without auto-restart stops and
+  must be re-enabled, and a driver that relies on that (or that reads
+  back RR0's status byte / the address counters — `read` registers are
+  not modeled at all) will be misled.
+
+- [ ] **T23. Finish the µPD765 command set for Phase 2.** `fdc.c`
+  implements SPECIFY, SENSE DRIVE STATUS, READ DATA, RECALIBRATE, SENSE
+  INTERRUPT STATUS and SEEK. `ROADMAP.md`'s Phase 2 needs **WRITE DATA**
+  (`$05`, handler `$05A1`) and **FORMAT A TRACK** (`$0D`, handler
+  `$0B19`), and `READ ID` is the usual next thing a CP/M BIOS reaches
+  for. Both decode paths are already documented above; only the FDC side
+  is missing. Depends on T22.
+
+  Also in `do_read_data()`, all three currently-ignored parameters become
+  live once CBIOS starts seeking:
+  - **`H` (head) is ignored.** Correct for stock single-sided P2500 media
+    and therefore fine today, but it should at minimum log and fail a
+    non-zero `H` rather than silently aliasing to head 0.
+  - **`N` (sector-size code) is ignored** in favour of the hardcoded
+    `P2500_FDC_SECTOR_SIZE` 256. The DMA already computes its byte count
+    as `sectors × (128 << N)`, so the two can disagree.
+  - **Multi-sector transfers do not wrap at the track boundary.** The
+    whole remaining disk image is handed to the DMA as one flat span, so
+    a read that runs past `EOT` walks straight into the next track
+    instead of terminating. The IPL only ever reads track 0, so this has
+    never mattered; a seeking BIOS will hit it.
+  - *Confirmed correct, do not "fix":* sector skew. The real media is
+    interleaved `1,3,5,…,2,4,6,…`, but `../Disk Images/findings/
+    EXTRACTION-NOTES.md` records that the `.raw` dumps are already in
+    logical sector-number order (built from each IMD track's own sector
+    map), which is why the `diskdefs` all use `skew 1`. `lba =
+    physical_track × 16 + (R − 1)` is right.
+
+- [ ] **T24. Add `make test` — a regression script, not just the one
+  SESAM diff.** Phase 1 was expensive to win and nothing currently
+  guards it. Three cheap, falsifiable checks, all already reproducible
+  from the CLI:
+  1. SESAM banner VRAM byte-exact vs
+     `../ROM Dumps/CPU-Card-Boot-EPROM/emulation/vram_after_banner.bin`
+     (today's only test — keep it).
+  2. `--disk P25K_B.raw` reaches landmark `$4A00` un-gated, and the
+     `$1000`/`$1002`/`$1003`/`$1006` sector-entry landmarks all hit.
+  3. After boot, `$0000`–`$0002` reads `C3 03 E2` (CBIOS warm-boot
+     vector) and `$0005`–`$0007` reads `C3 06 D4` — a one-line proof that
+     CP/M page zero was really built, which no NOP-sled can fake.
+
+  Make each of these exit non-zero on failure so they can gate commits.
+
+- [ ] **T25. Harness gaps that this review had to work around.** All
+  three cost real time during it:
+  - **`--watch ADDR[:LEN]`.** `main.c` hardcodes watches on `$0003` and
+    `$0039`. Finding who writes the `$EB70` semaphore (ISSUE-5) needed a
+    throwaway patched build; it should be a flag.
+  - **`--break ADDR` / `--count ADDR`.** Answering "does `$F59A` ever
+    execute?" also needed a patched build. It is the single most useful
+    question this project keeps asking.
+  - **The stuck detector does not catch cycles.** `STUCK_DISTINCT_
+    THRESHOLD` is 8 distinct addresses in a 200,000-step window. The
+    ISSUE-5 deadlock cycles through **64** addresses and therefore ran
+    the full 5,000,000 steps reporting nothing but "hit max-steps".
+    Detect a repeating PC *sequence* (e.g. hash the window and compare
+    against the previous window) instead of, or in addition to, counting
+    distinct addresses.
+  - Minor: T8's landmark gate compares against a *static* expected byte,
+    so once CP/M legitimately reuses `$1000` the gate reports "didn't
+    match" for a real revisit (`$1000` and `$1003`, 1 each, in every
+    current run). Either snapshot the expected bytes at first hit or
+    scope the gate to addresses whose content is genuinely invariant.
+
+- [ ] **T26. Small correctness items, individually cheap.**
+  - `machine.h`'s `crtc_regs[16]` with `crtc_index & 0x0F`: the MC6845
+    has **18** registers (R0–R17). R16/R17 (light pen) currently alias
+    onto R0/R1 (horizontal total / displayed), so any access to them
+    corrupts the geometry the CRTC model is trusted for.
+  - `ctc.c` accepts an interrupt-vector byte written to any channel; a
+    real Z80-CTC loads it only from **channel 0**. Verified harmless
+    today (CBIOS writes `$90` to port `$00`, 6×, always channel 0), but
+    the permissiveness would hide a future misread. Log the channel while
+    you are there — the current message does not say which port it came
+    from.
+  - `ctc.c` applies the prescaler in COUNTER mode; on real hardware the
+    prescaler is TIMER-mode only. Folded into T18.
+  - `machine.c`'s `resolve_im2_target` reads `m->ram[]` directly instead
+    of `p2500_peek()`. Harmless while IM2 tables live at `$FE00`/`$FF00`,
+    wrong in principle.
+  - `main.c`'s `read_whole_file()` does not check `malloc` or reject a
+    zero/negative `ftell`.
+
 
 ---
 
@@ -622,6 +938,33 @@ not `$04D5` as `main.c`'s landmark list assumes. Full table:
   Status: resolved and committed. Phase 1's own success criterion
   (`$4A00`) is met.
 
+- **ISSUE-5: CBIOS deadlocks at `$EB02` on a semaphore that is never
+  signalled again — diagnosed, not yet fixed. Blocked on T17.** This is
+  where a current `--disk` run ends up, and it is further than anything
+  before it: CP/M page zero is genuinely built (`$0000` = `C3 03 E2` =
+  `JP $E203`, CBIOS's warm-boot vector; `$0005` = `C3 06 D4`), CBIOS's
+  `$E200` jump table is live, and the CCP is at `$CC00`.
+
+  The loop is `$EB00: LD A,$01 / CP (HL) / JR NZ,$EB02` with `HL=$EB70`
+  — one of four event slots (`$EB70`–`$EB73`), addressed by a 3-byte
+  record table at `$EB5C` (`00 70 EB / 01 70 EB / 02 70 EB / 03 70 EB`).
+  This is the generic "wait for event ID" dispatcher T16's write-up
+  already noticed at `$EB7C`.
+
+  Watching writes to `$EB70`–`$EB73` (a throwaway instrumented build —
+  see T25) shows the pair working correctly for a while: `$EC18` signals
+  (`0 → 1`), `$EAE1` consumes (`1 → 0`), alternating through step
+  1,120,400 — and then `$EC18` is never reached again for the remaining
+  3.9 M steps. So the wait side is fine; the **signal side stops being
+  driven**.
+
+  Almost certainly the same root cause as T17: the only interrupt source
+  still firing at that point is the CTC, and exactly one of its two
+  active channels can be delivered per tick — channel 1's ISR (`$F59A`)
+  executes **0** times against 19,106 requests. Whatever `$EC18` is
+  downstream of, half the machine's interrupt traffic is not arriving.
+  Do not chase `$EB70` further until T17 lands; re-measure afterwards.
+
 ---
 
 ## Useful RAM addresses (all in the `$FE00`-based scratch area)
@@ -657,9 +1000,25 @@ produces.
 
 ## Known-good invariants to assert in the harness
 
+Scoped to **while the IPL still owns memory** — CP/M replaces page zero
+and the IM2 table wholesale, so all three of these stop applying the
+moment `SYSPBI` takes over. Any harness assertion must be scoped the same
+way or it will fire on a correct boot.
+
 - `$0000`–`$0002` must always be `C3 00 01` (`JP $0100`) and `$0003`–
   `$0005` must be `C3 DA 02` (`JP $02DA`) whenever port `$05` bit 3 is
   clear. Anything else means memory corruption.
 - Register `I` must be `$FE` before any IM2 interrupt is delivered.
+  **IPL only** — CBIOS builds its own table at `I=$FF`, which is correct
+  and is why `machine.c` reads `I` live rather than assuming a page.
 - Port `$14` must read exactly `$80` when idle (ROM `$0498` compares for
   equality, not a bit test).
+
+Once CP/M is up, the equivalent invariants are:
+
+- `$0000`–`$0002` = `C3 03 E2` (CBIOS warm-boot vector) and `$0005`–
+  `$0007` = `C3 06 D4` (BDOS entry). Nothing a stray NOP-sled can fake —
+  see T24.
+- `$E200`–`$E20F` is CP/M 2.2's standard BIOS jump table
+  (BOOT/WBOOT/CONST/CONIN/CONOUT/LIST/PUNCH/READER), all `JP nn`.
+- `I` = `$FF`, IM 2.
