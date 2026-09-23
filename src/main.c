@@ -1,4 +1,5 @@
 #include "machine.h"
+#include <ctype.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -88,6 +89,12 @@ int main(int argc, char **argv) {
     const char *vram_dump_path = NULL;
     unsigned long max_steps = 2000000UL;
     bool verbose_io = false;
+    /* --type STRING - queues bytes to deliver one per port $06 (console
+     * RX) read, simulating keystrokes. Supports \r \n \t \\ and \xHH.
+     * CP/M wants CR (\r), not LF, to end a line. */
+    #define MAX_TYPE_LEN 4096
+    static uint8_t type_buf[MAX_TYPE_LEN];
+    size_t type_len = 0;
     /* --peek ADDR:LEN - hex-dump `len` bytes at `addr` (bank-aware, same
      * view the CPU has) at exit. For live debugging of whatever region a
      * stuck run's PC/DE/HL point at, when no static disassembly of that
@@ -109,6 +116,26 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--dump-vram") && i + 1 < argc) vram_dump_path = argv[++i];
         else if (!strcmp(argv[i], "--max-steps") && i + 1 < argc) max_steps = strtoul(argv[++i], NULL, 0);
         else if (!strcmp(argv[i], "--verbose-io")) verbose_io = true;
+        else if (!strcmp(argv[i], "--type") && i + 1 < argc) {
+            const char *s = argv[++i];
+            while (*s && type_len < MAX_TYPE_LEN) {
+                if (*s == '\\' && s[1]) {
+                    s++;
+                    if (*s == 'r') { type_buf[type_len++] = '\r'; s++; }
+                    else if (*s == 'n') { type_buf[type_len++] = '\n'; s++; }
+                    else if (*s == 't') { type_buf[type_len++] = '\t'; s++; }
+                    else if (*s == '\\') { type_buf[type_len++] = '\\'; s++; }
+                    else if (*s == 'x' && isxdigit((unsigned char)s[1]) && isxdigit((unsigned char)s[2])) {
+                        char hex[3] = {s[1], s[2], 0};
+                        type_buf[type_len++] = (uint8_t)strtoul(hex, NULL, 16);
+                        s += 3;
+                    } else { type_buf[type_len++] = (uint8_t)*s; s++; }
+                } else {
+                    type_buf[type_len++] = (uint8_t)*s;
+                    s++;
+                }
+            }
+        }
         else if (!strcmp(argv[i], "--peek") && i + 1 < argc) {
             if (num_peeks >= MAX_PEEKS) { fprintf(stderr, "too many --peek args\n"); return 1; }
             char *arg = argv[++i];
@@ -167,6 +194,12 @@ int main(int argc, char **argv) {
     m.pio.verbose = verbose_io;
     m.dma.verbose = verbose_io;
     m.ctc.verbose = verbose_io;
+    m.keyboard.verbose = verbose_io;
+    m.serial.verbose = true; /* always show console TX - it's this project's only view of program output */
+    if (type_len > 0) {
+        p2500_keyboard_init(&m.keyboard, type_buf, type_len);
+        printf("Queued %zu bytes to type on port $06\n", type_len);
+    }
 
     uint8_t *sesam_buf = NULL;
     size_t sesam_size = 0;

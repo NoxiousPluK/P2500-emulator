@@ -136,6 +136,8 @@ static uint8_t port_in(z80 *cpu, uint8_t port) {
     switch (port) {
     case 0x00: case 0x01: case 0x02: case 0x03:
         return p2500_ctc_read(&m->ctc, port);
+    case 0x06:
+        return p2500_keyboard_in(&m->keyboard);
     case 0x09:
         return m->crtc_regs[m->crtc_index & 0x0F];
     case 0x0F:
@@ -160,6 +162,9 @@ static void port_out(z80 *cpu, uint8_t port, uint8_t value) {
     switch (port) {
     case 0x00: case 0x01: case 0x02: case 0x03:
         p2500_ctc_write(&m->ctc, port, value);
+        break;
+    case 0x04:
+        p2500_serial_out(&m->serial, value);
         break;
     case 0x05:
         m->bank = value;
@@ -257,6 +262,9 @@ void p2500_init(P2500Machine *m) {
     m->ctc.on_interrupt = ctc_interrupt_trampoline;
     m->ctc.interrupt_userdata = m;
 
+    p2500_keyboard_init(&m->keyboard, NULL, 0);
+    p2500_serial_init(&m->serial);
+
     m->bank = 0x07; /* EPROM visible at $0000-$0FFF, as at power-on */
     m->verbose_unknown_ports = false;
 }
@@ -272,6 +280,6 @@ bool p2500_load_rom(P2500Machine *m, const char *path) {
 void p2500_step(P2500Machine *m) {
     z80_step(&m->cpu);
     p2500_pio_set_input_bit(&m->pio, P2500_FDC_PIO_PORT, P2500_FDC_PIO_BIT, m->fdc.int_line);
-    p2500_ctc_tick(&m->ctc);
+    p2500_ctc_tick(&m->ctc, m->keyboard.pos < m->keyboard.queue_len);
     m->total_instructions++;
 }

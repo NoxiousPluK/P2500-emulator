@@ -370,14 +370,69 @@ not `$04D5` as `main.c`'s landmark list assumes. Full table:
 
   **Verified live**: with the chain wired up, the `$E46C` tight loop is
   completely gone - CTC channels 1/2/3 fire real interrupts
-  (vectors `$92`/`$94`/`$96`), and the run moves into a *different*,
-  correct pattern: **19,014 reads of the documented RX port `$06`**
-  (TODO.md's own port map: `$04` TX / `$06` RX, 9600-8N-2), all
-  currently unhandled (returning the default `$FF`). This is no longer a
-  hardware-timing bug - it's CBIOS correctly, actively polling for real
-  serial/keyboard data that nothing supplies yet. Next step, if picked
-  up, is building a way to feed the emulator real keystrokes on port
-  `$06`, not more chip modeling.
+  (vectors `$92`/`$94`/`$96`), and the run moved into a *different*
+  pattern: 19,014 reads of the documented RX port `$06` (TODO.md's own
+  port map: `$04` TX / `$06` RX, 9600-8N-2), all then unhandled. This
+  confirmed it was no longer a hardware-timing bug but CBIOS correctly,
+  actively polling for real serial/keyboard data - see the follow-up
+  below for what happened once that input path was actually built.
+
+  ---
+
+  **Follow-up: `src/keyboard.{c,h}` (console RX/TX) + a second CTC fix.**
+  Live disassembly of CBIOS's own port-`$06` ISR (traced via `--peek`,
+  not guessed) showed no bit-shift/accumulate logic anywhere in it: it
+  reads one complete byte from port `$06` and pushes it straight into a
+  32-byte circular buffer (count at `$ED8F`, data from `$ED92`). Modeled
+  port `$06`/`$04` at the byte level to match (`p2500_keyboard_in`
+  delivers one queued byte per read, `$FF` idle; `p2500_serial_out`
+  captures TX bytes - this project's only window into program output,
+  since there's still no live video and `CONOUT` has never been called
+  in any traced run). New `--type STRING` flag (`\r`/`\n`/`\t`/`\xHH`
+  supported) queues keystrokes.
+
+  Chaining *all three* CTC channels unconditionally (the fix above)
+  turned out to be too broad: vector `$96`'s handler (channel 3) is
+  specifically this RX-buffer push, with no filtering of the value it
+  reads - chaining it on every single channel-0 pulse floods the buffer
+  with the idle `$FF` byte within the first few thousand instructions,
+  and it never drains (confirmed live: `$ED8F` stays at `$1F`, the "full"
+  threshold, even after 20,000,000 steps), so every real keystroke queued
+  afterward was silently dropped by the buffer-full check. Channels 1 and
+  2 (vectors `$92`/`$94`, different handler tables entirely - confirmed
+  via `--peek`, not assumed) don't have this problem and are still needed
+  unconditionally (removing them regresses back to the original `$E46C`
+  hang). Fix: `p2500_ctc_tick()` now takes a `channel3_rx_ready` flag
+  (true exactly when `machine.c` has a queued keystroke waiting) and only
+  pulses channel 3 when there's a real byte to deliver - standing in for
+  a real keyboard controller's own "byte ready" strobe, which is the only
+  sane real-hardware explanation for why channel 3 is wired differently
+  from 1/2 in the first place.
+
+  **Verified live**: with channel 3 no longer flooding, the RX buffer
+  stays empty on its own (no keystrokes needed) and the run makes real
+  further progress past a semaphore wait (`$EB7C`, part of a generic
+  "wait for event ID" dispatcher CBIOS reuses at several boot-sequence
+  synchronization points - not yet catalogued) that the flooded-buffer
+  version never reached. **Not yet confirmed**: whether an actual
+  delivered keystroke reaches CBIOS's buffer correctly end-to-end. Firing
+  a real `--type '\r'` test found channels 1, 2, and 3 all requesting
+  interrupts on the *same* tick, and the vendored z80 core
+  (`z80_gen_int()`, `src/vendor/superzazu_z80/z80.c`) has only a single
+  pending-interrupt slot (`int_pending`/`int_data`) - each call
+  overwrites the last, with no queueing or priority ordering the way a
+  real daisy-chained Z80 IM2 system would provide (Channel 0 highest
+  priority, Channel 3 lowest, per the CTC datasheet). The keystroke's own
+  vector (`$96`) was requested but the CPU trace shows execution never
+  actually jumped to its handler afterward - almost certainly lost to
+  this same-tick collision, or to a DI/EI window in CBIOS's own init
+  code. This is a real, previously-unknown limitation of the interrupt
+  delivery model, exposed by chaining multiple CTC channels together
+  (nothing before this needed more than one pending source at a time).
+  Status: `src/keyboard.{c,h}` and the channel-3 fix are solid,
+  measurable progress (committed); reliable keystroke delivery needs
+  either a priority-queued interrupt model or a narrower fix for this
+  specific collision - not yet done.
 
 ---
 

@@ -96,27 +96,43 @@ static bool pulse_channel(P2500Ctc *ctc, int ch) {
     return true;
 }
 
-void p2500_ctc_tick(P2500Ctc *ctc) {
-    /* Channel 0's ZC/TO output pin is wired into channels 1-3's CLK/TRG
-     * input on real hardware - the textbook Z80-CTC "one channel as baud-
-     * rate generator, the rest as per-line dividers" pattern (see ctc.h).
-     * Not confirmed by schematic/continuity on this board, but strongly
-     * indicated by the actual control words CBIOS programs: channel 0 is
-     * always TIMER mode with interrupts *disabled* (it only needs to
-     * produce pulses, not interrupt the CPU itself), while channels 1-3
-     * are COUNTER mode with interrupts enabled and a time constant of 1
-     * (fire on every incoming pulse) - exactly what "bit-bang the serial
-     * line against CTC timing" (TODO.md T16) needs, and otherwise
-     * unreachable, since nothing else in this emulator ever drives a
-     * COUNTER-mode channel's CLK/TRG pin. */
+void p2500_ctc_tick(P2500Ctc *ctc, bool channel3_rx_ready) {
+    /* Channel 0's ZC/TO output pin is wired into channels 1 and 2's
+     * CLK/TRG input on real hardware - the textbook Z80-CTC "one channel
+     * as baud-rate generator, the rest as per-line dividers" pattern (see
+     * ctc.h). Not confirmed by schematic/continuity on this board, but
+     * strongly indicated by the actual control words CBIOS programs:
+     * channel 0 is always TIMER mode with interrupts *disabled* (it only
+     * needs to produce pulses, not interrupt the CPU itself), while
+     * channels 1-3 are COUNTER mode with interrupts enabled and a time
+     * constant of 1 (fire on every incoming pulse).
+     *
+     * Channel 3 is deliberately NOT chained the same way. Live tracing
+     * (TODO.md) showed its handler is specifically the console RX byte
+     * push into CBIOS's circular input buffer, with no filtering of the
+     * value read from port $06 - chaining it unconditionally like 1/2
+     * floods that buffer with the idle "no key" byte on every single
+     * pulse (confirmed live: the buffer fills solid within the first few
+     * thousand instructions and every real keystroke queued afterward is
+     * silently dropped, since the buffer never has room). Real hardware
+     * presumably only pulses channel 3's CLK/TRG when a keyboard
+     * controller actually has a byte ready - `channel3_rx_ready` (from
+     * machine.c, true exactly when a queued keystroke is waiting to be
+     * delivered) stands in for that same real condition. */
     bool ch0_pulse = false;
     if (!ctc->counter_mode[0]) ch0_pulse = pulse_channel(ctc, 0);
 
-    for (int ch = 1; ch < P2500_CTC_CHANNELS; ch++) {
+    for (int ch = 1; ch <= 2; ch++) {
         if (ctc->counter_mode[ch]) {
             if (ch0_pulse) pulse_channel(ctc, ch);
         } else {
             pulse_channel(ctc, ch);
         }
+    }
+
+    if (ctc->counter_mode[3]) {
+        if (ch0_pulse && channel3_rx_ready) pulse_channel(ctc, 3);
+    } else {
+        pulse_channel(ctc, 3);
     }
 }

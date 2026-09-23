@@ -86,10 +86,16 @@ void p2500_ctc_init(P2500Ctc *ctc);
 void p2500_ctc_write(P2500Ctc *ctc, int channel, uint8_t value); /* ports $00-$03 out */
 uint8_t p2500_ctc_read(P2500Ctc *ctc, int channel);              /* ports $00-$03 in */
 
-/* Advances all active TIMER-mode channels by one step's worth of ticks;
- * call once per p2500_step(). Fires the interrupt callback (edge, once
- * per zero-crossing) on any channel whose down-counter reaches zero with
- * interrupts enabled, then auto-reloads it from its time constant. */
-void p2500_ctc_tick(P2500Ctc *ctc);
+/* Advances all active channels by one step's worth of ticks; call once
+ * per p2500_step(). Fires the interrupt callback (edge, once per
+ * zero-crossing) on any channel whose down-counter reaches zero with
+ * interrupts enabled, then auto-reloads it from its time constant.
+ * `channel3_rx_ready` stands in for a real external device (a keyboard
+ * controller) pulsing channel 3's CLK/TRG only when it actually has a
+ * byte ready - pass true exactly when machine.c has a queued keystroke
+ * waiting to be delivered on port $06 (see the doc comment in the .c
+ * file for why channel 3 specifically needs this instead of the
+ * unconditional chaining channels 1/2 get). */
+void p2500_ctc_tick(P2500Ctc *ctc, bool channel3_rx_ready);
 
 #endif
