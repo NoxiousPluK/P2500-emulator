@@ -78,13 +78,18 @@ typedef struct {
     /* Budget for p2500_fdc_raise_startup_interrupt() (TODO.md ISSUE-1 fix
      * 2). A real uPD765 generates one unsolicited post-reset interrupt
      * *per configured drive* (the classic "issue N SENSE INTERRUPT STATUS
-     * after reset" convention) - confirmed against this ROM's own
-     * behavior, which arms PIO interrupts and waits *twice* in a row
-     * before ever issuing a real command (see TODO.md ISSUE-1). Capped at
-     * 4, the uPD765's real max-drive count, since the exact number this
-     * board actually has isn't known; stops being drawn on once a real
-     * Recalibrate/Seek/Read Data is issued (`real_operation_started`), so
-     * it can't paper over a later, genuine bug. */
+     * after reset" convention). Set to exactly 2 - not a cap "just in
+     * case" but a value pinned down by directly tracing the ROM's own
+     * control flow (TODO.md ISSUE-3): the *third* PIO-arm event is
+     * `$0786`'s "enable interrupt, then immediately stream the already-
+     * built RECALIBRATE command" sequence - there's no `EI` between the
+     * two, because real hardware can't possibly raise a completion
+     * interrupt before the command bytes (and the physical seek behind
+     * them) are done. Firing a synthetic interrupt here is never correct
+     * - it can only hijack control before the real command is sent, not
+     * substitute for a real completion. Stops being drawn on once a real
+     * Recalibrate/Seek/Read Data is issued (`real_operation_started`)
+     * too, as a second line of defense. */
     int startup_interrupts_remaining;
     bool real_operation_started;
 
@@ -120,9 +125,16 @@ void p2500_fdc_init(P2500Fdc *fdc, const uint8_t *disk, size_t disk_size);
  * so machine.c calls this event-triggered (each time PIO port A
  * interrupts are (re-)armed) rather than time-triggered - standing in for
  * "the interrupt was already pending by the time the driver started
- * listening for it." No-op once startup_interrupts_remaining is
- * exhausted or a real operation has started. */
-void p2500_fdc_raise_startup_interrupt(P2500Fdc *fdc);
+ * listening for it." No-op (returns false) once
+ * startup_interrupts_remaining is exhausted or a real operation has
+ * started; returns true when it actually marked one pending - the caller
+ * (machine.c) only pulses the PIO input bit when this returns true. Note
+ * this does NOT touch `int_line`/call the interrupt callback itself
+ * (unlike a real FDC completion) - delivery is the caller's job, as a
+ * one-shot pulse rather than a held level (see machine.c and TODO.md
+ * ISSUE-3 for why: not every consumer of this synthetic interrupt reads
+ * a SENSE INTERRUPT STATUS result to clear a held level). */
+bool p2500_fdc_raise_startup_interrupt(P2500Fdc *fdc);
 uint8_t p2500_fdc_read_status(P2500Fdc *fdc);   /* port $14 */
 uint8_t p2500_fdc_read_data(P2500Fdc *fdc);     /* port $15 read */
 void p2500_fdc_write_data(P2500Fdc *fdc, uint8_t value); /* port $15 write */

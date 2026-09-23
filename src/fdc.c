@@ -32,7 +32,7 @@ void p2500_fdc_init(P2500Fdc *fdc, const uint8_t *disk, size_t disk_size) {
     fdc->last_seek_ok = true;
     fdc->disk = disk;
     fdc->disk_size = disk_size;
-    fdc->startup_interrupts_remaining = 4; /* see fdc.h - real max drive count */
+    fdc->startup_interrupts_remaining = 2; /* see fdc.h - pinned down by tracing, not a guess */
 }
 
 uint8_t p2500_fdc_read_status(P2500Fdc *fdc) {
@@ -55,14 +55,18 @@ static void fire_interrupt(P2500Fdc *fdc) {
     if (fdc->on_interrupt) fdc->on_interrupt(fdc->interrupt_userdata);
 }
 
-void p2500_fdc_raise_startup_interrupt(P2500Fdc *fdc) {
-    if (fdc->real_operation_started || fdc->startup_interrupts_remaining <= 0) return;
+bool p2500_fdc_raise_startup_interrupt(P2500Fdc *fdc) {
+    if (fdc->real_operation_started || fdc->startup_interrupts_remaining <= 0) return false;
     fdc->startup_interrupts_remaining--;
     fdc->seek_int_pending = true;
     if (fdc->verbose)
         fprintf(stderr, "[fdc] post-reset unsolicited interrupt (ISSUE-1 fix 2, %d remaining)\n",
                 fdc->startup_interrupts_remaining);
-    fire_interrupt(fdc);
+    /* Deliberately doesn't call fire_interrupt()/touch int_line - the
+     * caller (machine.c) delivers this as a one-shot pulse instead of
+     * the held level real completions use. See machine.c's port $12
+     * handler and TODO.md ISSUE-3 for why. */
+    return true;
 }
 
 static void set_result(P2500Fdc *fdc, const uint8_t *bytes, size_t n) {

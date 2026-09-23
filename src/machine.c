@@ -159,14 +159,29 @@ static void port_out(z80 *cpu, uint8_t port, uint8_t value) {
         p2500_pio_write_data(&m->pio, P2500_PIO_PORT_B, value);
         break;
     case 0x12: {
-        /* TODO.md ISSUE-1 fix 2: the first time this ROM arms PIO port A
-         * (the FDC's INT line) interrupts, stand in for the real uPD765's
-         * post-reset unsolicited interrupt - see
-         * p2500_fdc_raise_startup_interrupt's doc comment. */
+        /* TODO.md ISSUE-1 fix 2 / ISSUE-3: the first two times this ROM
+         * arms PIO port A (the FDC's INT line) interrupts, stand in for
+         * the real uPD765's post-reset unsolicited interrupts - see
+         * p2500_fdc_raise_startup_interrupt's doc comment.
+         *
+         * Delivered as a one-shot pulse here, deliberately NOT via
+         * fdc->int_line's normal held-level path (T9): that path assumes
+         * whatever ISR runs will read a SENSE INTERRUPT STATUS result to
+         * clear it, which is true for the first synthetic interrupt's
+         * handler but not the second's (confirmed by tracing both ISRs -
+         * see ISSUE-3) - holding the level for a consumer that never
+         * clears it left it stuck asserted, spuriously re-firing the next
+         * time PIO interrupts happened to be re-armed for something else
+         * entirely. A synthetic "the interrupt was already pending"
+         * event is inherently one-shot: pulse it and move on. */
         bool was_enabled = m->pio.int_enabled[P2500_FDC_PIO_PORT];
         p2500_pio_write_control(&m->pio, P2500_PIO_PORT_A, value);
-        if (!was_enabled && m->pio.int_enabled[P2500_FDC_PIO_PORT])
-            p2500_fdc_raise_startup_interrupt(&m->fdc);
+        if (!was_enabled && m->pio.int_enabled[P2500_FDC_PIO_PORT] &&
+            p2500_fdc_raise_startup_interrupt(&m->fdc)) {
+            p2500_pio_set_input_bit(&m->pio, P2500_FDC_PIO_PORT, P2500_FDC_PIO_BIT, true);
+            p2500_pio_set_input_bit(&m->pio, P2500_FDC_PIO_PORT, P2500_FDC_PIO_BIT, false);
+            m->fdc.int_line = false;
+        }
         break;
     }
     case 0x13:
