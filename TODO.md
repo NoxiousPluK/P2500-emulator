@@ -409,78 +409,113 @@ not `$04D5` as `main.c`'s landmark list assumes. Full table:
   data). `--verbose-io` now logs every decoded WR group and field.
   Status: resolved and committed.
 
-- **ISSUE-3: a live run now gets all the way to programming the DMA
-  correctly for READ DATA, then deadlocks *before* the actual `READ
-  DATA` opcode is ever written to port `$15` — root cause found, fix
-  identified but not yet applied.** Found immediately after ISSUE-2's fix
-  let the boot run far enough to reach this point for the first time.
-  Original write-up here proposed two candidate fixes inside `fdc.c`
-  (narrow `CB` to `COMMAND`-phase-only, and/or let a fresh command byte
-  abandon a stale unread result); `Datasheets and manuals/NEC UPD765.PDF`
-  (the *real* µPD765 datasheet — `NEC UPD765C.PDF` is mislabeled and is
-  actually a µPD780/Z80-clone CPU datasheet with no FDC content at all,
-  worth renaming/flagging) rules **both of those out directly**:
+- **ISSUE-3: a live run deadlocked before `READ DATA` was ever issued —
+  RESOLVED.** `Datasheets and manuals/NEC UPD765.PDF` (the *real* µPD765
+  datasheet — `NEC UPD765C.PDF` is mislabeled and is actually a
+  µPD780/Z80-clone CPU datasheet with no FDC content at all, worth
+  renaming/flagging) settled the first question directly:
 
   > "It is important to note that during the Result Phase all bytes
   > shown in the Command Table must be read... The µPD765 will not
   > accept a new command until all seven bytes have been read."
 
-  This is explicit, unambiguous, and confirms `fdc.c`'s current behavior
-  (refusing a new command while a result byte sits unread) is *correct*,
-  real hardware fidelity - not a bug to soften. So the real question
-  isn't "should fdc.c tolerate this," it's "why does the ROM leave that
-  byte unread when a real board evidently boots fine."
+  So `fdc.c` refusing a new command while a result byte sits unread is
+  correct, real-hardware-accurate behavior — the two candidate `fdc.c`
+  fixes floated in an earlier version of this entry were both wrong. The
+  real question was why the ROM leaves a byte unread when a real board
+  evidently boots fine, and tracing the exact instruction that skips the
+  read answered it precisely:
 
-  Tracing the exact instruction that never gets executed answers it. The
-  ISR that issues this unread SENSE INTERRUPT STATUS is at `$0798` -
-  reached as the **third** delivery of TODO.md ISSUE-1's synthetic
-  "post-reset unsolicited interrupt" (budgeted at 4, one per PIO-arm
-  event). Disassembling `$0798`:
+  `$0786` arms PIO port A interrupts (`$0791: OUT ($12),A`) and then, with
+  **no `EI` in between**, immediately streams whatever command is sitting
+  in `$FEA2` (`$0794: CALL $0A87`) — the `RECALIBRATE` command `$056B`'s
+  handler had just built. That's correct on real hardware: a `RECALIBRATE`
+  completion interrupt physically can't arrive before the command bytes
+  (and the seek behind them) are sent. But TODO.md ISSUE-1 fix 2's
+  synthetic "post-reset unsolicited interrupt" fires *synchronously* the
+  instant PIO is armed — hijacking control before `$0794` can run, into
+  ISR `$0798`, whose own internal `SENSE INTERRUPT STATUS` (`$0A78`,
+  overwrites `$FEA2`) clobbers the command buffer. Control then returns to
+  `$0794`, which streams the now-stale `SENSE INTERRUPT STATUS` instead of
+  `RECALIBRATE` — via the bare streamer (`$0A87`/`sub_0a87h`, confirmed by
+  full disassembly to never touch port `$15` for input), so that result
+  goes permanently unread. `RECALIBRATE` never gets sent at all.
+
+  **Fix, two parts** (`fdc.c`/`fdc.h`/`machine.c`):
+  1. Lowered the fix-2 budget from 4 to 2 — pinned down by tracing, not
+     guessed: the ROM's own structure only performs two PIO-arm events
+     before a real command is built and ready to stream (`$0786`'s is the
+     third arm event, and it's structurally different from the first two).
+  2. A second, compounding bug: the synthetic interrupt was delivered
+     through `fdc->int_line`'s held-level path (T9), which assumes the ISR
+     eventually reads a SIS result to clear it. True for the first
+     synthetic interrupt's handler (`$0883`), **not** the second's
+     (`$0752` — confirmed by full disassembly to never touch the FDC at
+     all). Holding the level left it stuck asserted after `$0752` ran,
+     spuriously re-firing the next time PIO interrupts happened to be
+     re-armed for something unrelated — which is what was actually
+     reaching `$0798`, not a third budgeted firing. Fixed by delivering
+     the synthetic interrupt as a one-shot pulse (mirroring the pre-T9
+     model) instead, decoupled from the held-level path real FDC
+     completions still correctly use.
+
+  **Verified live**: `RECALIBRATE` and `READ DATA` are issued for the
+  first time ever, the DMA delivers a real 4096-byte transfer, and PC
+  reaches **`$4A00`** — sector-0's own `JP` target, the actual Phase 1
+  success criterion — for the first time. See ISSUE-4 for what's next.
+  Status: resolved and committed.
+
+- **ISSUE-4: the first real `READ DATA` reads the wrong disk location —
+  open, not yet investigated.** Found immediately after ISSUE-3's fix
+  while confirming `$4A00` was reached for real.
+
+  The `READ DATA` command ISSUE-3 unblocked reads C=1 (cylinder 1),
+  H=0, R=1, length 4096 bytes (16 sectors), into RAM at `$1000`:
   ```
-  $0798  LD ($FF26),SP / LD SP,$FF26 / CALL $0853
-  $07A3  LD A,$73 / DI / OUT ($12),A / EI      ; PIO int off, then on
-  $07A9  CALL $0A87                             ; <- streams SIS, direct
-  $07AC  LD A,($FEAC) / AND $C0 / CP $C0 / JR Z,$07C3
-  $07B5  LD A,$01 / LD ($FED5),A / ... / JP $FEC9
-  $07C3  ... / JP $03D9
+  [fdc] command READ DATA (opcode $06) args=[$00 $01 $00 $01 $01 $10 $0E $00]
+  [dma] delivered 4096 bytes to RAM $1000
   ```
-  `$0A87` (`sub_0a87h`) is the **raw command streamer only** - it writes
-  bytes out, full stop, with no result read anywhere in its body (verified
-  by full disassembly: `PUSH AF/BC/HL`, `CALL $0AC2` wait-not-busy,
-  stream loop, `POP HL/BC/AF`, `RET` - nothing touches port `$15` for
-  input). Contrast with `$0883` and `$0752`'s ISRs, which both `CALL
-  $0A78` (`sub_0a78h`) instead - the higher-level wrapper that streams
-  *and then reads back* the result via `sub_0aa0h`. `$0798` is simply
-  built differently: it re-issues a SENSE INTERRUPT STATUS as a bare
-  nudge and inspects `($FEAC)` - the *previous* result, from whichever
-  earlier SIS last wrote there - never the one it just issued. Nothing
-  downstream of `$0798` ever reads the fresh result either.
+  But the disk's actual, known boot-sector content (`00 00 FB 11 30 10
+  CD 03 00 ...` — established back in `TODO.md`'s original decode, and
+  directly re-confirmed by reading the `.raw` file) sits at **C=0, R=1**
+  (byte offset 0), not C=1 (offset `0x1000`, confirmed to be unrelated
+  program-looking bytes, not the boot stub). T8's landmark gating
+  correctly flagged the resulting `$1000`/`$4A00` landmark hits as not
+  matching expected boot-sector bytes - real progress (PC did reach
+  those addresses) but not yet the real thing.
 
-  Put together: `$0798` is not a generic "drain the next pending startup
-  interrupt" handler at all, unlike `$0883`/`$0752` - it's a
-  differently-shaped handler for what's almost certainly a **different
-  real interrupt source** (a drive-ready or timing-related event, given
-  it specifically checks `($FEAC)` for the Drive Not Ready code `$C0`),
-  and it was only reached here because ISSUE-1 fix 2's budget (4, generic,
-  fired on every PIO-arm event) doesn't distinguish "another one of the
-  same post-reset batch" from "a structurally different later event."
-  The first two synthetic firings (→ `$0883`, → `$0752`) are the ones
-  this ROM's own structure actually confirms need to happen this way
-  (see ISSUE-1); this third one is very likely the fix 2 approximation
-  overreaching past where it's warranted.
+  This `READ DATA` is issued by `sub_0333h`'s outer sequencer processing
+  the **`$FE5E`** request block - a *different* request from `$FE45`,
+  which this document's own earlier decode already identified as the
+  one whose status `$00` specifically triggers `JP $1000` (see "Where
+  the boot sector really goes"). `$FE5E`'s read is very likely for a
+  different, legitimate purpose (loading more of the system beyond the
+  boot sector itself) and just happens to target RAM `$1000` too,
+  overwriting where the real boot sector will eventually go. `$FE45`'s
+  own request hasn't been reached yet in any traced run.
 
-  **Not yet applied**: lowering the fix-2 budget from 4 to 2 is the
-  obvious next experiment, but it only trades this hang for an earlier
-  one (`$06C6`'s third wait, now fed by nothing) unless whatever *real*
-  event `$0798` is meant to respond to gets modeled too - and this
-  project doesn't yet know what that event is. Worth investigating
-  alongside T4's own open note (confirm which PIO bit - PA0 or PA1 -
-  actually carries the FDC's `INT`; `$0798`'s trigger may be a related,
-  still-unconfirmed wiring question) rather than guessed at blind.
-  Status: open, root cause pinned down precisely (the exact unread byte,
-  the exact ISR, and the exact reason ISSUE-1 fix 2 over-fires into it);
-  the actual fix needs a correct model of whatever event `$0798` expects,
-  not a change to `fdc.c`.
+  The cylinder value (`C=1`) is computed, not hardcoded: `$09B4`'s
+  command-builder calls a shared linear-block-to-CHS routine
+  (`sub_0a50h`) with inputs from `($FE91)`/`($FE98)` for the cylinder
+  field and `($FE92)`/`($FE99)` for the sector field - both pairs read
+  from RAM state this project hasn't traced the origin of yet.
+  Consistent with the disk's confirmed single-sided, 16-sectors/track,
+  256B/sector geometry (`Disk Images/README.md`), a computed C=1,R=1
+  corresponds to linear block 16 - suggesting `$FE5E`'s request is
+  asking to start reading at block 16, not block 0, which may be
+  entirely correct for whatever `$FE5E` is actually for.
+
+  **Not yet investigated**: what `$FE5E` (and its sibling `$FE19`/`$FE59`)
+  requests actually are, where their block-number fields get set, and
+  whether the run should be expected to continue on afterward to process
+  `$FE45` (the real boot-sector request) - or whether something about
+  `$FE5E`'s read landing on `$1000` is itself a problem (e.g. clobbering
+  memory `$FE45`'s handler still needs). The run's final state after this
+  point was PC back at `$014D` (the RAM-test-failure banner+halt loop),
+  meaning *something* after `$4A00` causes what looks like a full reset -
+  not yet traced.
+  Status: open, not yet investigated beyond identifying which request
+  block is responsible and confirming the geometry math checks out.
 
 ---
 
