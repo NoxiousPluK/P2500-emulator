@@ -505,7 +505,7 @@ int main(int argc, char **argv) {
     if (vram_dump_path) {
         FILE *f = fopen(vram_dump_path, "wb");
         if (f) {
-            fwrite(&m.ram[0x8000], 1, 0x4000, f);
+            fwrite(m.vram, 1, P2500_VRAM_SIZE, f);
             fclose(f);
             printf("Wrote video RAM ($8000-$BFFF) to %s\n", vram_dump_path);
         } else {

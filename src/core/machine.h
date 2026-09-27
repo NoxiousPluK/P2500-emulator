@@ -51,6 +51,26 @@
 #define P2500_RAM_SIZE 0x10000
 #define P2500_EPROM_SIZE 0x1000
 
+/* The video card carries its own DRAM bank, and the port $05 latch gates
+ * $8000-$BFFF between it and main DRAM (TODO.md T1 "Extra", and
+ * ../Tracing/P2500-predicted-wiring-from-firmware.md C3: "latch bits 0-2
+ * gate the $8000-$BFFF window between main DRAM and the video card's DRAM,
+ * all-clear = video").
+ *
+ * The four values ever written agree with that reading exactly:
+ *   $07  bits 0-2 set   -> main DRAM, EPROM in    (IPL normal)
+ *   $0F  bits 0-2 set   -> main DRAM, EPROM out   (CP/M normal, 617x/run)
+ *   $00  bits 0-2 clear -> video DRAM, EPROM in   (IPL banner + VRAM clear)
+ *   $08  bits 0-2 clear -> video DRAM, EPROM out  (CBIOS console output)
+ *
+ * Modelling the two as one array happened to work for the IPL and for CP/M,
+ * because neither keeps anything it cares about at $8000-$BFFF. It does not
+ * work for the UCSD p-System, which loads its bootstrap straight into that
+ * range - so its "screen" was main RAM being rendered as if it were video. */
+#define P2500_VRAM_SIZE 0x4000
+#define P2500_VRAM_BASE 0x8000
+#define P2500_BANK_VIDEO_MASK 0x07 /* all clear selects the video card's DRAM */
+
 /* Z8400A (Z80A) at 4 MHz - confirmed from the real CPU card's silicon, see
  * ../P2500-general-findings.md. Everything time-based in this emulator is
  * derived from this one number and the CPU core's T-state counter; there
@@ -94,6 +114,7 @@ typedef struct {
     z80 cpu;
     uint8_t ram[P2500_RAM_SIZE];
     uint8_t eprom[P2500_EPROM_SIZE];
+    uint8_t vram[P2500_VRAM_SIZE]; /* the video card's own DRAM, see above */
     uint8_t bank; /* last value written to port $05 */
 
     P2500Fdc fdc;
@@ -140,5 +161,8 @@ void p2500_step(P2500Machine *m);
 /* Bank-aware read of `addr`, matching what the CPU core itself would see -
  * for diagnostics that want to look at low memory without a live z80. */
 uint8_t p2500_peek(const P2500Machine *m, uint16_t addr);
+/* True while port $05's latch maps the video card's DRAM into
+ * $8000-$BFFF instead of main DRAM. */
+bool p2500_video_window_selected(const P2500Machine *m);
 
 #endif

@@ -7,9 +7,16 @@
  * EPROM. See TODO.md T1. */
 #define P2500_BANK_RAM_LOW_BIT 0x08
 
+bool p2500_video_window_selected(const P2500Machine *m) {
+    return (m->bank & P2500_BANK_VIDEO_MASK) == 0;
+}
+
 uint8_t p2500_peek(const P2500Machine *m, uint16_t addr) {
     if (addr < P2500_EPROM_SIZE && (m->bank & P2500_BANK_RAM_LOW_BIT) == 0)
         return m->eprom[addr];
+    if (addr >= P2500_VRAM_BASE && addr < P2500_VRAM_BASE + P2500_VRAM_SIZE &&
+        p2500_video_window_selected(m))
+        return m->vram[addr - P2500_VRAM_BASE];
     return m->ram[addr];
 }
 
@@ -20,7 +27,15 @@ static uint8_t mem_read(void *userdata, uint16_t addr) {
 
 static void mem_write(void *userdata, uint16_t addr, uint8_t value) {
     P2500Machine *m = (P2500Machine *)userdata;
-    m->ram[addr] = value; /* writes to $0000-$0FFF always land in RAM */
+    /* Writes to $0000-$0FFF always land in RAM - the EPROM is read-only and
+     * selected on read only, which is what lets the ROM's own RAM test run
+     * over its own address range without erasing itself (TODO.md T1). */
+    if (addr >= P2500_VRAM_BASE && addr < P2500_VRAM_BASE + P2500_VRAM_SIZE &&
+        p2500_video_window_selected(m)) {
+        m->vram[addr - P2500_VRAM_BASE] = value;
+        return;
+    }
+    m->ram[addr] = value;
 }
 
 /* IM2 CALLs the word stored at (I<<8)|vector - here that word is usually
