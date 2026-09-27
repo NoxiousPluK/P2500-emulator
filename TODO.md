@@ -1027,7 +1027,71 @@ here is blocked on hardware.
   over 20 M steps without ever exceeding baseline, so whatever stops *it*
   is definitely not protection.
 
-  **Start with `P2k5_CPM`.** Its track 0 is 14-of-16 sectors identical to
+  **ROOT CAUSE FOUND (2026-09-27): the four failing images are
+  double-stepped dumps, and the `.raw` conversion throws away the evidence.**
+  Parsing the `.IMD` originals' per-track *cylinder maps* (the ID-field
+  cylinder recorded for each track, present on every image - IMD head flag
+  `0x80`) splits the nine images perfectly along the boot/no-boot line:
+
+  | Image | Tracks | ID cylinder sequence | |
+  |---|---|---|---|
+  | `P25K_B`, `P25K_G`, `P25K_S`, `P25TEST` | 80 | `1,2,3,...,80` | ID = physical + 1 |
+  | `P2500GAM` | 77 | `1,2,3,...,77` | ID = physical + 1 |
+  | `P2k5_CPM`, `P2k5_LOGIC`, `P2k5_TKS` | 40 | **`1,3,5,...,79`** | **stride 2** |
+  | `p25k_prg` | 80 | **`1,3,5,...,79`** then a `-39` jump | **stride 2** |
+
+  Every image with contiguous IDs boots or nearly boots; every image with
+  stride 2 fails. That is not a coincidence and it is not this emulator's
+  bug: those disks are 48 TPI media written by a 96 TPI drive that
+  double-stepped, so the ID field carries the *drive's* physical head
+  position rather than a contiguous track number. There is no ID cylinder 2
+  anywhere on `P2k5_CPM` - so when the boot loader asks for it, a real FDC
+  would never find it either, which is exactly the `$06CB` stall.
+
+  **`fdc.c` is not wrong, the input format is lossy.** `.raw` is a flat
+  linear dump; the ID-to-track relationship only exists in the `.IMD`.
+  Confirmed by experiment: patching `do_read_data()` to map `(C-1)/2`
+  instead of `C-1` clears the `$06CB` stall on `P2k5_CPM` outright and gets
+  into loaded code at `$36F0`. It then fails differently, because a blunt
+  divide aliases even cylinder IDs onto odd tracks when those IDs genuinely
+  do not exist on the disk - which is the proof that guessing a stride is
+  the wrong fix and T41 is the right one.
+
+  The disk itself is *complete*, incidentally - not a half dump. Its CP/M
+  directory at track 1 (`p2500-40-sys1`, 1 reserved track, not 2) holds 21
+  coherent files that all fit inside the 40-track capacity; the three
+  entries referencing blocks beyond it are corrupt junk, one pointing at
+  block 255 which exceeds even an 80-track disk.
+
+  **Start with `P2k5_CPM`** once T41 lands.
+
+- [ ] **T41. Read `.IMD` images directly, instead of pre-flattened `.raw`.**
+  The `.IMD` originals in `../Disk Images/originals/` carry, per track: the
+  real sector-ID map, the **ID cylinder map**, the head map, the data rate
+  mode, and per-sector "bad/deleted data" flags. Flattening to `.raw`
+  discards all of it, and T32 shows that is exactly the information four of
+  the nine images need in order to boot at all.
+
+  The format is simple enough to parse directly and this project already has
+  a Python parser for it (`../Disk Images/tools/python/imd_decode.py`) to
+  check a C implementation against: an ASCII header terminated by `$1A`,
+  then one variable-length track record each - `mode, cylinder, head,
+  sector-count, size-code`, a sector-number map, optional cylinder and head
+  maps (flagged by head bits 7 and 6), then one record per sector, where the
+  leading type byte says whether the sector is absent, stored whole, or
+  run-length compressed to a single repeated byte.
+
+  What that buys, beyond the four broken images: sector lookup by *real ID*
+  rather than by computed LBA (so the P2500's `physical + 1` convention
+  stops being special-cased and becomes a property of the media), honest
+  "sector not found" errors instead of silently reading the wrong track,
+  real interleave rather than relying on the `.raw` already being
+  de-skewed, and a place to model bad sectors - which `P25K_S` has and which
+  is currently invisible.
+
+  Keep `.raw` support: it is what `make test` uses and what the SESAM
+  regression depends on. Select on file extension or magic.
+ Its track 0 is 14-of-16 sectors identical to
   `P25K_B`'s and its boot sector is byte-identical, so the bootstrap is
   proven to work in this emulator; only the content it goes on to load
   differs. Anything that fails there is therefore much more likely to be
