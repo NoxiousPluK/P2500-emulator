@@ -3,6 +3,7 @@
 
 #include <stdint.h>
 #include <stddef.h>
+#include <stdbool.h>
 
 /*
  * SESAM port ($0F) model - the copy-protection dongle / bootable-cartridge
@@ -24,6 +25,9 @@ typedef struct {
     const uint8_t *stream;
     size_t stream_len;
     size_t pos;
+    unsigned long reads;  /* statistics - a protection check shows up here */
+    unsigned long writes;
+    bool verbose;
 } P2500Sesam;
 
 void p2500_sesam_init(P2500Sesam *s, const uint8_t *stream, size_t stream_len);

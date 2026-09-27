@@ -1009,6 +1009,24 @@ here is blocked on hardware.
   not boot this disk". The RAM-test failure path at `$0162` lands in the
   same place with error code 8.
 
+  **SESAM protection is not the current blocker for any of them — tested.**
+  A dongle check has to touch port `$0F`, so `sesam.{c,h}` now counts and
+  logs every access and the exit report prints the totals. The pure IPL
+  baseline, with no disk at all, is **32 reads / 6 writes**. Measured:
+
+  | Image | `$0F` reads/writes | Reading |
+  |---|---|---|
+  | `P25K_B`, `P25K_S`, `P25TEST` | 35 / 9 | baseline **+3/+3** — the CP/M system does one extra transaction, and these are the disks that *work* |
+  | `P25K_G`, `P2k5_LOGIC`, `P2k5_TKS`, `p25k_prg` | 32 / 6 | exactly baseline — **no disk-resident code ever touches SESAM** |
+  | `P2k5_CPM`, `P2500GAM` | 48 / 9 | baseline + one more full 16-read probe, i.e. the IPL's own retry, not disk code |
+
+  So SESAM access *correlates with success*, not failure. Two caveats worth
+  keeping: for the images whose boot never starts (the p-System disks,
+  `p25k_prg`) no disk code has run yet, so this rules SESAM out as the
+  **current** blocker but not as a later one; and `P25K_G` runs 82 transfers
+  over 20 M steps without ever exceeding baseline, so whatever stops *it*
+  is definitely not protection.
+
   **Start with `P2k5_CPM`.** Its track 0 is 14-of-16 sectors identical to
   `P25K_B`'s and its boot sector is byte-identical, so the bootstrap is
   proven to work in this emulator; only the content it goes on to load
@@ -1079,6 +1097,14 @@ src/gui/    -> p2500-gui    SDL3 + Dear ImGui; the only C++ in the tree
   stdout, the two VRAM dumps, the RAM dump and the logs. `make test` passes
   unchanged. `nm --undefined-only libp2500.a` resolves to libc plus the
   library's own symbols and nothing else.
+
+  **One regression this introduced, found by `make test` and fixed:** the
+  new per-object build had no header dependency tracking, so editing a
+  header rebuilt only its own `.c` and left every other object compiled
+  against the old struct layout — memory corruption, not a stale-build
+  annoyance. The old all-in-one-command Makefile could not have this bug and
+  so hid the need for it. `CFLAGS` now carries `-MMD -MP` with `-include
+  $(DEPS)`; touching `sesam.h` correctly rebuilds 4 targets.
 
   Two things that audit turned up, both feeding T34 rather than blocking
   here: the core's only `printf` is in the vendored core's

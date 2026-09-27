@@ -16,7 +16,11 @@
 
 CC = cc
 AR = ar
-CFLAGS = -std=c11 -Wall -Wextra -O2 -Isrc
+# -MMD -MP emits a .d per object listing the headers it used, so editing a
+# header rebuilds everything that includes it. Without this, changing a
+# struct in a header silently leaves other objects compiled against the old
+# layout - which is a memory-corruption bug, not a stale-build annoyance.
+CFLAGS = -std=c11 -Wall -Wextra -O2 -Isrc -MMD -MP
 
 LIB = libp2500.a
 BIN = p2500-emu
@@ -25,6 +29,7 @@ CORE_SRC = $(wildcard src/core/*.c) src/core/vendor/superzazu_z80/z80.c
 CLI_SRC = $(wildcard src/cli/*.c)
 CORE_OBJ = $(CORE_SRC:.c=.o)
 CLI_OBJ = $(CLI_SRC:.c=.o)
+DEPS = $(CORE_OBJ:.o=.d) $(CLI_OBJ:.o=.d)
 
 .PHONY: all clean run test
 
@@ -40,7 +45,9 @@ $(BIN): $(CLI_OBJ) $(LIB)
 	$(CC) $(CFLAGS) -c -o $@ $<
 
 clean:
-	rm -f $(BIN) $(LIB) $(CORE_OBJ) $(CLI_OBJ)
+	rm -f $(BIN) $(LIB) $(CORE_OBJ) $(CLI_OBJ) $(DEPS)
+
+-include $(DEPS)
 
 run: $(BIN)
 	./$(BIN) --rom roms/ipl.bin

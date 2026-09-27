@@ -258,6 +258,7 @@ int main(int argc, char **argv) {
     m.pio.verbose = verbose_io;
     m.dma.verbose = verbose_io;
     m.ctc.verbose = verbose_io;
+    m.sesam.verbose = verbose_io;
     m.keyboard.verbose = verbose_io;
     m.serial.verbose = true; /* always show console TX - it's this project's only view of program output */
 
@@ -435,6 +436,8 @@ int main(int argc, char **argv) {
     }
     printf("Emulated time: %.3f s (%lu T-states at %u Hz)\n",
            (double)m.cpu.cyc / (double)P2500_CPU_HZ, m.cpu.cyc, P2500_CPU_HZ);
+    if (m.sesam.reads || m.sesam.writes)
+        printf("SESAM port $0F: %lu read(s), %lu write(s)\n", m.sesam.reads, m.sesam.writes);
     printf("Interrupts (daisy chain order, requests/acknowledged):\n ");
     for (int i = 0; i < P2500_INT_SOURCES; i++) {
         int src = p2500_intctl_chain_order[i];
