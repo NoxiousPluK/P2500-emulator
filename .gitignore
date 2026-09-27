@@ -1,3 +1,5 @@
 p2500-emu
 CLAUDE.md
 shots/
+libp2500.a
+*.o

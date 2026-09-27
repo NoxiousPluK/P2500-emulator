@@ -1020,8 +1020,8 @@ src/cli/    -> p2500-emu    headless; what `make test` runs
 src/gui/    -> p2500-gui    SDL3 + Dear ImGui; the only C++ in the tree
 ```
 
-- [ ] **T33. Split the tree into `core` / `cli` / `gui`, with no behaviour
-  change.** Pure refactor, and it should be verifiable as one: `make test`
+- [x] **T33. Split the tree into `core` / `cli` / `gui`, with no behaviour
+  change. — DONE (2026-09-27).** Pure refactor, and it should be verifiable as one: `make test`
   must pass before and after with byte-identical output, and the SESAM VRAM
   diff must stay exact. Move `machine`, `ctc`, `pio`, `dma`, `fdc`,
   `keyboard`, `sesam`, `intctl` and `vendor/` into `src/core/`; `main.c`
@@ -1030,6 +1030,26 @@ src/gui/    -> p2500-gui    SDL3 + Dear ImGui; the only C++ in the tree
   Do this one first and on its own. It is the only item here that touches
   every file, and mixing it with functional change makes both harder to
   review.
+
+  **Done.** `libp2500.a` now builds from `src/core/` and links with nothing
+  but libc; `p2500-emu` is `src/cli/main.o` + the library. Core headers are
+  self-contained — every `src/core/*.c` compiles with no `-I` flag at all,
+  because `"..."` includes resolve relative to the including file. Only one
+  source line changed anywhere: `main.c`'s `#include "machine.h"` became
+  `#include "core/machine.h"`.
+
+  Verified rather than asserted: five runs (SESAM, CP/M boot, `DIR`,
+  `--verbose-io`, and a `--watch`/`--count`/`--break` debug run) produce
+  **byte-identical** output before and after across all nine artifacts —
+  stdout, the two VRAM dumps, the RAM dump and the logs. `make test` passes
+  unchanged. `nm --undefined-only libp2500.a` resolves to libc plus the
+  library's own symbols and nothing else.
+
+  Two things that audit turned up, both feeding T34 rather than blocking
+  here: the core's only `printf` is in the vendored core's
+  `z80_debug_output()` (never called), and its only file I/O is
+  `p2500_load_rom()` — loading media is arguably the front-end's job and
+  could move out when the log callback lands.
 
 - [ ] **T34. Make the core embeddable: a log callback, and a real reset.**
   Two concrete blockers, both found by audit rather than guessed:

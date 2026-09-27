@@ -497,24 +497,43 @@ rather than just inferring it from final state).
 
 ## Files
 
-- `src/machine.{c,h}` - memory map, port dispatch, Z80 core wiring
-- `src/fdc.{c,h}` - the P2500's uPD765 model (ports `$14`/`$15`)
-- `src/sesam.{c,h}` - the SESAM port model (port `$0F`)
-- `src/ctc.{c,h}` - the Z80-CTC model (ports `$12`/`$13`) - protocol-accurate
-  (control-word/time-constant state machine, real vector-byte convention),
-  confirmed working end-to-end, see "Open finding" above for what it
-  revealed and what's still missing one layer up
-- `src/main.c` - headless CLI harness: landmark tracking, stuck-loop
-  detection, the `$3019` real-disk-sector intercept (same interface
-  contract validated in the Python-era work - nothing lives at `$3019`
-  itself, so this substitutes real disk bytes for whatever hardware would
-  have supplied there), the `$1100` unconditional sector refresh, the
-  `--poke ADDR:HEXBYTES` synthetic-RAM-seeding flag, and the
-  `P2500_TRACE_FROM`/`P2500_TRACE_TO` per-step trace (see "Reaching READ
-  DATA" above)
-- `src/vendor/superzazu_z80/` - the vendored Z80 core (MIT, unmodified)
+The tree is split three ways (`TODO.md` T33). `src/core/` is the machine
+model and depends on nothing but libc; `src/cli/` is the headless harness
+that `make test` drives; `src/gui/` will be the SDL3 + Dear ImGui front-end
+(`TODO.md` T36+) and does not exist yet. Nothing in `core/` may depend on
+either front-end.
+
+**`src/core/` → `libp2500.a`**
+
+- `machine.{c,h}` - memory map, port dispatch, Z80 core wiring, the
+  per-instruction step that advances every device and arbitrates interrupts
+- `intctl.{c,h}` - the IM2 daisy chain (`TODO.md` T17). Hold-until-
+  acknowledged, priority by chain position, release on `RETI`
+- `ctc.{c,h}` - Z80A-CTC at ports `$00`-`$03`, T-state driven with a real
+  16/256 prescaler, and per-channel CLK/TRG sources decoded from CBIOS's own
+  ISRs (`TODO.md` T18/T19)
+- `pio.{c,h}` - Z80A-PIO at ports `$10`-`$13` (the FDD card)
+- `dma.{c,h}` - Z80A-DMA at port `$16`, a real self-describing
+  register-stream parser
+- `fdc.{c,h}` - the uPD765 model (ports `$14`/`$15`)
+- `keyboard.{c,h}` - port `$06` keyboard in, port `$04` serial out
+- `sesam.{c,h}` - the SESAM dongle / bootable-cartridge port (`$0F`)
+- `vendor/superzazu_z80/` - the vendored Z80 core (MIT). One local addition,
+  marked as such: an optional `on_reti` callback, without which the
+  interrupt daisy chain cannot see `RETI` and so cannot model IEO release
+
+**`src/cli/` → `p2500-emu`**
+
+- `main.c` - the headless harness: landmark tracking, state-based stuck-loop
+  detection, `--watch` / `--count` / `--break` / `--peek` / `--poke`,
+  `--dump-vram` / `--dump-ram`, `--type` / `--type-after`, and the
+  `P2500_TRACE_FROM`/`P2500_TRACE_TO` per-step trace
 - `roms/ipl.bin`, `roms/charrom.bin` - copies of this project's own dumped
   ROMs (see `../ROM Dumps/`)
 - `roms/sesam_banner_test.bin` - the validation SESAM stream, see above
 - `tools/render_vram.py` - video-RAM-dump-to-PNG renderer (ported from the
   Python-era `render_boot_screen.py`, generalized to take a file argument)
+- `tools/run_tests.sh` - the regression suite behind `make test`
+- `tools/disasm_ram.sh` - disassembles a `--dump-ram` image at its real
+  addresses; the only usable way to read the CP/M system files, whose
+  on-disk `.phi` form is sector-interleaved
