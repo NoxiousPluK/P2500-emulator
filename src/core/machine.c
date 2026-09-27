@@ -193,7 +193,20 @@ static uint8_t port_in(z80 *cpu, uint8_t port) {
     case 0x06:
         return p2500_keyboard_in(&m->keyboard);
     case 0x09:
-        return m->crtc_index < 18 ? m->crtc_regs[m->crtc_index] : 0x00;
+        /* On a real MC6845 only R14-R17 can be read back: R0-R13 are
+         * write-only and reading them returns nothing meaningful. The card
+         * carries a genuine Motorola MC6845P, so apply the datasheet
+         * behaviour rather than handing back our own stored copy. R14/R15
+         * (cursor) and R16/R17 (light pen) are 14-bit pairs, so the high
+         * byte of each carries only 6 bits. */
+        switch (m->crtc_index) {
+        case 14: case 16:
+            return m->crtc_regs[m->crtc_index] & 0x3F;
+        case 15: case 17:
+            return m->crtc_regs[m->crtc_index];
+        default:
+            return 0x00;
+        }
     case 0x0F:
         return p2500_sesam_in(&m->sesam);
     case 0x10:

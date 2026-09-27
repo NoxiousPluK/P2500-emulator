@@ -223,32 +223,38 @@ more valuable than confirming it.** Full checklist in
    released itself early with `EI`/`RETI`. Tracing `IEI`/`IEO` between the
    Z8430, Z8420 and Z8410 is a continuity check. The emulator currently puts
    the CTC last, which is the conservative reading.
-2. **What pulses CTC channel 2's CLK/TRG** — the 50 Hz real-time clock tick.
+2. **The video card's dot-clock crystal** — the can-shaped part at ref
+   `5101`, never identified. Cheap to read and it settles `TODO.md` T29 by
+   arithmetic: the CRTC is programmed for 311 scanlines of 98 character
+   times, so the frame rate is the dot clock over 243,824. If that comes out
+   at 50 Hz, CTC channel 2 is the video frame rate rather than mains, and
+   the last non-derived frequency in the emulator becomes derived.
+
+3. **What pulses CTC channel 2's CLK/TRG** — the 50 Hz real-time clock tick.
    Mains-derived or the video card's frame rate; both are 50 Hz so the
-   emulator is right either way, but this is the one frequency in the
-   codebase not derived from the 4 MHz crystal.
-3. **Which line selects the video card's attribute plane.** The 16 K × 12
+   emulator is right either way. See the item above for the cheaper route.
+4. **Which line selects the video card's attribute plane.** The 16 K × 12
    organisation is settled (`TODO.md` T27) but the CPU's path to the nibble
    is not, and unlike every other open question in this project it is
    *provably* not answerable from firmware: no software that survives ever
    sets an attribute. Port `$05`'s six unused bits-0-2 combinations are the
    obvious candidate. This is now the best example of a question only
    hardware can settle.
-4. **FDD card: which µPD765 signals reach PIO port A bits 0 and 1.** The
+5. **FDD card: which µPD765 signals reach PIO port A bits 0 and 1.** The
    emulator has to guess this. A 10-minute continuity check settles it.
-5. **FDD card: PIO port B direction** (`$A1` mask → PB0/PB5/PB7 inputs). One
+6. **FDD card: PIO port B direction** (`$A1` mask → PB0/PB5/PB7 inputs). One
    measurement that validates or kills the entire PIO identification.
-6. **Port `$05`'s remaining readable bits.** Bit 7 is RXD and bit 6 is a
+7. **Port `$05`'s remaining readable bits.** Bit 7 is RXD and bit 6 is a
    transmit handshake, both confirmed from the code that reads them. Bits 0–5
    are unknown and currently read back as 1. This is a live polled input now,
    not a write-only latch.
-7. **CPU card: the port `$05` latch and what its outputs gate.** Turns a
+8. **CPU card: the port `$05` latch and what its outputs gate.** Turns a
    reasoned guess into a fact, and is needed properly for the video-RAM
    window.
-8. **CPU card: the four `515xx` decode PROMs' address inputs.** Their truth
+9. **CPU card: the four `515xx` decode PROMs' address inputs.** Their truth
    tables are already dumped but inert without the wiring. Would give the
    complete memory and I/O map in one go.
-9. **The Philips P2500 System Reference Manual (`5103 992 30421`).**
+10. **The Philips P2500 System Reference Manual (`5103 992 30421`).**
    Supersedes all of the above. Still the single biggest documentation gap in
    the whole project.
 
@@ -268,3 +274,6 @@ eventually; none unblocks anything.
   integrity, from `tools/imd_tool.py verify`
 - `../Tracing/P2500-predicted-wiring-from-firmware.md` — what to measure
 - `../P2500-System-Specifications.md` — the consolidated spec sheet
+- MC6845 register semantics: <https://book.martypc.net/display-graphics/6845>
+  (see `TODO.md`'s source assessment for what a 6845 reference can and
+  cannot settle for this board)

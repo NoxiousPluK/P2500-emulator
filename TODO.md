@@ -43,7 +43,7 @@ constant. Where something is still assumed, it says so.
 | `$04` | Serial / printer TX | One data bit, clocked by CTC ch0 |
 | `$05` | Bank latch (W) / status (R) | Write: bit 3 = EPROM out of `$0000`–`$0FFF`; bits 0–2 all clear = video DRAM window at `$8000`–`$BFFF`, all set = main DRAM. **The other six combinations are undecoded and now trip a diagnostic (T27).** Read: bit 7 = RXD, bit 6 = TX handshake; bits 0–5 unknown, read back 1 |
 | `$06` | Keyboard data | Byte-wide, one `IN` per ch3 interrupt |
-| `$08`/`$09` | **MC6845 CRTC** | All 18 registers stored; **nothing reads them yet (T37)**. 80×24, 12 scanlines/row |
+| `$08`/`$09` | **MC6845 CRTC** | All 18 registers stored and printed at exit; **nothing renders from them yet (T37)**. 80×24, 12 scanlines/row, 311 scanlines/frame. Only R14–R17 read back, per the datasheet |
 | `$0A` | Diagnostic / POST latch | Write-only, logged not modelled (T15) |
 | `$0F` | SESAM dongle / bootable cartridge | Access is counted; the IPL-only baseline is 32 reads / 6 writes |
 | `$10`–`$13` | **Z80A-PIO** (Z8420), FDD card | Mode 3 bit control. PA0 = µPD765 `INT` (**assumed, not traced**; if it ever misbehaves, try PA1 before concluding the model is wrong) |
@@ -130,11 +130,26 @@ contexts where a GUI dependency would make it unrunnable.
   12 bytes from `code × 16`). `tools/render_vram.py` is the working
   reference implementation of both, attributes included.
 
-  `machine.h` models all 18 MC6845 registers and nothing reads them. Take
-  geometry from R0/R1/R6/R9, start address from R12/R13, and — the part CP/M
-  exercises immediately — **the cursor from R14/R15 (position) and R10/R11
-  (shape and blink)**. A prompt with no blinking cursor looks wrong from the
-  first frame.
+  **What the firmware actually programs, now printed by the exit report:**
+
+  ```
+  CRTC (MC6845): 61 50 53 0E 18 0B 18 18 00 0B 00 0B 00 00 01 E2 00 00
+    80 cols x 24 rows, 12 scanlines/row, start $0000, cursor $01E2 (lines 0-11)
+  ```
+
+  Three things fall out of that, all measured:
+  - **CP/M maintains the cursor in R14/R15 live.** After `DIR`, the cursor
+    register reads `$01E2` = 482 = row 6 x 80 + 2, which is exactly where
+    the `A>` prompt leaves it. So the cursor needs no guesswork: read the
+    register.
+  - **The cursor is a solid full-cell block**, not blinking: R10 = `$00`
+    (B6B5 = 00 = non-blink) and R10/R11 span scanlines 0-11, the whole cell.
+  - **Start address is `$0000` and stays there** — CP/M scrolls by moving
+    memory, not by moving the CRTC's start address. A renderer can honour
+    R12/R13 anyway, but nothing here exercises it.
+
+  Take geometry from R0/R1/R6/R9 and start address from R12/R13. R12/R13 and
+  R14/R15 are **14-bit pairs** - the high byte carries only 6 bits.
 
   Port the renderer into the core as a `p2500_video_render()` filling a
   caller-supplied 32-bit framebuffer, so the CLI's `--dump-vram` path and
@@ -433,6 +448,16 @@ Small, independent, none of them blocking.
   `$F436` and what it divides by. If something converts it to seconds with a
   constant, that constant *is* the tick rate.
 
+  **New route, if channel 2 turns out to be the video frame rate.** The CRTC
+  registers give the frame geometry exactly: `(R4 + 1) x (R9 + 1) + R5` =
+  `25 x 12 + 11` = **311 scanlines per frame**, at `R0 + 1` = 98 character
+  times per line. So the frame rate is the card's dot clock divided by
+  `8 x 98 x 311` = 243,824. A 12.19 MHz dot clock gives exactly 50 Hz. That
+  turns T29 into arithmetic the moment someone reads the video card's
+  crystal — the can-shaped part at ref `5101`, next to the analog section
+  (`../Actual P2500 hardware/P2500 Video Card/`), which has never been
+  identified. Worth adding to the measurement list as a cheap win.
+
 - [ ] **T14. Read `$0422` handlers 2, 3, 6, 7** (`$04F9`, `$0539`, `$056B`,
   `$057D`) — the only IPL dispatch IDs still unidentified.
 
@@ -444,6 +469,48 @@ Small, independent, none of them blocking.
   model makes it mostly a Makefile target. A browser-playable P2500 is a
   disproportionately good outcome for a machine with this little surviving
   software, and it costs little if T36 uses the callback API from the start.
+
+---
+
+## Reference: external sources on the MC6845
+
+Assessed 2026-09-28. The CRTC is the one chip on this machine that is a
+plain commodity part, so outside material exists — but be clear about what
+it can and cannot tell us. **The 6845 generates timing and addresses and
+nothing else.** It emits a 14-bit memory address (MA) and a 5-bit row
+address (RA) per character clock; turning those into pixels — the character
+ROM, the attribute handling, the pixel serializer — is entirely the host
+board's external logic. So a 6845 reference settles our *geometry and
+cursor* questions and can say nothing about T27's attribute selector.
+
+- **<https://book.martypc.net/display-graphics/6845>** — the more useful of
+  the two. Register-by-register semantics, the VMA counter's load/increment/
+  reset rules, R5 vertical total adjust, the cursor-visible condition (VMA
+  matches R14/R15 **and** the scanline is within R10–R11 **and** blink
+  allows it), and the fact that an out-of-range register select is a no-op
+  on write and implementation-defined on read. Written against IBM CGA/MDA,
+  which is a different board, and that turns out to be the interesting part
+  — see below.
+- **<https://github.com/obscuredcode/mc6845-emulation>** — a 219-line
+  Verilog module for a DE10-Lite FPGA, self-described as a toy, no licence,
+  last touched March 2024. Not reusable here (wrong language, wrong target,
+  and unlicensed), but useful as a **second independent reading of the
+  datasheet**: its register decode shows read paths for R14/R15 and R16/R17
+  only, and 6-bit high bytes on the 14-bit pairs. That corroboration is why
+  the `$09` read behaviour above was changed.
+
+**The genuinely useful thing they gave us is a ruled-out hypothesis.** On
+CGA/MDA the board makes each 6845 address fetch a **16-bit** word — a
+character byte plus an attribute byte — and exposes them to the CPU
+interleaved at `2N` / `2N+1`. That is the industry-standard way to attach
+attributes to a 6845, and it is emphatically **not** what the P2500 does:
+our own traces put characters at consecutive addresses (`$8000`, `$8001`,
+…) with the screen reading contiguously out of a `--dump-vram`. The reason
+is visible in the chip count — the P2500's word is **12** bits, not 16, and
+a 12-bit word cannot be split into two CPU-addressable bytes. So the CGA
+trick is unavailable to this board, which is exactly why its attribute
+nibble must be reached out-of-band. That strengthens T27's conclusion
+rather than changing it.
 
 ---
 

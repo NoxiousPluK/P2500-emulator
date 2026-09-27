@@ -531,6 +531,23 @@ int main(int argc, char **argv) {
     if (m.unknown_bank_writes)
         printf("Port $05: %lu write(s) selected an undecoded $8000-$BFFF window "
                "- see TODO.md T27\n", m.unknown_bank_writes);
+    {
+        /* MC6845 state. Nothing in the emulator reads these yet (TODO.md
+         * T37), so printing them is the only way to see what the firmware
+         * actually programmed. Field widths per the datasheet: R12/R13 and
+         * R14/R15 are 14-bit pairs, so the high byte carries only 6 bits. */
+        const uint8_t *r = m.crtc_regs;
+        unsigned start = (unsigned)((r[12] & 0x3F) << 8 | r[13]);
+        unsigned cursor = (unsigned)((r[14] & 0x3F) << 8 | r[15]);
+        printf("CRTC (MC6845):");
+        for (int ri = 0; ri < 18; ri++) printf(" %02X", r[ri]);
+        printf("\n  %u cols x %u rows, %u scanlines/row, start $%04X, "
+               "cursor $%04X (lines %u-%u%s)\n",
+               r[1], r[6], (unsigned)(r[9] + 1), start, cursor,
+               (unsigned)(r[10] & 0x1F), (unsigned)(r[11] & 0x1F),
+               (r[10] & 0x60) == 0x20 ? ", hidden" :
+               (r[10] & 0x40) ? ", blinking" : "");
+    }
     printf("Interrupts (daisy chain order, requests/acknowledged):\n ");
     for (int i = 0; i < P2500_INT_SOURCES; i++) {
         int src = p2500_intctl_chain_order[i];
