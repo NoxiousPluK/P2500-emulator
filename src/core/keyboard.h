@@ -47,6 +47,14 @@ typedef struct {
      * to finish, swap the disk, then type again (see --type-at/--swap-at).
      * NULL means "no constraint". */
     const unsigned long *release_at;
+
+    /* Live input, for a front-end with real key events. The scripted queue
+     * above models "a session typed in advance"; this models a keyboard.
+     * Scripted bytes are delivered first so the CLI's behaviour - and the
+     * regression suite - are unchanged by this existing. */
+    uint8_t ring[64];
+    uint8_t ring_head, ring_tail;
+
     bool verbose;
 } P2500Keyboard;
 
@@ -55,6 +63,11 @@ void p2500_keyboard_init(P2500Keyboard *kb, const uint8_t *queue, size_t queue_l
  * still an undelivered byte. */
 bool p2500_keyboard_byte_waiting(const P2500Keyboard *kb, unsigned long elapsed_tstates);
 uint8_t p2500_keyboard_in(P2500Keyboard *kb);  /* port $06 */
+
+/* Queue one byte from a live keyboard. Safe to call at any time; drops the
+ * byte if the ring is full, which is what a real controller does when the
+ * host is not draining it. */
+void p2500_keyboard_push(P2500Keyboard *kb, uint8_t byte);
 
 typedef struct {
     bool verbose; /* echo each transmitted byte to stdout as it's sent */

@@ -98,6 +98,61 @@ if grep -q 'selected an undecoded \$8000-\$BFFF window' "$TMP/bank.log"; then
     pass "unknown bank select is counted in the exit report"
 else fail "unknown bank select missing from the exit report"; fi
 
+echo "== 6. The core renderer (T37) and the live keyboard ring (T38)"
+if [ ! -f "$DISK" ]; then
+    fail "disk image missing: $DISK"
+else
+    # --push-at drives p2500_keyboard_push, which is the exact call a GUI
+    # keypress makes, so this covers the front-end input path with no display.
+    $EMU --disk "$DISK" --max-steps 30000000 --push-at '4000:dir\r' \
+         --dump-screen "$TMP/screen.ppm" >"$TMP/screen.log" 2>&1
+    if [ -s "$TMP/screen.ppm" ] && head -c 15 "$TMP/screen.ppm" | grep -q '640 288'; then
+        pass "rendered 640x288 from the CRTC registers"
+    else fail "no 640x288 render produced"; fi
+    python3 - "$TMP/screen.ppm" <<'PY' && pass "render checks passed" || fail "render checks failed"
+import sys
+d = open(sys.argv[1], 'rb').read()
+hdr = d.split(b'\n', 3)
+w, h = (int(v) for v in hdr[1].split())
+px = d[len(b'\n'.join(hdr[:3])) + 1:]
+def lit(x, y):
+    o = (y * w + x) * 3
+    return px[o + 1] > 0x80           # green channel: foreground is bright
+ok = True
+def check(cond, why):
+    global ok
+    if not cond:
+        print("    render check failed: " + why)
+        ok = False
+# Typing DIR through the live ring must have produced text on screen.
+check(sum(1 for y in range(h) for x in range(w) if lit(x, y)) > 1000,
+      "screen is essentially blank - the live keyboard ring delivered nothing")
+# T27a: the 'p' of "Philips" is row 0 col 5, and its descender lives on
+# cell rows 8-9. An 8-row glyph read would leave these blank.
+check(any(lit(5 * 8 + x, y) for x in range(8) for y in (8, 9)),
+      "no descender under the 'p' of Philips - glyph truncated to 8 rows")
+# The cursor is a solid block; CP/M parks it at row 6 col 2 after DIR.
+check(all(lit(2 * 8 + x, 6 * 12 + y) for x in range(8) for y in range(12)),
+      "no solid cursor block at row 6 col 2 (R14/R15 = $01E2)")
+sys.exit(0 if ok else 1)
+PY
+fi
+
+if [ -x ./p2500-gui ]; then
+    echo "== 7. The SDL3 front-end boots headless"
+    if SDL_VIDEODRIVER=dummy ./p2500-gui --disk "$DISK" --frames 400 \
+           --screenshot "$TMP/gui.ppm" >"$TMP/gui.log" 2>&1 &&
+       [ -s "$TMP/gui.ppm" ]; then
+        pass "p2500-gui ran 400 fields and rendered"
+    else fail "p2500-gui failed headless"; fi
+    if cmp -s "$TMP/gui.ppm" "$TMP/screen.ppm" ||
+       head -c 15 "$TMP/gui.ppm" | grep -q '640 288'; then
+        pass "GUI render geometry matches the CLI's"
+    else fail "GUI and CLI renders disagree"; fi
+else
+    echo "== 7. SDL3 front-end - skipped (run 'make gui' to build it)"
+fi
+
 echo
 if [ "$fails" -eq 0 ]; then echo "All checks passed."; exit 0; fi
 echo "$fails check(s) failed."

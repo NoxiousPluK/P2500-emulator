@@ -24,14 +24,25 @@ CFLAGS = -std=c11 -Wall -Wextra -O2 -Isrc -MMD -MP
 
 LIB = libp2500.a
 BIN = p2500-emu
+GUI = p2500-gui
+
+# The GUI is built only when asked for, and only if SDL3 is present, so a
+# headless checkout still builds and `make test` still runs.
+# Test for the package itself: --cflags is legitimately EMPTY when SDL3's
+# headers sit on the default include path, so it cannot be the probe.
+HAVE_SDL3 := $(shell pkg-config --exists sdl3 && echo yes)
+SDL_CFLAGS = $(shell pkg-config --cflags sdl3 2>/dev/null)
+SDL_LIBS = $(shell pkg-config --libs sdl3 2>/dev/null)
 
 CORE_SRC = $(wildcard src/core/*.c) src/core/vendor/superzazu_z80/z80.c
 CLI_SRC = $(wildcard src/cli/*.c)
+GUI_SRC = $(wildcard src/gui/*.c)
 CORE_OBJ = $(CORE_SRC:.c=.o)
 CLI_OBJ = $(CLI_SRC:.c=.o)
-DEPS = $(CORE_OBJ:.o=.d) $(CLI_OBJ:.o=.d)
+GUI_OBJ = $(GUI_SRC:.c=.o)
+DEPS = $(CORE_OBJ:.o=.d) $(CLI_OBJ:.o=.d) $(GUI_OBJ:.o=.d)
 
-.PHONY: all clean run test
+.PHONY: all clean run test gui
 
 all: $(BIN)
 
@@ -41,11 +52,21 @@ $(LIB): $(CORE_OBJ)
 $(BIN): $(CLI_OBJ) $(LIB)
 	$(CC) $(CFLAGS) -o $@ $(CLI_OBJ) $(LIB)
 
+gui: $(GUI)
+
+$(GUI): $(GUI_OBJ) $(LIB)
+	@test "$(HAVE_SDL3)" = yes || { echo "sdl3 not found by pkg-config - install it to build the GUI"; exit 1; }
+	$(CC) $(CFLAGS) -o $@ $(GUI_OBJ) $(LIB) $(SDL_LIBS)
+
+src/gui/%.o: src/gui/%.c
+	@test "$(HAVE_SDL3)" = yes || { echo "sdl3 not found by pkg-config - install it to build the GUI"; exit 1; }
+	$(CC) $(CFLAGS) $(SDL_CFLAGS) -c -o $@ $<
+
 %.o: %.c
 	$(CC) $(CFLAGS) -c -o $@ $<
 
 clean:
-	rm -f $(BIN) $(LIB) $(CORE_OBJ) $(CLI_OBJ) $(DEPS)
+	rm -f $(BIN) $(GUI) $(LIB) $(CORE_OBJ) $(CLI_OBJ) $(GUI_OBJ) $(DEPS)
 
 -include $(DEPS)
 

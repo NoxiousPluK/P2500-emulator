@@ -2,10 +2,11 @@
 
 *A from-scratch emulator for the Philips P2000B / P2500 CPU card.*
 
-**CP/M 2.2 boots to the `A>` prompt and runs typed commands.** Headless so
-far — there is no display and no live keyboard yet; the screen is inspected
-by dumping video RAM and rendering it to a PNG. A real SDL3 + Dear ImGui
-front-end is planned and is the next major piece of work (`TODO.md` P1).
+**CP/M 2.2 boots to the `A>` prompt and runs typed commands, in a window
+you can type into.** `p2500-gui` is an SDL3 front-end with a CRTC-driven
+renderer and live keyboard input; `p2500-emu` is the headless harness that
+`make test` drives. The remaining front-end work is the ImGui debugger
+panels (`TODO.md` T39).
 
 ```
 Philips P2500
@@ -31,13 +32,41 @@ P2000B and P2500 are the same hardware under different case colours
 ## Building
 
 ```
-make
-make test
+make        # libp2500.a + p2500-emu, the headless harness
+make gui    # p2500-gui, needs SDL3
+make test   # the regression suite
 ```
 
-Needs a C11 compiler and nothing else — the Z80 core is vendored, there are
-no external libraries. `make test` is the regression suite: 19 checks in
-~8 s, exit 1 on any failure.
+`make` needs a C11 compiler and nothing else — the Z80 core is vendored and
+there are no external libraries. Only `make gui` needs SDL3 (`extra/sdl3` on
+Arch), and the core deliberately stays dependency-free so `make test` runs
+with no display at all: 23 checks in ~25 s, exit 1 on any failure. The two
+GUI checks skip themselves if `p2500-gui` has not been built.
+
+## Running it as a machine
+
+```
+make gui
+./p2500-gui --disk "../Disk Images/extracted/P25K_B/P25K_B.raw"
+```
+
+It boots to `A>` in a window and you can type at it. Geometry, cursor
+position and cursor shape all come from the MC6845's registers rather than
+being hardcoded, so the window follows whatever the guest programs.
+
+| Key | |
+|---|---|
+| any printable key | sent as ASCII on port `$06` |
+| Return / Backspace / Tab / Esc / Delete | `$0D` / `$08` / `$09` / `$1B` / `$7F` |
+| arrow keys | `$8B` `$87` `$89` `$85` — the WordStar diamond CBIOS's own table at `$E274` decodes |
+| Ctrl+letter | `^A`–`^Z`, so Ctrl-C warm-boots CP/M |
+| F11 | turbo (8x) |
+| F12 | pause |
+
+`--scale N` sets the initial zoom; the window is resizable and letterboxes
+with integer scaling rather than stretching. `--frames N --screenshot f.ppm`
+runs a fixed number of video fields and saves what is on screen, which is
+how the front-end is tested with no display.
 
 ## Running
 
@@ -60,6 +89,9 @@ python3 tools/render_vram.py /tmp/vram.bin /tmp/screen.png
 | `--max-steps N` | instruction budget, default 2,000,000 |
 | `--dump-vram PATH` / `--dump-ram PATH` | write video RAM / all 64 KB at exit |
 | `--dump-vram-attr PATH` | write the 4-bit video attribute plane (TODO.md T27) |
+| `--dump-screen f.ppm` | render the screen through the core's own renderer — the same call the GUI makes |
+| `--charrom PATH` | character generator ROM, default `roms/charrom.bin` |
+| `--push-at MS:STRING` | push keystrokes into the **live** keyboard ring, the path a GUI keypress takes |
 | `--peek ADDR:LEN` / `--poke ADDR:HEXBYTES` | inspect / patch memory |
 | `--watch ADDR[:LEN]` / `--count ADDR` / `--break ADDR` | trace writes, count executions, stop at an address |
 | `--verbose-io` | log every I/O port access (very noisy) |
@@ -147,6 +179,9 @@ not exist yet. **Nothing in `core/` may depend on either front-end.**
   per-instruction step that advances every device and arbitrates interrupts
 - `intctl.{c,h}` — the IM2 daisy chain: hold-until-acknowledged, priority by
   chain position, release on `RETI`
+- `video.{c,h}` — the text renderer, driven by the MC6845 registers. 8x12
+  cells read from the character ROM's 16-byte stride, cursor from R14/R15
+  with its shape from R10/R11, and the card's 4-bit attribute plane
 - `ctc.{c,h}` — Z80A-CTC at `$00`–`$03`, T-state driven with a real 16/256
   prescaler and per-channel CLK/TRG sources decoded from CBIOS's own ISRs
 - `pio.{c,h}` — Z80A-PIO at `$10`–`$13` (the FDD card)
@@ -158,6 +193,14 @@ not exist yet. **Nothing in `core/` may depend on either front-end.**
 - `vendor/superzazu_z80/` — the vendored Z80 core. One local addition, marked
   as such: an optional `on_reti` callback, without which the daisy chain
   cannot see `RETI` and so cannot model IEO release
+
+**`src/gui/` → `p2500-gui`**
+
+- `main.c` — SDL3 front-end on the callback app model
+  (`SDL_AppInit`/`SDL_AppIterate`/`SDL_AppEvent`), one streaming texture,
+  integer scaling, single-threaded. One video field of emulation per
+  presented frame, so the frame loop and the guest's own 50 Hz clock strobe
+  are the same event by construction
 
 **`src/cli/` → `p2500-emu`**
 

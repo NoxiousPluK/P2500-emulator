@@ -26,9 +26,14 @@ the nine disk images. `make test` is the proof and the guard: 19 checks,
 python3 tools/render_vram.py /tmp/vram.bin /tmp/screen.png
 ```
 
-The biggest gap is that **there is still no display and no live keyboard** —
-everything is headless, scripted, and inspected after the fact. That is what
-P1 below is for.
+**It also runs in a window you can type into.** `make gui` builds
+`p2500-gui`, an SDL3 front-end whose geometry, cursor position and cursor
+shape all come from the MC6845's own registers (T35–T38). The headless
+harness is unchanged and is still what `make test` drives.
+
+The biggest remaining gap in P1 is the **debugger panels** (T39) — the
+actual reason for having a GUI — plus T34, which the GUI currently works
+without but a log panel and a reset button will need.
 
 ---
 
@@ -102,7 +107,7 @@ contexts where a GUI dependency would make it unrunnable.
   The core has **no non-const file-scope state at all**, which is the
   expensive property to retrofit and is already correct. Keep it that way.
 
-- [ ] **T35. Pace the machine from `z->cyc`, not from wall-clock sleeps.**
+- [x] **T35. Pace the machine from `z->cyc`, not from wall-clock sleeps.**
   The emulator knows exact emulated time at 4 MHz, and `machine.c` already
   generates the 50 Hz CTC channel-2 strobe — one field is 80,000 T-states.
   Run the core to the next strobe boundary, then present: the frame loop and
@@ -116,7 +121,7 @@ contexts where a GUI dependency would make it unrunnable.
   single-threaded**. One thread is what makes T39 safe to write with no
   locks at all.
 
-- [ ] **T36. SDL3 shell.** Use the callback app model (`SDL_AppInit` /
+- [x] **T36. SDL3 shell. — DONE (2026-09-28).** Use the callback app model (`SDL_AppInit` /
   `SDL_AppIterate` / `SDL_AppEvent`) rather than a hand-rolled main loop: it
   is the shape SDL3 is designed around and it makes T40 nearly free. One
   streaming `SDL_Texture` for the framebuffer, integer scaling, no per-glyph
@@ -124,7 +129,7 @@ contexts where a GUI dependency would make it unrunnable.
   T39's ImGui backend can share it. `sdl3` 3.4.16 is packaged and already
   installed (`extra/sdl3`), so there is no vendoring decision here.
 
-- [ ] **T37. A CRTC-driven renderer, replacing the hardcoded 80x24.**
+- [x] **T37. A CRTC-driven renderer, replacing the hardcoded 80x24. — DONE (2026-09-28).**
   **No longer blocked** — T27 settled the framebuffer layout (8-bit code +
   4-bit attribute per cell) and T27a settled the glyph geometry (8×12, read
   12 bytes from `code × 16`). `tools/render_vram.py` is the working
@@ -151,11 +156,23 @@ contexts where a GUI dependency would make it unrunnable.
   Take geometry from R0/R1/R6/R9 and start address from R12/R13. R12/R13 and
   R14/R15 are **14-bit pairs** - the high byte carries only 6 bits.
 
-  Port the renderer into the core as a `p2500_video_render()` filling a
-  caller-supplied 32-bit framebuffer, so the CLI's `--dump-vram` path and
-  the GUI agree by construction. It takes both planes.
+  **Done**, as `src/core/video.{c,h}`. `p2500_video_render()` fills a
+  caller-supplied 32-bit framebuffer and both front-ends call it, so they
+  agree by construction rather than by two implementations staying in step —
+  the CLI reaches it through `--dump-screen`. Geometry comes from R1/R6/R9,
+  start address from R12/R13, the cursor from R14/R15 with its shape and
+  blink from R10/R11, and the 4-bit attribute plane is composited.
 
-- [ ] **T38. Live keyboard input, and delete `P2500_KEYSTROKE_HZ`.** That
+  The cursor is drawn by inverting the scanlines R10-R11 select, which is
+  how the real chip composites it, and it lands where CP/M puts it with no
+  heuristic: row 6 column 2 after `DIR`.
+
+  Guarded by `make test`, which asserts on the rendered pixels: a 640x288
+  frame, ink below the `p` of "Philips" (the T27a descender, verified to
+  fail if the glyph is truncated back to 8 rows), and a solid cursor block
+  at row 6 column 2.
+
+- [~] **T38. Live keyboard input — WORKING; two pieces deferred.** That
   constant is a 100 Hz retry loop standing in for "the user keeps pressing
   the key", and it exists only because the CLI has no concept of a key
   *event*. A GUI does: strobe CTC channel 3 exactly once per

@@ -138,6 +138,7 @@ typedef struct {
     z80 cpu;
     uint8_t ram[P2500_RAM_SIZE];
     uint8_t eprom[P2500_EPROM_SIZE];
+    uint8_t charrom[0x1000]; /* video card's character generator, see video.h */
     uint8_t vram[P2500_VRAM_SIZE]; /* the video card's own DRAM, see above */
     uint8_t vram_attr[P2500_VRAM_SIZE]; /* 4-bit attribute plane; see above */
     uint8_t bank; /* last value written to port $05 */
@@ -188,7 +189,18 @@ typedef struct {
 } P2500Machine;
 
 void p2500_init(P2500Machine *m);
+
+/* T-states in one 50 Hz field. The machine's own clock strobe and a
+ * front-end's frame boundary are the same event, so a GUI paces itself by
+ * running one of these per presented frame (TODO.md T35). */
+#define P2500_TSTATES_PER_FRAME (P2500_CPU_HZ / P2500_CLOCK_TICK_HZ)
+
+/* Step until the CPU's T-state counter has advanced by at least `tstates`.
+ * Returns the number of instructions executed. Shared by both front-ends so
+ * pacing is identical whoever drives it. */
+unsigned long p2500_run_tstates(P2500Machine *m, unsigned long tstates);
 bool p2500_load_rom(P2500Machine *m, const char *path);
+bool p2500_load_charrom(P2500Machine *m, const char *path);
 void p2500_step(P2500Machine *m);
 /* Bank-aware read of `addr`, matching what the CPU core itself would see -
  * for diagnostics that want to look at low memory without a live z80. */

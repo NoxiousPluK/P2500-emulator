@@ -368,6 +368,24 @@ bool p2500_load_rom(P2500Machine *m, const char *path) {
     return n == P2500_EPROM_SIZE;
 }
 
+unsigned long p2500_run_tstates(P2500Machine *m, unsigned long tstates) {
+    const unsigned long start = m->cpu.cyc;
+    unsigned long steps = 0;
+    while (m->cpu.cyc - start < tstates) {
+        p2500_step(m);
+        steps++;
+    }
+    return steps;
+}
+
+bool p2500_load_charrom(P2500Machine *m, const char *path) {
+    FILE *f = fopen(path, "rb");
+    if (!f) return false;
+    size_t n = fread(m->charrom, 1, sizeof(m->charrom), f);
+    fclose(f);
+    return n == sizeof(m->charrom);
+}
+
 /* CTC channel 2's CLK/TRG: a square wave at P2500_CLOCK_TICK_HZ, derived
  * from the same T-state count everything else uses. CBIOS programs the
  * channel for the rising edge ($D5), so one full period is one tick. */

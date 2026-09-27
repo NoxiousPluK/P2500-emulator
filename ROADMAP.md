@@ -106,15 +106,26 @@ What it took, over and above Phase 1:
 
 ## Phase 3 — an interactive machine (current)
 
-The machine boots but nobody can use it: no display, no live keyboard. This
-is the next major piece of work and it is planned in `TODO.md` P1 (T34–T39),
-with T27 (video attributes) as its one real dependency.
+**Mostly landed 2026-09-28.** `p2500-gui` boots a disk to the `A>` prompt in
+an SDL3 window and takes live keyboard input. Geometry, cursor position and
+cursor shape all come from the MC6845's registers; the renderer lives in the
+core (`p2500_video_render`) and both front-ends call it, so they cannot drift
+apart. Pacing is one video field of emulation per presented frame, which
+makes the frame loop and the guest's own 50 Hz clock strobe the same event by
+construction. `libp2500.a` is still dependency-free and `make test` still
+needs no display — the front-end is tested under `SDL_VIDEODRIVER=dummy`.
 
-The order that matters: **make the core embeddable first** (a log callback
-and a real reset, T34), then pace it from emulated cycles rather than
-wall-clock sleeps (T35), then the SDL3 shell (T36). Renderer and keyboard
-follow. The split into `core` / `cli` / `gui` already landed, so
-`libp2500.a` stays dependency-free and `make test` never needs a display.
+What is left in `TODO.md` P1: **T39, the debugger panels**, which are the
+actual reason for wanting a GUI, and **T34** (a log callback and a real
+reset) which the GUI works without today but a log panel and a reset button
+will need. T38's live input works; what is deferred there is accented-key
+decoding, which needs the `$E274` dead-key table read first rather than
+guessed.
+
+Note that T27 turned out not to gate this after all. The attribute plane is
+modelled and composited, and since nothing that survives ever sets an
+attribute, the renderer was unblocked by *answering* the layout question
+rather than by resolving the write path.
 
 **The GUI's primary purpose is a debugger, not a settings dialog.** Every
 advance in this project came from instrumentation — `--peek`, `--count`,

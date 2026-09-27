@@ -1,4 +1,5 @@
 #include "core/machine.h"
+#include "core/video.h"
 #include <ctype.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -96,6 +97,8 @@ int main(int argc, char **argv) {
     const char *sesam_path = NULL;
     const char *vram_dump_path = NULL;
     const char *vram_attr_dump_path = NULL;
+    const char *screen_dump_path = NULL;
+    const char *charrom_path = "roms/charrom.bin";
     unsigned long max_steps = 2000000UL;
     /* --type-after MS: emulated milliseconds to wait before the first
      * queued keystroke. See keyboard.h for why this is needed. */
@@ -150,6 +153,11 @@ int main(int argc, char **argv) {
     struct { unsigned long at_ms; const char *path; uint8_t *buf; size_t size; bool done; }
         swaps[MAX_SWAPS];
     int num_swaps = 0;
+    /* --push-at drives the LIVE keyboard ring - the same call a GUI keypress
+     * makes (p2500_keyboard_push) - rather than the scripted queue. It exists
+     * so the front-end input path is covered by a headless test. */
+    struct { unsigned long at_ms; const char *text; bool done; } pushes[MAX_SWAPS];
+    int num_pushes = 0;
 
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--rom") && i + 1 < argc) rom_path = argv[++i];
@@ -157,6 +165,8 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--sesam") && i + 1 < argc) sesam_path = argv[++i];
         else if (!strcmp(argv[i], "--dump-vram") && i + 1 < argc) vram_dump_path = argv[++i];
         else if (!strcmp(argv[i], "--dump-vram-attr") && i + 1 < argc) vram_attr_dump_path = argv[++i];
+        else if (!strcmp(argv[i], "--dump-screen") && i + 1 < argc) screen_dump_path = argv[++i];
+        else if (!strcmp(argv[i], "--charrom") && i + 1 < argc) charrom_path = argv[++i];
         else if (!strcmp(argv[i], "--max-steps") && i + 1 < argc) max_steps = strtoul(argv[++i], NULL, 0);
         else if (!strcmp(argv[i], "--verbose-io")) verbose_io = true;
         else if (!strcmp(argv[i], "--type-after") && i + 1 < argc)
@@ -219,6 +229,17 @@ int main(int argc, char **argv) {
             swaps[num_swaps].done = false;
             num_swaps++;
         }
+        else if (!strcmp(argv[i], "--push-at") && i + 1 < argc) {
+            if (num_pushes >= MAX_SWAPS) { fprintf(stderr, "too many --push-at args\n"); return 1; }
+            char *arg = argv[++i];
+            char *colon = strchr(arg, ':');
+            if (!colon) { fprintf(stderr, "bad --push-at syntax, want MS:STRING\n"); return 1; }
+            *colon = '\0';
+            pushes[num_pushes].at_ms = strtoul(arg, NULL, 0);
+            pushes[num_pushes].text = colon + 1;
+            pushes[num_pushes].done = false;
+            num_pushes++;
+        }
         else if (!strcmp(argv[i], "--no-stuck-detect")) stuck_detect = false;
         else if (!strcmp(argv[i], "--watch") && i + 1 < argc) {
             if (num_watches >= MAX_WATCHES) { fprintf(stderr, "too many --watch args\n"); return 1; }
@@ -260,12 +281,14 @@ int main(int argc, char **argv) {
         } else {
             fprintf(stderr, "unknown or malformed argument: %s\n", argv[i]);
             fprintf(stderr, "usage: %s [--rom path] [--disk path] [--sesam path]\n"
-                            "  [--dump-vram path] [--dump-vram-attr path] [--dump-ram path]\n"
+                            "  [--dump-vram path] [--dump-vram-attr path] [--dump-screen file.ppm]\n"
+                            "  [--dump-ram path]\n"
                             "  [--max-steps N] [--verbose-io]\n"
                             "  [--peek ADDR:LEN ...] [--poke ADDR:HEXBYTES ...]\n"
                             "  [--watch ADDR[:LEN] ...] [--count ADDR ...] [--type STRING] [--type-after MS]\n"
                             "  [--type-at MS:STRING ...]\n"
-                            "  [--break ADDR ...] [--swap-at MS:PATH ...] [--no-stuck-detect]\n", argv[0]);
+                            "  [--break ADDR ...] [--swap-at MS:PATH ...] [--push-at MS:STRING ...]\n"
+                            "  [--no-stuck-detect]\n", argv[0]);
             return 1;
         }
     }
@@ -280,6 +303,12 @@ int main(int argc, char **argv) {
     }
     printf("Loaded ROM from %s\n", rom_path);
     resolve_rom_landmarks(&m);
+
+    /* Only --dump-screen needs the character generator, so a missing one is
+     * a warning rather than fatal - every other mode works without it. */
+    if (!p2500_load_charrom(&m, charrom_path) && screen_dump_path)
+        fprintf(stderr, "warning: no character ROM at %s; --dump-screen will be blank\n",
+                charrom_path);
 
     uint8_t *disk_buf = NULL;
     size_t disk_size = 0;
@@ -400,6 +429,23 @@ int main(int argc, char **argv) {
             break;
         }
         if (stop_reason) break;
+
+        for (int pi = 0; pi < num_pushes; pi++) {
+            if (pushes[pi].done) continue;
+            if (m.cpu.cyc < pushes[pi].at_ms * (P2500_CPU_HZ / 1000u)) continue;
+            for (const char *c = pushes[pi].text; *c; c++) {
+                uint8_t b = (uint8_t)*c;
+                if (b == '\\' && c[1]) { /* same escapes as --type */
+                    c++;
+                    b = (*c == 'r') ? 0x0D : (*c == 'n') ? 0x0A :
+                        (*c == 't') ? 0x09 : (uint8_t)*c;
+                }
+                p2500_keyboard_push(&m.keyboard, b);
+            }
+            pushes[pi].done = true;
+            fprintf(stderr, "[step %lu] pushed \"%s\" into the live keyboard ring\n",
+                    step, pushes[pi].text);
+        }
 
         for (int sw = 0; sw < num_swaps; sw++) {
             if (swaps[sw].done) continue;
@@ -635,6 +681,35 @@ int main(int argc, char **argv) {
         } else {
             fprintf(stderr, "failed to write attribute dump to %s\n", vram_attr_dump_path);
         }
+    }
+
+    if (screen_dump_path) {
+        /* Renders through the core's own p2500_video_render (TODO.md T37),
+         * the same call the GUI makes, so the two agree by construction
+         * rather than by two parallel implementations staying in step. */
+        P2500VideoInfo vi;
+        p2500_video_info(&m, &vi);
+        uint32_t *fb = calloc((size_t)vi.width * vi.height, sizeof(uint32_t));
+        FILE *f = fb ? fopen(screen_dump_path, "wb") : NULL;
+        if (f) {
+            static const P2500Palette pal = {
+                .fg = 0xFF46FF00u, .bg = 0xFF080C08u, .fg_dim = 0xFF288C00u,
+            };
+            p2500_video_render(&m, &pal, true, fb, vi.width);
+            fprintf(f, "P6\n%d %d\n255\n", vi.width, vi.height);
+            for (int py = 0; py < vi.height; py++)
+                for (int px = 0; px < vi.width; px++) {
+                    uint32_t c = fb[(size_t)py * vi.width + px];
+                    fputc((int)((c >> 16) & 0xFF), f);
+                    fputc((int)((c >> 8) & 0xFF), f);
+                    fputc((int)(c & 0xFF), f);
+                }
+            fclose(f);
+            printf("Wrote a %dx%d render to %s\n", vi.width, vi.height, screen_dump_path);
+        } else {
+            fprintf(stderr, "failed to write screen dump to %s\n", screen_dump_path);
+        }
+        free(fb);
     }
 
     for (int sw = 0; sw < num_swaps; sw++) free(swaps[sw].buf);
