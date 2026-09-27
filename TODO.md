@@ -983,7 +983,42 @@ here is blocked on hardware.
   instead of terminating. CP/M's directory reads stay inside one track,
   which is why `DIR` is correct; a large sequential file read will not.
 
-- [ ] **T32. UCSD p-System boot.** `P2k5_LOGIC` and `P2k5_TKS` in
+- [ ] **T32. Get the remaining disk images to boot.** Survey run 2026-09-27
+  against all 11 `.raw` images in `../Disk Images/extracted/`, after the
+  video-bank fix (T1 "Extra") which had been making every failure look like
+  screen garbage rather than a clean stop.
+
+  | Image | Tracks | State |
+  |---|---|---|
+  | `P25K_B` | 80 | **CP/M to `A>`**, `DIR` works |
+  | `P25K_S` | 80 | **CP/M to `A>`** |
+  | `P25TEST` | 80 | **CP/M to `A>`** |
+  | `P25K_G` | 80 | CP/M banner `PHILIPS P2000B / CP/M 2.2 - 58K`, then runs 20 M steps without reaching a prompt. Not stuck - 82 DMA transfers, clock ticking, ends at `$EBC3`. A *different* CBIOS build |
+  | `P2k5_CPM` | 40 | Stalls at `$06CB` (the FDC busy-wait) after 2 transfers |
+  | `P2k5_LOGIC` / `P2k5_TKS` (`_deinterleaved`) | 40 | IPL gives up: reaches `$013C`, prints the ROM banner, halts at `$014D` |
+  | `P2k5_LOGIC` / `P2k5_TKS` (plain) | 40 | Same, and expected - these are the pre-deinterleave dumps |
+  | `p25k_prg` | 40 | `RST 38` loop at `$0038` |
+  | `P2500GAM` | 77 | **Not bootable by design** - sector 0 is all `$E5`, i.e. formatted and empty. Nothing to fix |
+
+  **`$013C` is the IPL's failure path, not a splash.** Worth knowing before
+  reading any of the above as success: `$0135` calls `sub_0333h`, which on a
+  good disk never returns (it `JP $1000`s into the boot sector). If it
+  *does* return, `$013B` sets error code 0, `$013C` writes it to the port
+  `$0A` POST latch, `$0140`-`$0145` prints `PHILIPS MICROCOMPUTER P2000/B`
+  from `$0184`, and `$014C` is `DI / JR $`. So that banner means "I could
+  not boot this disk". The RAM-test failure path at `$0162` lands in the
+  same place with error code 8.
+
+  **Start with `P2k5_CPM`.** Its track 0 is 14-of-16 sectors identical to
+  `P25K_B`'s and its boot sector is byte-identical, so the bootstrap is
+  proven to work in this emulator; only the content it goes on to load
+  differs. Anything that fails there is therefore much more likely to be
+  this emulator's bug than a different bootstrap, which is not true of the
+  p-System disks. It stalls in the `$06CB` FDC wait after two transfers -
+  T31 (multi-track reads past `EOT`) is the obvious suspect, since this is
+  a 40-track image and the working ones are 80-track.
+
+- [ ] **T32b. UCSD p-System boot.** `P2k5_LOGIC` and `P2k5_TKS` in
   `../Disk Images/extracted/` use a genuinely different bootstrap, so they
   are the best independent check on the disk path that exists — and the
   first thing that will test the IM2 chain against software that was never
