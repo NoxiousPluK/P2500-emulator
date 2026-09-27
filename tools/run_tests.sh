@@ -83,6 +83,21 @@ else
     done
 fi
 
+echo "== 5. The undecoded-video-bank tripwire still fires (T27)"
+# roms/sesam_bank_probe.bin is a SESAM cartridge whose payload is
+# LD A,$01 / OUT ($05),A / HALT - i.e. it selects one of port $05's six
+# undecoded $8000-$BFFF windows, the most likely home of the video card's
+# attribute plane. Nothing in any disk image does this, so without a
+# deliberate probe the diagnostic would be untested code that quietly rots.
+$EMU --sesam roms/sesam_bank_probe.bin --max-steps 3000000 \
+     >"$TMP/bank.log" 2>&1
+if grep -q 'selects an unknown \$8000-\$BFFF window' "$TMP/bank.log"; then
+    pass "unknown bank select is logged"
+else fail "unknown bank select was NOT logged - the T27 tripwire is dead"; fi
+if grep -q 'selected an undecoded \$8000-\$BFFF window' "$TMP/bank.log"; then
+    pass "unknown bank select is counted in the exit report"
+else fail "unknown bank select missing from the exit report"; fi
+
 echo
 if [ "$fails" -eq 0 ]; then echo "All checks passed."; exit 0; fi
 echo "$fails check(s) failed."

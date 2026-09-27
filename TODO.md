@@ -17,7 +17,7 @@ sequencing and the reasoning behind it.
 ## Where this is
 
 **CP/M 2.2 boots to the `A>` prompt and runs typed commands**, on three of
-the nine disk images. `make test` is the proof and the guard: 17 checks,
+the nine disk images. `make test` is the proof and the guard: 19 checks,
 ~8 s, exit 1 on any failure. Keep it green.
 
 ```
@@ -41,9 +41,9 @@ constant. Where something is still assumed, it says so.
 |---|---|---|
 | `$00`–`$03` | **Z80A-CTC** (Z8430) | `channel = port & 3`. ch0 = serial TX bit clock (TIMER, no CLK/TRG); ch1 = serial RX bit sampler, CLK/TRG is the RXD line; ch2 = 50 Hz real-time clock strobe (**source unidentified, T29**); ch3 = keyboard "byte ready" strobe |
 | `$04` | Serial / printer TX | One data bit, clocked by CTC ch0 |
-| `$05` | Bank latch (W) / status (R) | Write: bit 3 = EPROM out of `$0000`–`$0FFF`; bits 0–2 all clear = video DRAM window at `$8000`–`$BFFF`. Read: bit 7 = RXD, bit 6 = TX handshake; bits 0–5 unknown, read back 1 |
+| `$05` | Bank latch (W) / status (R) | Write: bit 3 = EPROM out of `$0000`–`$0FFF`; bits 0–2 all clear = video DRAM window at `$8000`–`$BFFF`, all set = main DRAM. **The other six combinations are undecoded and now trip a diagnostic (T27).** Read: bit 7 = RXD, bit 6 = TX handshake; bits 0–5 unknown, read back 1 |
 | `$06` | Keyboard data | Byte-wide, one `IN` per ch3 interrupt |
-| `$08`/`$09` | **MC6845 CRTC** | All 18 registers stored; **nothing reads them yet (T37)** |
+| `$08`/`$09` | **MC6845 CRTC** | All 18 registers stored; **nothing reads them yet (T37)**. 80×24, 12 scanlines/row |
 | `$0A` | Diagnostic / POST latch | Write-only, logged not modelled (T15) |
 | `$0F` | SESAM dongle / bootable cartridge | Access is counted; the IPL-only baseline is 32 reads / 6 writes |
 | `$10`–`$13` | **Z80A-PIO** (Z8420), FDD card | Mode 3 bit control. PA0 = µPD765 `INT` (**assumed, not traced**; if it ever misbehaves, try PA1 before concluding the model is wrong) |
@@ -125,9 +125,10 @@ contexts where a GUI dependency would make it unrunnable.
   installed (`extra/sdl3`), so there is no vendoring decision here.
 
 - [ ] **T37. A CRTC-driven renderer, replacing the hardcoded 80x24.**
-  *Depends on T27.* Whether video RAM is a flat byte bank or 16 K × 12 bits
-  decides the framebuffer layout, and writing the blitter first means
-  writing it twice.
+  **No longer blocked** — T27 settled the framebuffer layout (8-bit code +
+  4-bit attribute per cell) and T27a settled the glyph geometry (8×12, read
+  12 bytes from `code × 16`). `tools/render_vram.py` is the working
+  reference implementation of both, attributes included.
 
   `machine.h` models all 18 MC6845 registers and nothing reads them. Take
   geometry from R0/R1/R6/R9, start address from R12/R13, and — the part CP/M
@@ -135,13 +136,9 @@ contexts where a GUI dependency would make it unrunnable.
   (shape and blink)**. A prompt with no blinking cursor looks wrong from the
   first frame.
 
-  Fix the glyph vertical offset while here: `tools/render_vram.py`
-  top-aligns an 8×8 glyph in a 12-scanline cell, which is why lowercase
-  descenders sit wrong (visible on the `p` in "Philips" in every render so
-  far). R9 and the character ROM's own layout should say where the glyph
-  actually sits. Put the corrected renderer in the core as a
-  `p2500_video_render()` filling a caller-supplied 32-bit framebuffer, so
-  `--dump-vram` and the GUI agree by construction.
+  Port the renderer into the core as a `p2500_video_render()` filling a
+  caller-supplied 32-bit framebuffer, so the CLI's `--dump-vram` path and
+  the GUI agree by construction. It takes both planes.
 
 - [ ] **T38. Live keyboard input, and delete `P2500_KEYSTROKE_HZ`.** That
   constant is a 100 Hz retry loop standing in for "the user keeps pressing
@@ -190,19 +187,77 @@ contexts where a GUI dependency would make it unrunnable.
 
 ## P2 — Video attributes (gates T37)
 
-- [ ] **T27. Model the video card's real memory organisation.** The screen
-  renders correctly today because nothing printed so far uses attributes.
-  The card carries **12** MB8116E (16 Kbit × 1) parts, which is 16 K words ×
-  12 bits — an 8-bit character code plus a 4-bit attribute nibble — not the
-  flat 16 KB byte bank `machine.c` models at `$8000`–`$BFFF`. Anything that
-  reverses, dims or underlines text exposes the difference.
+- [~] **T27. Model the video card's real memory organisation. — LAYOUT
+  ANSWERED (2026-09-28), WRITE PATH NOT DERIVABLE.**
 
-  Start from `../Actual P2500 hardware/P2500 Video Card/P2500-video-card-findings.md`,
-  and look for CBIOS writing a second plane: `$E4C3` is CONOUT, and the
-  escape-sequence handling around it is where attributes would appear.
-  `tools/render_vram.py` needs the same treatment.
+  **The organisation is settled**, and four independent facts agree on it:
 
----
+  | Evidence | Says |
+  |---|---|
+  | 12× MB8116E (16 Kbit × 1) on the card | 12 one-bit planes, 16K deep |
+  | The `$8000`–`$BFFF` window is 16 KB | 16K addresses — one per word. 8 planes are the byte the CPU sees |
+  | The P2219 CP/M manual documents exactly **four** screen attributes: underline, reverse, flash, low intensity | four planes, four attributes |
+  | The same manual's graphics mode is 512×256 addressable dots | 131,072 bits = exactly the 16 KB the eight character-code planes hold |
+
+  So each cell is an **8-bit character code + a 4-bit attribute nibble**,
+  and the flat byte bank `machine.c` used to model was the eight
+  character-code planes only. `machine.h` now carries `vram_attr[]`
+  alongside `vram[]`, and the four attributes are rendered by
+  `tools/render_vram.py`. **Which nibble bit is which is not established** —
+  the constants in that file are a placeholder and are the single place to
+  correct.
+
+  **The CPU's write path to the nibble plane is not derivable from anything
+  this project holds**, because no software this project holds ever sets an
+  attribute. This was checked exhaustively rather than assumed:
+
+  - Every `OUT ($05)` with an immediate operand across **all 11 disk
+    images** loads `$00`, `$07` or `$0F`. There is no fourth value anywhere
+    in the corpus.
+  - The live CP/M system has exactly **four** `OUT ($05)` sites, at `$FF2F`
+    / `$FF49` / `$FF65` / `$FF80`. They form a push/pop **bank stack**:
+    `$EB14` is the current-bank shadow and `$EB15` a stack pointer into a
+    save area. The only values pushed are `$08` (video in) and `$0F` (video
+    out).
+  - CBIOS's CONOUT (`$E4C3`) is thin — an ESC state machine at `$E34D`, a
+    translation table at `$E257`, then the byte is posted as a request. It
+    never touches an attribute.
+
+  Port `$05`'s **six unused bits-0-2 combinations** remain the obvious
+  candidate for the selector, but that is a guess and this emulator does not
+  make it. **What it does instead is make the unknown loud**: any `OUT
+  ($05)` whose bits 0-2 are neither all-set nor all-clear is counted,
+  logged, and reported at exit (`p2500_bank_is_unknown()`). Such a write
+  used to be routed silently into main DRAM. If it ever fires, it is the
+  single best lead this question has.
+
+  **Settled alongside, and worth not re-deriving:**
+  - **Attributes cannot select an alternate character set.** 256 codes × 16
+    bytes = 4096 = the entire character ROM. There is no second glyph bank.
+  - **Graphics mode is 512×256, one bit per dot, and cannot be mixed with
+    text** — switching modes reinitialises the CRTC. It reuses the same
+    16 KB. That is a separate mode, not an attribute, and it is out of scope
+    until something needs it.
+
+  What is left here: find software that sets an attribute (the tripwire will
+  say so), or trace which line selects the nibble plane on real hardware.
+
+- [x] **T27a. The character cell is 8×12, not 8×8. — DONE (2026-09-28).**
+  Fell out of T27 and fixes a visible bug, so it landed immediately rather
+  than waiting for T37. The character ROM's stride is **16 bytes per code**
+  (4096 / 256): rows 0–11 are the glyph the CRTC clocks out (R9 = 11, i.e.
+  12 scanlines per row) and rows 12–15 are unused padding — which is where
+  the ROM's packed Z80 code lives.
+
+  `tools/render_vram.py` was reading 8 rows from `code × 16`, silently
+  truncating every descender. Proof it is exactly 12: across the printable
+  ASCII range the only codes with ink in rows 8–11 are `$ , ; @ f g j p q y`
+  — the descender set and nothing else. The `p` in "Philips" has rendered
+  wrong in every screenshot this project produced until now.
+
+  This also unifies the character ROM's "three independent things in a
+  512-slot structure" reading into one 12-row cell — see the restatement
+  added to `../ROM Dumps/Video-Card-Character-ROM/findings.md`.
 
 ## P3 — Write to disk
 
@@ -400,7 +455,8 @@ on-disk `.phi` files are sector-interleaved, so the `org 0` listings in
 | `$E274` | Special-key translation table (cursor diamond + dead-key diacritics; see T38) |
 | `$E46C` | **CONST** — returns 0 unless `($E551)` != `$FF` and `($E553)` != `($0020)` |
 | `$E48C` | **CONIN** — `CALL $E46C` / `JR Z` until CONST reports a character |
-| `$E4C3` | **CONOUT** — the memory-mapped video path (start here for T27) |
+| `$E4C3` | **CONOUT** — ESC state machine at `$E34D`, translation table at `$E257`, then posts the byte as a request. Never touches an attribute (T27) |
+| `$EB14` / `$EB15` | Bank-latch shadow and bank-stack pointer. `$FF2F`/`$FF49`/`$FF65`/`$FF80` push/pop around video access — only `$08` and `$0F` are ever pushed |
 | `$E54F` | Console-read request block: `[id][?][status][?][byte]`, status `$FF` = pending |
 | `$EAC0` | Generic "post a request, then spin until its status changes" |
 | `$EB5C` | Event-slot table, 3-byte records `{id, ptr_lo, ptr_hi}` |

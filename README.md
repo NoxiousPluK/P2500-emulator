@@ -36,7 +36,7 @@ make test
 ```
 
 Needs a C11 compiler and nothing else — the Z80 core is vendored, there are
-no external libraries. `make test` is the regression suite: 17 checks in
+no external libraries. `make test` is the regression suite: 19 checks in
 ~8 s, exit 1 on any failure.
 
 ## Running
@@ -59,6 +59,7 @@ python3 tools/render_vram.py /tmp/vram.bin /tmp/screen.png
 | `--type-at MS:STRING` | queue keystrokes at a specific emulated-time offset |
 | `--max-steps N` | instruction budget, default 2,000,000 |
 | `--dump-vram PATH` / `--dump-ram PATH` | write video RAM / all 64 KB at exit |
+| `--dump-vram-attr PATH` | write the 4-bit video attribute plane (TODO.md T27) |
 | `--peek ADDR:LEN` / `--poke ADDR:HEXBYTES` | inspect / patch memory |
 | `--watch ADDR[:LEN]` / `--count ADDR` / `--break ADDR` | trace writes, count executions, stop at an address |
 | `--verbose-io` | log every I/O port access (very noisy) |
@@ -166,9 +167,15 @@ not exist yet. **Nothing in `core/` may depend on either front-end.**
 **Elsewhere**
 
 - `roms/` — `ipl.bin` and `charrom.bin`, copies of this project's own dumped
-  ROMs (see `../ROM Dumps/`), plus `sesam_banner_test.bin`
+  ROMs (see `../ROM Dumps/`), plus two SESAM cartridge fixtures:
+  `sesam_banner_test.bin` (the byte-exact regression) and
+  `sesam_bank_probe.bin` (selects an undecoded video bank, guarding the T27
+  tripwire)
 - `tools/run_tests.sh` — the regression suite behind `make test`
-- `tools/render_vram.py` — video-RAM-dump-to-PNG renderer
+- `tools/render_vram.py` — video-RAM-dump-to-PNG renderer. Renders the real
+  8×12 character cell and the card's four attributes; `--demo-attrs`
+  synthesises an attribute plane, which is the only way to exercise that
+  path since no surviving software sets one
 - `tools/disasm_ram.sh` — disassembles a `--dump-ram` image at its real
   addresses. The only usable way to read the CP/M system files, whose
   on-disk `.phi` form is sector-interleaved, so the `org 0` listings in

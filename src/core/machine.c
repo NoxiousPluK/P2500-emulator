@@ -11,6 +11,11 @@ bool p2500_video_window_selected(const P2500Machine *m) {
     return (m->bank & P2500_BANK_VIDEO_MASK) == 0;
 }
 
+bool p2500_bank_is_unknown(const P2500Machine *m) {
+    uint8_t sel = m->bank & P2500_BANK_VIDEO_MASK;
+    return sel != 0 && sel != P2500_BANK_VIDEO_MASK;
+}
+
 uint8_t p2500_peek(const P2500Machine *m, uint16_t addr) {
     if (addr < P2500_EPROM_SIZE && (m->bank & P2500_BANK_RAM_LOW_BIT) == 0)
         return m->eprom[addr];
@@ -217,8 +222,18 @@ static void port_out(z80 *cpu, uint8_t port, uint8_t value) {
         break;
     case 0x05:
         m->bank = value;
-        if (m->verbose_unknown_ports)
+        if (p2500_bank_is_unknown(m)) {
+            /* Never seen in any traced run or anywhere in the disk corpus.
+             * If this ever fires, it is the single best lead on how the CPU
+             * reaches the video card's attribute plane - TODO.md T27. */
+            m->unknown_bank_writes++;
+            fprintf(stderr,
+                    "[bank] OUT ($05) <- $%02X selects an unknown $8000-$BFFF "
+                    "window (bits 0-2 = %u); routed to main DRAM. See TODO.md T27.\n",
+                    value, (unsigned)(value & P2500_BANK_VIDEO_MASK));
+        } else if (m->verbose_unknown_ports) {
             fprintf(stderr, "[io] OUT ($05) <- $%02X (bank select)\n", value);
+        }
         break;
     case 0x08:
         m->crtc_index = value;

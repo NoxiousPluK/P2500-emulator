@@ -125,14 +125,17 @@ dialogs last.
 
 Three console questions are already settled and need no further research:
 
-- **Video geometry** is known — the CRTC registers decode to 80×24 at 12
-  scanlines/row, matching the official P2219 manual's 640×288 mode. What is
-  *not* settled is the video card's memory organisation: 12× MB8116E
-  (16 Kbit×1) is very likely 16 K words × **12 bits**, an 8-bit character
-  code plus a 4-bit attribute nibble, not the flat 16 KB byte bank currently
-  modelled. It renders the banner, CP/M's sign-on, the prompt and `DIR`
-  correctly for one reason only: none of them uses attributes. The first
-  thing that uses reverse video or dim text forces it.
+- **Video is settled, except for one wire.** The CRTC registers decode to
+  80×24 at 12 scanlines/row, matching the official P2219 manual's 640×288
+  mode, and the card's memory is 16 K words × **12 bits** — an 8-bit
+  character code plus a 4-bit attribute nibble (underline, reverse, flash,
+  low intensity). Four independent facts agree on that; see `TODO.md` T27.
+  The glyph is the full 8×12 cell, not 8×8 (T27a). What is *not* known is
+  how the CPU reaches the attribute nibble, and it is not derivable —
+  **nothing in the entire disk corpus ever sets an attribute.** The emulator
+  models the plane, declines to guess the selector, and now raises a
+  diagnostic on any bank value it cannot account for, so the day something
+  does set one it announces itself.
 - **Keyboard**: there are **two** input paths, not one, which is what made
   this confusing for so long. The keyboard is port `$06`, byte-wide,
   announced by a strobe on CTC channel 3. The serial port is the bit-banged
@@ -224,9 +227,13 @@ more valuable than confirming it.** Full checklist in
    Mains-derived or the video card's frame rate; both are 50 Hz so the
    emulator is right either way, but this is the one frequency in the
    codebase not derived from the 4 MHz crystal.
-3. **The video card's memory organisation** — 16 K × 12 bits with an
-   attribute nibble, or a flat byte bank. This one now gates real work
-   (`TODO.md` T27 → T37), which promotes it above where it used to sit.
+3. **Which line selects the video card's attribute plane.** The 16 K × 12
+   organisation is settled (`TODO.md` T27) but the CPU's path to the nibble
+   is not, and unlike every other open question in this project it is
+   *provably* not answerable from firmware: no software that survives ever
+   sets an attribute. Port `$05`'s six unused bits-0-2 combinations are the
+   obvious candidate. This is now the best example of a question only
+   hardware can settle.
 4. **FDD card: which µPD765 signals reach PIO port A bits 0 and 1.** The
    emulator has to guess this. A 10-minute continuity check settles it.
 5. **FDD card: PIO port B direction** (`$A1` mask → PB0/PB5/PB7 inputs). One

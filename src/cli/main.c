@@ -95,6 +95,7 @@ int main(int argc, char **argv) {
     const char *disk_path = NULL;
     const char *sesam_path = NULL;
     const char *vram_dump_path = NULL;
+    const char *vram_attr_dump_path = NULL;
     unsigned long max_steps = 2000000UL;
     /* --type-after MS: emulated milliseconds to wait before the first
      * queued keystroke. See keyboard.h for why this is needed. */
@@ -155,6 +156,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--disk") && i + 1 < argc) disk_path = argv[++i];
         else if (!strcmp(argv[i], "--sesam") && i + 1 < argc) sesam_path = argv[++i];
         else if (!strcmp(argv[i], "--dump-vram") && i + 1 < argc) vram_dump_path = argv[++i];
+        else if (!strcmp(argv[i], "--dump-vram-attr") && i + 1 < argc) vram_attr_dump_path = argv[++i];
         else if (!strcmp(argv[i], "--max-steps") && i + 1 < argc) max_steps = strtoul(argv[++i], NULL, 0);
         else if (!strcmp(argv[i], "--verbose-io")) verbose_io = true;
         else if (!strcmp(argv[i], "--type-after") && i + 1 < argc)
@@ -258,7 +260,8 @@ int main(int argc, char **argv) {
         } else {
             fprintf(stderr, "unknown or malformed argument: %s\n", argv[i]);
             fprintf(stderr, "usage: %s [--rom path] [--disk path] [--sesam path]\n"
-                            "  [--dump-vram path] [--dump-ram path] [--max-steps N] [--verbose-io]\n"
+                            "  [--dump-vram path] [--dump-vram-attr path] [--dump-ram path]\n"
+                            "  [--max-steps N] [--verbose-io]\n"
                             "  [--peek ADDR:LEN ...] [--poke ADDR:HEXBYTES ...]\n"
                             "  [--watch ADDR[:LEN] ...] [--count ADDR ...] [--type STRING] [--type-after MS]\n"
                             "  [--type-at MS:STRING ...]\n"
@@ -510,6 +513,9 @@ int main(int argc, char **argv) {
            (double)m.cpu.cyc / (double)P2500_CPU_HZ, m.cpu.cyc, P2500_CPU_HZ);
     if (m.sesam.reads || m.sesam.writes)
         printf("SESAM port $0F: %lu read(s), %lu write(s)\n", m.sesam.reads, m.sesam.writes);
+    if (m.unknown_bank_writes)
+        printf("Port $05: %lu write(s) selected an undecoded $8000-$BFFF window "
+               "- see TODO.md T27\n", m.unknown_bank_writes);
     printf("Interrupts (daisy chain order, requests/acknowledged):\n ");
     for (int i = 0; i < P2500_INT_SOURCES; i++) {
         int src = p2500_intctl_chain_order[i];
@@ -585,6 +591,17 @@ int main(int argc, char **argv) {
             printf("Wrote video RAM ($8000-$BFFF) to %s\n", vram_dump_path);
         } else {
             fprintf(stderr, "failed to write vram dump to %s\n", vram_dump_path);
+        }
+    }
+
+    if (vram_attr_dump_path) {
+        FILE *f = fopen(vram_attr_dump_path, "wb");
+        if (f) {
+            fwrite(m.vram_attr, 1, P2500_VRAM_SIZE, f);
+            fclose(f);
+            printf("Wrote the video attribute plane to %s\n", vram_attr_dump_path);
+        } else {
+            fprintf(stderr, "failed to write attribute dump to %s\n", vram_attr_dump_path);
         }
     }
 

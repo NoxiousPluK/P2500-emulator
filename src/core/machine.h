@@ -71,6 +71,30 @@
 #define P2500_VRAM_BASE 0x8000
 #define P2500_BANK_VIDEO_MASK 0x07 /* all clear selects the video card's DRAM */
 
+/* The video card's DRAM is 16K words x 12 bits, not a flat 16 KB byte bank
+ * (TODO.md T27). Four independent facts agree:
+ *
+ *   - The card carries exactly 12 MB8116E (16 Kbit x 1) parts, i.e. 12
+ *     one-bit planes 16K deep (../Actual P2500 hardware/P2500 Video Card/).
+ *   - The $8000-$BFFF window is 16 KB, which is 16K addresses - one per
+ *     word. Eight of the twelve planes are the byte the CPU sees.
+ *   - The P2219 CP/M manual documents exactly four screen attributes:
+ *     underline, reverse, flash and low intensity. Four planes, four
+ *     attributes.
+ *   - The same manual's graphics mode is 512x256 addressable dots, which is
+ *     131,072 bits = exactly the 16 KB the eight character-code planes hold.
+ *
+ * So each cell is an 8-bit character code plus a 4-bit attribute nibble.
+ * The nibble plane is modelled here, but NOTHING WRITES IT: how the CPU
+ * reaches it is not derivable from anything this project holds, because no
+ * software this project holds ever sets an attribute. Every OUT ($05) in
+ * the whole disk corpus writes $00, $07, $08 or $0F and nothing else, and
+ * the live CP/M system's bank shadow at $EB14 only ever takes $08 (video
+ * in) and $0F (video out). The selector is out-of-band and port $05's six
+ * unused bits-0-2 combinations are the obvious candidate, but that is a
+ * guess and this emulator does not make it. See p2500_bank_is_unknown(). */
+#define P2500_VRAM_ATTR_MASK 0x0F
+
 /* Z8400A (Z80A) at 4 MHz - confirmed from the real CPU card's silicon, see
  * ../P2500-general-findings.md. Everything time-based in this emulator is
  * derived from this one number and the CPU core's T-state counter; there
@@ -115,7 +139,9 @@ typedef struct {
     uint8_t ram[P2500_RAM_SIZE];
     uint8_t eprom[P2500_EPROM_SIZE];
     uint8_t vram[P2500_VRAM_SIZE]; /* the video card's own DRAM, see above */
+    uint8_t vram_attr[P2500_VRAM_SIZE]; /* 4-bit attribute plane; see above */
     uint8_t bank; /* last value written to port $05 */
+    unsigned long unknown_bank_writes; /* OUT ($05) values we cannot decode */
 
     P2500Fdc fdc;
     P2500Sesam sesam;
@@ -164,5 +190,13 @@ uint8_t p2500_peek(const P2500Machine *m, uint16_t addr);
 /* True while port $05's latch maps the video card's DRAM into
  * $8000-$BFFF instead of main DRAM. */
 bool p2500_video_window_selected(const P2500Machine *m);
+
+/* True for any port-$05 value this emulator cannot account for. Bits 0-2
+ * select the $8000-$BFFF window and only "all set" (main DRAM) and "all
+ * clear" (video DRAM) have ever been observed; the other six combinations
+ * are unaccounted for and are where the video card's attribute plane most
+ * likely lives (TODO.md T27). Such a write is currently routed to main DRAM,
+ * which would be silently wrong - so it is counted and logged instead. */
+bool p2500_bank_is_unknown(const P2500Machine *m);
 
 #endif
