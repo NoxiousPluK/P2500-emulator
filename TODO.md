@@ -21,7 +21,9 @@ files the disk image contains. Reproduce the last one with:
             --max-steps 20000000 --type 'dir\r' --dump-vram /tmp/vram.bin
 ```
 
-**If you are picking up work now, start at the P4 section.** T1–T12 (P0/P1)
+**If you are picking up work now, start at the P4 section**, or at P5 if you
+want the GUI — P5's first two items (the core/cli/gui split and making the
+core embeddable) are pure refactor and independent of everything in P4. T1–T12 (P0/P1)
 are complete; T13–T16 (P2) are IPL-era cleanup; T17–T21, T24 and T26 (P3)
 are done and their evidence is kept below because it is the reasoning the
 current model rests on. P4 is what is left. The "Background" section
@@ -987,6 +989,177 @@ here is blocked on hardware.
   first thing that will test the IM2 chain against software that was never
   considered while building it. Worth trying as-is before anything else in
   P4: it costs one command.
+
+### P5 — Front-end split, then an SDL3 + Dear ImGui GUI
+
+Planned 2026-09-27. Independent of P4 except where noted: **T27 (video
+attributes) gates T37**, and nothing else here blocks on hardware.
+
+Why split the tree at all, before any GUI code exists:
+
+- **`make test` must keep working with no display and no SDL installed.**
+  That suite is currently the only thing standing between this project and
+  silently regressing CP/M boot, and the contexts where that matters most
+  (a headless check, a bisect, CI) are exactly the ones where a GUI
+  dependency would make it unrunnable.
+- **The GUI's real value here is a debugger, not a settings dialog.** Every
+  advance this project has made came from instrumentation — `--peek`,
+  `--count`, `--watch`, `--dump-ram`, trace windows. The `$0038` crash in
+  T17 took three trace-and-rebuild cycles to localise; a live device-state
+  panel would have shown it by inspection. Build the panels first and the
+  file dialogs last.
+- **It keeps the option of other embeddings open** — a MAME driver, an
+  Emscripten build. See the note at the end of this section for what that
+  is and is not worth.
+
+Target layout:
+
+```
+src/core/   -> libp2500.a   C11, zero dependencies, no stdio, no globals
+src/cli/    -> p2500-emu    headless; what `make test` runs
+src/gui/    -> p2500-gui    SDL3 + Dear ImGui; the only C++ in the tree
+```
+
+- [ ] **T33. Split the tree into `core` / `cli` / `gui`, with no behaviour
+  change.** Pure refactor, and it should be verifiable as one: `make test`
+  must pass before and after with byte-identical output, and the SESAM VRAM
+  diff must stay exact. Move `machine`, `ctc`, `pio`, `dma`, `fdc`,
+  `keyboard`, `sesam`, `intctl` and `vendor/` into `src/core/`; `main.c`
+  becomes `src/cli/main.c`. `libp2500.a` links with nothing but libc.
+
+  Do this one first and on its own. It is the only item here that touches
+  every file, and mixing it with functional change makes both harder to
+  review.
+
+- [ ] **T34. Make the core embeddable: a log callback, and a real reset.**
+  Two concrete blockers, both found by audit rather than guessed:
+  - **63 `fprintf(stderr, ...)` calls in what will become the core**
+    (`dma.c` 24, `fdc.c` 12, `pio.c` 8, `machine.c` 7, `ctc.c` 5,
+    `intctl.c` 4, `keyboard.c` 3). A core that writes to `stderr` cannot
+    feed a GUI log panel, a MAME `logerror()`, or a browser console.
+    Replace with one `p2500_log_fn` on the machine (level + category +
+    formatted message); the CLI installs a callback that reproduces today's
+    output verbatim, so T33's "no behaviour change" test still holds.
+  - **There is no `p2500_reset()`.** `p2500_init()` does
+    `memset(m, 0, sizeof(*m))`, which would wipe the loaded EPROM image and
+    the `fdc.disk` / `sesam.stream` / `keyboard.queue` pointers. A GUI reset
+    button needs a reset that clears CPU and device state while *keeping*
+    attached media. Split `p2500_init` into allocate-and-attach vs. reset,
+    and have the CLI call both.
+
+  Good news from the same audit: **the core has no non-const file-scope
+  state at all**, which is the expensive property to retrofit and is already
+  correct. Keep it that way — it is what makes every other embedding
+  possible.
+
+- [ ] **T35. Pace the machine from `z->cyc`, not from wall-clock sleeps.**
+  The emulator already knows exact emulated time at 4 MHz, and `machine.c`
+  already generates the 50 Hz CTC channel-2 strobe — one field is 80,000
+  T-states. Run the core until the next strobe boundary, then present. The
+  frame loop and the machine's own clock tick become the same event, and if
+  T29 confirms channel 2 is driven by the video frame rate rather than
+  mains, that alignment stops being a convenience and becomes correct.
+
+  Expose this as `p2500_run_until_cyc()` in the core so both front-ends and
+  any future embedding share it. Headroom is comfortable — roughly 10 M
+  emulated instructions/sec against a real machine's ~1 M — so **keep it
+  single-threaded**. One thread is what makes the T38 debugger safe to write
+  without a single lock.
+
+- [ ] **T36. SDL3 shell.** Use the callback app model
+  (`SDL_AppInit`/`SDL_AppIterate`/`SDL_AppEvent`) rather than a hand-rolled
+  main loop: it is what makes T40 nearly free, and it is the shape SDL3 is
+  designed around. One streaming `SDL_Texture` for the framebuffer, integer
+  scaling, no per-glyph draw calls. Stay on `SDL_Renderer` throughout — no
+  direct OpenGL — so T38's ImGui backend can share it.
+
+  `sdl3` 3.4.16 is packaged and already installed on this machine
+  (`extra/sdl3`), so there is no vendoring decision to make here.
+
+- [ ] **T37. A CRTC-driven renderer, replacing the hardcoded 80x24.**
+  *Depends on T27* — whether video RAM is a flat byte bank or 16 K x 12 bits
+  with an attribute nibble decides the framebuffer layout, and writing the
+  blitter first means writing it twice.
+
+  `machine.h` models all 18 MC6845 registers and **nothing currently reads
+  them**. Take geometry from R0/R1/R6/R9, start address from R12/R13, and —
+  the part CP/M will exercise immediately — **the cursor from R14/R15
+  (position) and R10/R11 (shape and blink)**. A prompt with no blinking
+  cursor will look wrong from the first frame.
+
+  Fix the glyph vertical offset while here: `tools/render_vram.py`
+  top-aligns an 8x8 glyph in a 12-scanline cell, which is why lowercase
+  descenders sit wrong (visible on the `p` in "Philips" in every render so
+  far). R9 and the character ROM's own layout should say where the glyph
+  actually sits. Port the corrected renderer into the core as a
+  `p2500_video_render()` that fills a caller-supplied 32-bit framebuffer, so
+  the CLI's `--dump-vram` path and the GUI agree by construction.
+
+- [ ] **T38. Live keyboard input, and delete `P2500_KEYSTROKE_HZ`.** That
+  constant is a 100 Hz retry loop standing in for "the user keeps pressing
+  the key", and it only exists because the CLI has no concept of a key
+  *event*. A GUI does: strobe CTC channel 3 exactly once per
+  `SDL_EVENT_KEY_DOWN`. It is one of the last pieces of the model not
+  derived from firmware, and this is what retires it.
+
+  What is already known about the encoding, checked rather than assumed:
+  - **Alphanumerics are plain ASCII.** Feeding raw ASCII on port `$06`
+    drives CP/M correctly end to end - that is what `--type 'dir\r'` does.
+  - **Special keys are high-bit codes**, and CBIOS's table at `$E274`
+    decodes the cursor keys: `8B 05 / 87 13 / 89 04 / 85 18` maps them onto
+    the WordStar cursor diamond, so `$8B`=up (`^E`), `$87`=left (`^S`),
+    `$89`=right (`^D`), `$85`=down (`^X`).
+  - **The rest of that table is dead-key diacritic composition** (`A >`,
+    `E ~`, `C ,`, `N ~`, `a <` - i.e. Â, Ê, Ç, Ñ, à), which is what a
+    multilingual European keyboard would need. A naive SDL keysym mapping
+    will get these wrong; decode the full table before guessing.
+  - Still unknown: function keys, and whether the controller ever sends
+    make/break pairs rather than single codes. Nothing traced so far
+    suggests it does.
+
+- [ ] **T39. ImGui debugger panels - the actual point of the GUI.** Vendor
+  Dear ImGui (not packaged in the Arch repos, and it is designed to be
+  vendored - the same treatment `vendor/superzazu_z80` already gets), with
+  the `imgui_impl_sdl3` + `imgui_impl_sdlrenderer3` backends so it shares
+  T36's renderer. **Keep all C++ inside `src/gui/`**; the core never sees
+  it.
+
+  Panels, in the order they would have paid for themselves historically:
+  1. **Device state** - the IM2 daisy chain (`requested` / `under_service` /
+     vector per source, live), the four CTC channels with down-counters and
+     CLK/TRG levels, DMA registers, FDC phase. This is the panel that would
+     have made T17 and T19 obvious by inspection instead of by archaeology.
+  2. **Memory viewer** with live watches, bank-aware (`p2500_peek`).
+  3. **Disassembly around PC** with breakpoints. `tools/disasm_ram.sh`
+     already proves z80dasm gives usable output; inline an equivalent.
+  4. **Port/IRQ log**, fed by T34's log callback.
+
+  `--watch` / `--count` / `--break` already exist as CLI concepts. Lift them
+  into a small `core/debug.h` both front-ends drive, rather than
+  reimplementing them against ImGui.
+
+- [ ] **T40. Optional once T36 lands: an Emscripten build.** SDL3's callback
+  model means this is mostly a Makefile target. A browser-playable P2500 is
+  a disproportionately good outcome for a machine with this little surviving
+  software, and it costs little if T36 is written to the callback API from
+  the start.
+
+**On a MAME core, since it motivated the split.** Worth being precise about
+what it would and would not reuse. MAME will not link `libp2500.a` — its
+devices are C++ classes deriving from `device_t`, driven by MAME's own
+scheduler and address maps, and it already ships `z80daisy`, `z80ctc`,
+`z80pio`, `z80dma` and `upd765` implementations. So a MAME driver would
+*wire up MAME's devices* according to this project's findings rather than
+port this code.
+
+That makes the transferable assets: (a) the decoded hardware model — the
+port map, the daisy-chain order, the CTC channel wiring, the Philips
+track/sector conventions — which is documentation, not code; and (b)
+**`make test` as an oracle**, since a MAME driver that boots to `A>` and
+lists the same six files is demonstrably equivalent. T33/T34 are still worth
+doing on their own merits (they are what any embedding needs, this one
+included), but the split should be justified by the GUI and the test suite,
+not by MAME. Do not contort the core's API for a port nobody has started.
 
 ---
 

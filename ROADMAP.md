@@ -273,9 +273,22 @@ Not on the critical path; listed so it is not forgotten.
   the card has no confirmed provenance to this unit. Out of scope until
   either a Winchester-configured `PBIx.PHI` turns up or the card is traced
   with a logic analyzer.
-- **A real display front-end.** Deliberately deferred — headless plus
-  `--dump-vram` has been sufficient and keeps the build dependency-free.
-  Worth doing only once Phase 3 makes interactivity meaningful.
+- **A real display front-end — now planned, see `TODO.md` P5 (T33–T40).**
+  SDL3 (already packaged and installed) plus a vendored Dear ImGui, behind a
+  `core` / `cli` / `gui` split that keeps `libp2500.a` dependency-free so
+  `make test` never needs a display. The GUI's primary purpose is a
+  **debugger** — device-state, memory, disassembly and IRQ-log panels — not
+  a settings dialog: every advance in this project has come from
+  instrumentation, and a live view of the daisy chain and the CTC channels
+  would have turned T17 and T19 from archaeology into inspection. Video
+  output depends on T27; live keyboard input retires the last non-derived
+  constant in the model (`P2500_KEYSTROKE_HZ`). An Emscripten build falls
+  out nearly free if SDL3's callback app model is used from the start.
+
+  A MAME driver is a plausible eventual sibling, but it would reuse the
+  *findings* and `make test` as an oracle rather than the code — MAME has
+  its own `z80daisy`/`z80ctc`/`z80pio`/`z80dma`/`upd765` devices. Worth
+  keeping the core clean for, not worth contorting it for.
 
 ---
 
