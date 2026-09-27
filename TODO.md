@@ -6,17 +6,26 @@ since been shown to be wrong, and following its "next steps" will waste
 time. `ROADMAP.md` has the longer-term shape; this file is the work queue.
 
 Everything below is derived from evidence already in this repository — the
-boot IPL EPROM dump, the CP/M `SYSPBI.PHI` disassembly, the disk images,
-and live traces of this emulator. Nothing in the queue is *blocked* on new
-hardware measurements, though **P3 is the first section with questions
-firmware genuinely cannot answer** (the IM2 daisy-chain order, and what
-pulses the CTC's CLK/TRG pins) — see `ROADMAP.md`'s measurement list.
+boot IPL EPROM dump, the CP/M system files, the disk images, and live
+traces of this emulator. Nothing in the queue is *blocked* on new hardware
+measurements.
 
-**If you are picking up work now, start at the P3 section.** T1–T12 (P0/P1)
-are complete; T13–T16 (P2) are IPL-era cleanup. P3 is Phase 2 and holds the
-current blocker (T17). The "Background" section immediately below is the
-original IPL decode and is still accurate; its conclusions have all been
-implemented.
+**Status: CP/M 2.2 boots to the `A>` prompt and accepts typed commands.**
+`make test` proves it: the SESAM banner is still byte-exact, the IPL still
+reaches `$4A00`, CP/M's page zero and `$E200` jump table are real, the
+screen reads `58K CP/M Ver. 2.2`, and typing `DIR` lists exactly the six
+files the disk image contains. Reproduce the last one with:
+
+```
+./p2500-emu --disk "../Disk Images/extracted/P25K_B/P25K_B.raw" \
+            --max-steps 20000000 --type 'dir\r' --dump-vram /tmp/vram.bin
+```
+
+**If you are picking up work now, start at the P4 section.** T1–T12 (P0/P1)
+are complete; T13–T16 (P2) are IPL-era cleanup; T17–T21, T24 and T26 (P3)
+are done and their evidence is kept below because it is the reasoning the
+current model rests on. P4 is what is left. The "Background" section
+immediately below is the original IPL decode and is still accurate.
 
 ---
 
@@ -365,7 +374,8 @@ not `$04D5` as `main.c`'s landmark list assumes. Full table:
     already nonzero, otherwise block on `CONIN`.
 
   > **Superseded in part — read T19 before acting on the rest of this
-  > entry.** The `channel 0 ZC/TO -> channels 1-3 CLK/TRG` chain below,
+  > entry.** The CTC channel chaining described below does not exist on the
+  > hardware; T19 has the real per-channel wiring and the evidence for it. The `channel 0 ZC/TO -> channels 1-3 CLK/TRG` chain below,
   > and the `channel3_rx_ready` patch that follows it, were arrived at by
   > trying a mechanism and keeping what moved - the exact pattern
   > `ROADMAP.md`'s guiding principle warns against. A later review found
@@ -460,11 +470,28 @@ not `$04D5` as `main.c`'s landmark list assumes. Full table:
   either a priority-queued interrupt model or a narrower fix for this
   specific collision - not yet done.
 
-### P3 — Phase 2: CP/M / CBIOS
+### P3 — Phase 2: CP/M / CBIOS — COMPLETE (2026-09-27)
 
-Written 2026-09-23 after an evidence review of the post-T16 tree. Every
-claim in this section was verified live against this build, with the
-reproduction given alongside it — nothing here is inferred from the docs.
+Written 2026-09-23 after an evidence review of the post-T16 tree; closed
+2026-09-27. T17–T21, T24 and T26 are implemented, ISSUE-5 is resolved, and
+CP/M reaches its prompt and runs commands. The entries are kept in full
+because they are the evidence the current hardware model rests on; each
+carries a **Done** note with what actually turned out to be true, which in
+two cases (T19's channel assignment, T20's bit number) was not what the
+review's first reading said.
+
+The single most useful thing the close-out produced is `tools/disasm_ram.sh`:
+the CP/M system files exist on disk only as sector-interleaved `.phi`
+images, so `../Disk Images/disassembly/*.asm` are all based at org 0 and
+their addresses mean nothing. A `--dump-ram` image taken at a breakpoint is
+the ground truth, and z80dasm can be pointed straight at it:
+
+```
+./p2500-emu --disk "..." --max-steps 3000000 --dump-ram /tmp/ram.bin
+tools/disasm_ram.sh /tmp/ram.bin E200 FFFF > /tmp/cbios.asm
+```
+
+Every CBIOS address quoted below was read that way, not guessed.
 
 The boot now gets much further than `$4A00`: CP/M's page zero is real
 (`$0000` = `C3 03 E2` = `JP $E203`, the CBIOS warm-boot vector), CBIOS's
@@ -480,8 +507,8 @@ Reproduce the whole picture with:
             --peek F597:32 --peek F669:32 --peek FF33:32
 ```
 
-- [ ] **T17. Replace `z80_gen_int()` with a real IM2 daisy-chain
-  interrupt controller.** *This is the top blocker; several items below
+- [x] **T17. Replace `z80_gen_int()` with a real IM2 daisy-chain
+  interrupt controller. — DONE.** *This is the top blocker; several items below
   are unresolvable without it, and it is currently silently discarding an
   entire device's interrupt stream.*
 
@@ -531,15 +558,50 @@ Reproduce the whole picture with:
   - Delete `resolve_im2_target`'s logging-only decode of the trampoline
     chain from the acknowledge path, or keep it strictly as a log.
 
-  **Unknown that this exposes, and that only hardware can settle:** the
-  physical daisy-chain order. The CTC is on the CPU card; the PIO and DMA
-  are on the FDD card. Which is `IEI`-upstream of which decides whether a
-  CTC tick can pre-empt a disk transfer's end-of-block. Added to
-  `ROADMAP.md`'s measurement list. Until it is known, pick one order,
-  name it in a single constant, and say in the code that it is a choice.
+  **Done.** `src/intctl.{c,h}` is the chain: per-source `requested` /
+  `under_service` / vector, one acknowledge per instruction boundary in
+  `p2500_step()`, and release on `RETI`. The vendored core gained one
+  optional `on_reti` callback (marked LOCAL ADDITION in `z80.{c,h}`) so the
+  chain can see `ED 4D` off the bus the way real peripherals do.
 
-- [ ] **T18. Drive the CTC from T-states, not instruction counts, and
-  model the prescaler honestly.** `ctc.c`'s `scaled_time_constant()`
+  The "IPL never uses RETI" problem turned out not to need a fallback
+  heuristic. Two separate findings closed it:
+  - The IPL *does* execute `RETI`, from a two-byte subroutine at `$0853`
+    (`EI / RETI`) that its handlers `CALL` to release themselves *early*
+    and then keep running. CBIOS does the same thing from `$EBE2`.
+  - Independently, a device is also released whenever it is reset or has
+    its interrupts disabled by a command written to it — which the floppy
+    driver does constantly (`$73`/`$F3` to the PIO, WR6 `$A3` to the DMA).
+    Both are datasheet behaviour, both are now modelled
+    (`pio.on_int_reset`, `dma.on_int_reset`, CTC control-word reset).
+
+  **The chain order was not a free choice after all.** The review assumed
+  only hardware could settle it. The IPL settles half of it: **the DMA is
+  upstream of the PIO.** Both `$07F3` (DMA end-of-block) and `$080B` (PIO)
+  open with `LD ($FF26),SP / LD SP,$FF26` — same saved-SP word, same tiny
+  private stack below it — so they cannot nest, and being entered while SP
+  is already `$FF26` is fatal on its own, because the handler's first
+  `PUSH` lands on `$FF24` where the interrupt's own return address was just
+  pushed. With the PIO ahead of the DMA that is exactly what happens: the
+  PIO handler releases itself at `$0853`, the still-pending DMA interrupt is
+  taken at `$081C`, `$07F3`'s `PUSH AF` overwrites its own return address,
+  and the machine returns to `$0042` and dies in an `RST 38` loop. Verified
+  both ways with `--break 0038`. With the DMA first, both are serviced in
+  turn from the normal stack and neither ever nests.
+
+  Where the **CTC** sits relative to the FDD card is still open — the IPL
+  never programs the CTC, so nothing from that era constrains it. It is
+  placed last (the conservative reading: a clock tick cannot pre-empt a disk
+  handler that released itself early) and stays on `ROADMAP.md`'s list.
+
+  **Result, measured over the same run that used to lose them:** every
+  request is now acknowledged 1:1 — `DMA 97/97, PIO port A 113/113,
+  CTC ch2 2704/2704, CTC ch3 4/4`. `$07F3` executes 87 times, once per disk
+  transfer, having never executed once before. The exit report prints the
+  request/acknowledge counts so a future drop cannot be silent.
+
+- [x] **T18. Drive the CTC from T-states, not instruction counts, and
+  model the prescaler honestly. — DONE.** `ctc.c`'s `scaled_time_constant()`
   folds the prescaler in as a **×4** tick multiplier for `/256` and ×1
   for `/16` — the real ratio is 16:1, and the unit is "one
   `p2500_ctc_tick()` per instruction" rather than a clock. The file's own
@@ -556,9 +618,23 @@ Reproduce the whole picture with:
   becomes a real 3,328-T-state period (≈1.2 kHz at 4 MHz) instead of
   "208 instructions", which is also what makes T19 answerable at all.
 
-- [ ] **T19. Re-derive the CTC channel wiring from CBIOS's own ISRs. The
-  current `ch0 ZC/TO → ch1/ch2/ch3 CLK/TRG` chain is very likely wrong,
-  and `channel3_rx_ready` is a patch on top of it.** T16's write-up is
+  **Done**, and it paid off immediately as a *check* rather than just a
+  cleanup. CBIOS's table at `$F546` is seven `{control, time constant}`
+  pairs selected by a baud index at `$F727`; read through the real
+  prescaler at the confirmed 4 MHz they are
+  `/256×208 = 75.1`, `/256×142 = 110.0`, `/256×104 = 150.2`,
+  `/256×52 = 300.5`, `/256×26 = 601.0`, `/16×208 = 1201.9`,
+  `/16×104 = 2403.8` — the standard rates 75/110/150/300/600/1200/2400,
+  each within 0.3%, with `$F727` = 5 (1200 baud). A wrong prescaler or a
+  per-instruction tick decodes that table to nothing, so this is a real
+  falsifiable confirmation of both the CTC model and the 4 MHz clock. The
+  `--count`-able consequence: channel 2's 50 Hz strobe produces 2,704 ticks
+  in 56.068 s of emulated time, which is 50.0 Hz once the ~2 s before CBIOS
+  programs the channel is subtracted. `p2500_ctc_read` no longer rescales.
+
+- [x] **T19. Re-derive the CTC channel wiring from CBIOS's own ISRs. — DONE;
+  the chain was indeed fictional, and the review's own channel assignment
+  turned out to be half wrong.** T16's write-up is
   honest that the chain is unconfirmed; the review found direct evidence
   against it, and — more importantly — found the handlers that settle it.
 
@@ -615,8 +691,49 @@ Reproduce the whole picture with:
   out to have no source this emulator can supply yet, it should simply
   never tick — not be fed a substitute pulse.
 
-- [ ] **T20. Make port `$05` readable. It is a live, polled input, not
-  just the bank latch.** Supersedes T15's open question ("confirm whether
+  **Done — and the vector→handler mapping above was read backwards.** Each
+  word in the `$FF90` table points at a *bank-switching* stub that loads the
+  real handler address and self-patches the `JP` at `$FF51`. Following them
+  through:
+
+  | Vector | Stub | Handler | What it is |
+  |---|---|---|---|
+  | `$90` (ch0) | `$FF0C` | **`$F597`** | serial **transmit** bit clock |
+  | `$92` (ch1) | `$FF15` | **`$F669`** | serial **receive** bit sampler |
+  | `$94` (ch2) | `$FF03` | **`$F37F`** | real-time clock tick |
+  | `$96` (ch3) | `$FEFA` | **`$ED2A`** | **keyboard** byte ready |
+
+  So `$F669` is channel **1**'s handler, not channel 0's — consistent with
+  `$F52E` patching `$F669+1` in the same breath as programming channel 1
+  (`$F531`: `OUT ($01),$C7`). That also closes the "loose end" above:
+  channel 0 has a registered handler *and* interrupts disabled at init
+  because its interrupt is armed only while a byte is being transmitted
+  (`$F57F`: `($F731) | $87` → `OUT ($00)`), which is exactly what a
+  bit-banged transmitter should do.
+
+  The four channels as modelled now (`src/ctc.h` carries the same table):
+  - **ch0** TIMER, no CLK/TRG input at all. Transmit bit clock.
+  - **ch1** CLK/TRG = the serial **RXD** line. COUNTER/falling/tc=1 catches
+    the start bit; `$F669` then reprograms channel 1 *itself* as a TIMER at
+    half a bit time and thereafter whole bit times, sampling port `$05`
+    bit 7 into a shift register at `$F73D`, and finally restores `$C7`/tc=1
+    to wait for the next start bit.
+  - **ch2** CLK/TRG = an unidentified 50 Hz strobe → the 24-bit tick counter
+    at `$F436`.
+  - **ch3** CLK/TRG = the keyboard controller's "byte ready" strobe. `$ED2D`
+    does one `IN A,($06)` and pushes the whole byte into a 32-byte ring at
+    `$ED8F`. So `keyboard.h`'s byte-level model was right — it just belongs
+    to the keyboard, while the bit-banging belongs to the serial port.
+
+  `channel3_rx_ready` is gone. `p2500_ctc_tick()` takes T-states and touches
+  only TIMER channels; `p2500_ctc_set_clk_trg()` drives the three real pins;
+  `rising_edge` is finally used. A channel whose real source this emulator
+  cannot supply (ch1's RXD, nothing plugged in) simply never ticks, and
+  ch0/ch1 duly report `0/0` requests in a CP/M run — correct, because CP/M's
+  console output goes to video, not the serial line.
+
+- [x] **T20. Make port `$05` readable. It is a live, polled input, not
+  just the bank latch. — DONE.** Supersedes T15's open question ("confirm whether
   anything reads port `$05`"): `$F5A4` executes `IN A,($05)` and tests
   **bit 6**, inside the CTC channel-1 (serial receive) ISR. Today
   `port_in` has no `$05` case, so it falls through to the `0xFF` default
@@ -630,7 +747,25 @@ Reproduce the whole picture with:
   `../Tracing/P2500-predicted-wiring-from-firmware.md` §C1–C4 before
   guessing at them.
 
-- [ ] **T21. Fix `dma.c`'s WR3 base-register pattern.** `dma.c` decodes
+  **Done, with the bit numbers corrected.** There are *two* readable bits
+  and they do different jobs:
+  - **bit 7 is RXD.** `$F6A9` does `IN A,($05) / RLA` — it wants the bit in
+    carry, so it is sampling bit 7, once per bit cell, inside the channel-1
+    receive state machine.
+  - **bit 6 is a transmit handshake/ready input.** `$F5AD` does
+    `IN A,($05) / BIT 6,A` inside the channel-0 *transmit* ISR, gated on a
+    flag `$F50A` sets from a configuration byte at `$F72A`, and backed by a
+    timeout counter at `$F72D`. That is the bit the review saw; it is not
+    RXD.
+
+  Both idle high (marking RXD, asserted handshake) — what an unplugged line
+  with a pull-up looks like. `../Tracing/
+  P2500-predicted-wiring-from-firmware.md` §C4 predicted this port was
+  readable at "Likely" confidence before any code that reads it had been
+  found, which is a clean independent hit for that document's method. The
+  remaining bits still read back as 1; nothing traced reads them.
+
+- [x] **T21. Fix `dma.c`'s WR3 base-register pattern. — DONE.** `dma.c` decodes
   WR3 as `D7,D1,D0 = 0,0,0`, which makes the branch **dead code**: every
   such byte is claimed by the WR1 (`D2=1`) or WR2 (`D2=0`) test above it.
   `dma.h`'s comment treats the overlap as an unresolvable ambiguity in
@@ -648,6 +783,11 @@ Reproduce the whole picture with:
   the transfer would be silently dropped by `p2500_dma_deliver`'s
   `dma_enabled` guard. Nothing traced so far sends WR3, so this is
   latent, not active.
+
+  **Done:** the test is now `(value & 0x83) == 0x80`, placed where it is
+  unambiguous against WR1/WR2/WR4/WR5/WR6, and `dma.h`'s comment records the
+  erratum rather than an unresolvable ambiguity. Still latent — nothing in
+  any traced run sends WR3 — but no longer dead code.
 
 - [ ] **T22. Invert the DMA↔FDC data path, and give the DMA real
   end-of-block semantics.** Today `fdc.c`'s `do_read_data()` *calls*
@@ -694,8 +834,8 @@ Reproduce the whole picture with:
     map), which is why the `diskdefs` all use `skew 1`. `lba =
     physical_track × 16 + (R − 1)` is right.
 
-- [ ] **T24. Add `make test` — a regression script, not just the one
-  SESAM diff.** Phase 1 was expensive to win and nothing currently
+- [x] **T24. Add `make test` — a regression script, not just the one
+  SESAM diff. — DONE.** Phase 1 was expensive to win and nothing currently
   guards it. Three cheap, falsifiable checks, all already reproducible
   from the CLI:
   1. SESAM banner VRAM byte-exact vs
@@ -709,7 +849,17 @@ Reproduce the whole picture with:
 
   Make each of these exit non-zero on failure so they can gate commits.
 
-- [ ] **T25. Harness gaps that this review had to work around.** All
+  **Done:** `tools/run_tests.sh`, wired to `make test`, 17 checks in ~8 s,
+  exit 1 on any failure. It got a fourth group beyond the three planned,
+  which is now the most valuable one: **typing `DIR` at the prompt must list
+  exactly the six files the disk image contains** (PIP, SYSGEN, SYSCBI,
+  SYSLOAD, SYSPBI, SYSCPM). That single check exercises the keyboard strobe,
+  port `$06`, the interrupt daisy chain, the FDC/DMA read path, the
+  directory decode and CONOUT at once, and its expected output is fixed by
+  the disk image rather than by this emulator — nothing internal can fake
+  it.
+
+- [x] **T25. Harness gaps that this review had to work around. — DONE.** All
   three cost real time during it:
   - **`--watch ADDR[:LEN]`.** `main.c` hardcodes watches on `$0003` and
     `$0039`. Finding who writes the `$EB70` semaphore (ISSUE-5) needed a
@@ -730,7 +880,31 @@ Reproduce the whole picture with:
     current run). Either snapshot the expected bytes at first hit or
     scope the gate to addresses whose content is genuinely invariant.
 
-- [ ] **T26. Small correctness items, individually cheap.**
+  **Done.** `--watch ADDR[:LEN]` (defaults to the two page-zero canaries
+  when none is given), `--count ADDR` (reporting the first step it hit),
+  `--break ADDR`, `--dump-ram PATH`, `--no-stuck-detect`, and
+  `--type-after MS`. The exit report now also prints emulated time in
+  seconds and the per-device interrupt request/acknowledge counts, so a
+  future silent drop cannot hide. `read_whole_file()` checks `malloc` and
+  rejects a non-positive size.
+
+  The cycle detector took two attempts and the second one is the
+  interesting part. Comparing repeated *PC* sequences fires immediately on
+  the IPL's own 64 KB RAM test (`$016B`), an 11-instruction loop whose PC
+  sequence repeats perfectly for hundreds of thousands of steps while making
+  real progress. It has to be **state**: PC plus every visible register,
+  unbroken for 20,000 steps. A loop that repeats all of that cannot be
+  making progress, because nothing it could be waiting on is reaching a
+  register — while a polling wait on a location an ISR writes (ISSUE-5's
+  `$EB02`) does repeat state, and is correctly caught. It found ISSUE-5's
+  deadlock at step 1,150,000 with a reported period of 208 instructions.
+
+  The T8 gate now only reports a mismatch while the landmark has never
+  legitimately hit; once it has, a mismatch just means CP/M reused the
+  address, which is correct behaviour and was being reported as a failure
+  every run.
+
+- [x] **T26. Small correctness items, individually cheap. — DONE.**
   - `machine.h`'s `crtc_regs[16]` with `crtc_index & 0x0F`: the MC6845
     has **18** registers (R0–R17). R16/R17 (light pen) currently alias
     onto R0/R1 (horizontal total / displayed), so any access to them
@@ -749,6 +923,70 @@ Reproduce the whole picture with:
   - `main.c`'s `read_whole_file()` does not check `malloc` or reject a
     zero/negative `ftell`.
 
+  **Done**, all five. `crtc_regs` is 18 entries with an explicit range check
+  (a write to R18+ is logged and dropped rather than aliased); the CTC
+  accepts a vector byte on channel 0 only and logs the channel when it
+  refuses one elsewhere; the prescaler now only exists in TIMER mode by
+  construction (T18); `resolve_im2_target` uses `p2500_peek`;
+  `read_whole_file` is hardened.
+
+
+### P4 — Phase 3: a usable machine
+
+Written 2026-09-27, with CP/M at its prompt and `make test` green. These are
+the items P3 deliberately deferred plus what running CP/M exposed. Nothing
+here is blocked on hardware.
+
+- [ ] **T27. Video attributes.** The screen renders correctly today because
+  nothing it prints uses attributes. The video card carries **12** MB8116E
+  (16 Kbit x 1) parts, which is 16 K words x 12 bits — an 8-bit character
+  code plus a 4-bit attribute nibble — not the flat 16 KB byte bank
+  `machine.c` models at `$8000`-`$BFFF`. Anything that reverses, dims or
+  underlines text will expose the difference. Start from
+  `../Actual P2500 hardware/P2500 Video Card/P2500-video-card-findings.md`,
+  and look for CBIOS writing a second plane: `$E4C3` is CONOUT, and the
+  escape-sequence handling around it is the place attributes would appear.
+  `tools/render_vram.py` will need the same treatment.
+
+- [ ] **T28. Serial transmit, end to end.** Everything needed is in place
+  and nothing exercises it: CTC channel 0 is the transmit bit clock, its ISR
+  is `$F597`, port `$04` is the data bit, port `$05` bit 6 is the handshake
+  input the ISR waits on (T20). `PIP LST:=FILE.TXT` at the prompt should
+  make the whole path observable through the existing `[tx]` logging — and
+  it is a genuine test of the T18 timing model, because a wrong bit rate
+  produces recognisably mangled characters rather than nothing. Note the
+  handshake: with `$F72A` bit 0 set, `$F5A6` will not transmit until bit 6
+  reads high, and the timeout at `$F72D` gives up if it never does.
+
+- [ ] **T29. Identify what really drives CTC channel 2's CLK/TRG.** The
+  model assumes 50 Hz (`P2500_CLOCK_TICK_HZ` in `machine.h`), which is
+  right for both candidates — mains and the video frame rate — so CP/M
+  keeps good time either way. It is still an assumption, and it is the only
+  frequency in the emulator that is not derived from the 4 MHz crystal.
+  Firmware may be able to settle it after all: find what reads the 24-bit
+  counter at `$F436` and what it divides by. If something converts it to
+  seconds with a constant, that constant *is* the tick rate.
+
+- [ ] **T30. Invert the DMA<->FDC data path (was T22), then finish the
+  uPD765 command set (was T23).** Both are unchanged and still needed for
+  writing to disk; see T22 and T23 above for the full write-ups. Nothing in
+  CP/M's read-only path needed them, which is why the prompt was reachable
+  without them. The first thing that will need them is `PIP` copying a file
+  onto the disk, which is also the natural test.
+
+- [ ] **T31. Multi-track reads past `EOT`.** Folded out of T23 because it is
+  independent of the DMA inversion and now reachable: `do_read_data()` hands
+  the DMA the whole remaining disk image as one flat span, so a multi-sector
+  read that runs past the last sector of a track walks into the next track
+  instead of terminating. CP/M's directory reads stay inside one track,
+  which is why `DIR` is correct; a large sequential file read will not.
+
+- [ ] **T32. UCSD p-System boot.** `P2k5_LOGIC` and `P2k5_TKS` in
+  `../Disk Images/extracted/` use a genuinely different bootstrap, so they
+  are the best independent check on the disk path that exists — and the
+  first thing that will test the IM2 chain against software that was never
+  considered while building it. Worth trying as-is before anything else in
+  P4: it costs one command.
 
 ---
 
@@ -939,7 +1177,7 @@ Reproduce the whole picture with:
   (`$4A00`) is met.
 
 - **ISSUE-5: CBIOS deadlocks at `$EB02` on a semaphore that is never
-  signalled again — diagnosed, not yet fixed. Blocked on T17.** This is
+  signalled again — RESOLVED by T17.** This is
   where a current `--disk` run ends up, and it is further than anything
   before it: CP/M page zero is genuinely built (`$0000` = `C3 03 E2` =
   `JP $E203`, CBIOS's warm-boot vector; `$0005` = `C3 06 D4`), CBIOS's
@@ -958,12 +1196,18 @@ Reproduce the whole picture with:
   3.9 M steps. So the wait side is fine; the **signal side stops being
   driven**.
 
-  Almost certainly the same root cause as T17: the only interrupt source
-  still firing at that point is the CTC, and exactly one of its two
-  active channels can be delivered per tick — channel 1's ISR (`$F59A`)
-  executes **0** times against 19,106 requests. Whatever `$EC18` is
-  downstream of, half the machine's interrupt traffic is not arriving.
-  Do not chase `$EB70` further until T17 lands; re-measure afterwards.
+  The attribution to T17 was right, though not for the reason guessed. The
+  wait at `$EB02` is the tail of `$EAC0`, a generic "post a request, then
+  spin until its status byte changes" routine; `$EC10` (reached via `$EC17`'s
+  `INC (HL)`) is the completion signal. What was not arriving was the
+  **disk** side, not the clock: with a single interrupt slot the DMA's
+  end-of-block interrupt was overwritten by the PIO's every single time, so
+  `$07F3` never ran and no transfer was ever reported complete.
+
+  With the daisy chain in place (T17) the deadlock is gone outright: `$07F3`
+  runs 87 times, CP/M finishes loading, prints `58K CP/M Ver. 2.2`, and sits
+  at `A>` polling CONST/CONIN at `$E46C` — which is an *idle* loop, not a
+  stall. `$EB02` is no longer reached at all in a normal run.
 
 ---
 
@@ -998,6 +1242,45 @@ produces.
 | `$FEDD` | µPD765 command opcode for the pending operation (`$06` read / `$05` write / `$0D` format) |
 | `$FF26` | Saved SP — interrupt handlers exit via `LD SP,($FF26)` + `JP`, **not** `RET`/`RETI` |
 
+## Useful CP/M-era addresses (CBIOS / SYSPBI, `$E200`-`$FFFF`)
+
+All read out of a live `--dump-ram` image with `tools/disasm_ram.sh` — the
+on-disk `.phi` files are sector-interleaved, so the `org 0` listings in
+`../Disk Images/disassembly/` cannot be used for addresses.
+
+| Address | Contents |
+|---|---|
+| `$E200` | CP/M 2.2 CBIOS jump table (BOOT/WBOOT/CONST/CONIN/CONOUT/LIST/...) |
+| `$E46C` | **CONST** - returns 0 unless `($E551)` != `$FF` and `($E553)` != `($0020)` |
+| `$E48C` | **CONIN** - `CALL $E46C` / `JR Z` until CONST reports a character |
+| `$E4C3` | **CONOUT** - the memory-mapped video path (start here for T27) |
+| `$E54F` | Console-read request block: `[id][?][status][?][byte]`, status `$FF` = pending |
+| `$EAC0` | Generic "post a request, then spin until its status changes" (the old ISSUE-5 wait at `$EB02` is its tail) |
+| `$EB5C` | Event-slot table, 3-byte records `{id, ptr_lo, ptr_hi}` |
+| `$EBA0` | Copies a request's count + destination into a driver's state block |
+| `$EBAD` | Start a buffered read: drain the ring first, else record the request as pending and return `$FF` |
+| `$EBDD` | IM2 vector-slot allocator - returns `($EC9C) + BC` |
+| `$EBE2` | **`EI / RETI`** - how every CBIOS handler releases the daisy chain |
+| `$EBE5` / `$EBFB` | Circular-buffer push / pop. Header is `[count][write_idx][read_idx]`, 32 bytes of data at `+3` |
+| `$EC10` | Request-completion signal (`$EC17`'s `INC (HL)`) |
+| `$ECDE` | CTC channel 3 (keyboard) init - vector base to `$00`, then `$C5`/tc=1 to `$03` |
+| `$ED02` | Keyboard ring-buffer init: zeroes the 3-byte header at `$ED8F`. **Runs late** - anything strobed in before this is discarded (see `keyboard.h`) |
+| `$ED2A` → `$ED2D` | **CTC channel 3 ISR** - one `IN A,($06)`, push to the ring at `$ED8F` |
+| `$ED8B` | Console-read state: `[flags][count][dest_lo][dest_hi]`, flag bit 0 = read outstanding |
+| `$ED8F` | Keyboard ring buffer (header + 32 bytes) |
+| `$EE1C` | CTC channel 2 (clock) init - `$D5`/tc=1 to `$02` |
+| `$F37F` → `$F382` | **CTC channel 2 ISR** - increments the 24-bit tick counter at `$F436` |
+| `$F436` | 24-bit real-time tick counter (50 Hz) |
+| `$F546` | Baud-rate table, 7 x `{control, time constant}`; see T18 |
+| `$F597` → `$F59A` | **CTC channel 0 ISR** - serial transmit bit clock |
+| `$F669` → `$F66C` | **CTC channel 1 ISR** - serial receive bit sampler |
+| `$F727` | Baud index into `$F546` (5 = 1200 baud) |
+| `$F731`/`$F732` | Live copy of the selected baud table entry |
+| `$F733` | Serial flags; bit 6 = "check the port `$05` bit 6 handshake" |
+| `$F73D` | Serial receive shift register |
+| `$FF90` | CBIOS IM2 table at `I=$FF`: `$FF0C`/`$FF15`/`$FF03`/`$FEFA` for vectors `$90`/`$92`/`$94`/`$96` |
+| `$FF0C`/`$FF15`/`$FF03`/`$FEFA` | Bank-switching stubs that self-patch the `JP` at `$FF51` with the real handler |
+
 ## Known-good invariants to assert in the harness
 
 Scoped to **while the IPL still owns memory** — CP/M replaces page zero
@@ -1014,7 +1297,8 @@ way or it will fire on a correct boot.
 - Port `$14` must read exactly `$80` when idle (ROM `$0498` compares for
   equality, not a bit test).
 
-Once CP/M is up, the equivalent invariants are:
+Once CP/M is up, the equivalent invariants are (all four are asserted by
+`make test`):
 
 - `$0000`–`$0002` = `C3 03 E2` (CBIOS warm-boot vector) and `$0005`–
   `$0007` = `C3 06 D4` (BDOS entry). Nothing a stray NOP-sled can fake —
@@ -1022,3 +1306,9 @@ Once CP/M is up, the equivalent invariants are:
 - `$E200`–`$E20F` is CP/M 2.2's standard BIOS jump table
   (BOOT/WBOOT/CONST/CONIN/CONOUT/LIST/PUNCH/READER), all `JP nn`.
 - `I` = `$FF`, IM 2.
+- The screen reads `Philips P2500` / `58K CP/M Ver. 2.2` / `A>`, and typing
+  `dir\r` lists PIP, SYSGEN, SYSCBI, SYSLOAD, SYSPBI and SYSCPM — the six
+  files the disk image actually contains.
+- Every interrupt request is acknowledged exactly once. The exit report
+  prints `requests/acknowledged` per device; the two numbers diverging means
+  the daisy chain is dropping something (which is the whole of T17).

@@ -59,28 +59,18 @@ static bool resolve_im2_target(P2500Machine *m, uint8_t vector, uint16_t *call_t
     *final_dest_out = 0;
     if (m->cpu.i == 0x00) return false;
     uint16_t slot_addr = (uint16_t)((m->cpu.i << 8) | vector);
-    uint16_t call_target = (uint16_t)(m->ram[slot_addr] | (m->ram[(uint16_t)(slot_addr + 1)] << 8));
+    uint16_t call_target = (uint16_t)(p2500_peek(m, slot_addr) |
+                                      (p2500_peek(m, (uint16_t)(slot_addr + 1)) << 8));
     uint16_t final_dest = call_target;
-    if (m->ram[call_target] == 0xC3) { /* JP nn */
-        final_dest = (uint16_t)(m->ram[(uint16_t)(call_target + 1)] |
-                                 (m->ram[(uint16_t)(call_target + 2)] << 8));
+    if (p2500_peek(m, call_target) == 0xC3) { /* JP nn */
+        final_dest = (uint16_t)(p2500_peek(m, (uint16_t)(call_target + 1)) |
+                                 (p2500_peek(m, (uint16_t)(call_target + 2)) << 8));
     }
     *call_target_out = call_target;
     *final_dest_out = final_dest;
     return true;
 }
 
-static void log_suppressed(P2500Machine *m, const char *source, uint8_t vector) {
-    fprintf(stderr, "[irq] %s interrupt vector=$%02X - suppressed, I=$%02X not yet "
-                    "initialized\n", source, vector, m->cpu.i);
-}
-
-/* Interrupt delivery relies on the z80 core's native IFF1 gating (see
- * process_interrupts in z80.c) plus resolve_im2_target's I-register check
- * above; an SP-baseline "still in flight" gate was tried and dropped -
- * this ROM's interrupt handlers exit via "LD SP,($FF26)" + JP, not
- * RET/RETI, so they never naturally unwind the stack the way that gate
- * assumed. */
 /* The uPD765's own INT line doesn't drive the CPU directly - it's wired
  * into a Z80A-PIO input bit (TODO.md T4), and the PIO decides whether that
  * becomes a CPU interrupt. `fdc.int_line` is the real, held pin level
@@ -92,43 +82,74 @@ static void fdc_interrupt_trampoline(void *userdata) {
     (void)userdata;
 }
 
+static void log_request(P2500Machine *m, int source, uint8_t vector) {
+    if (!m->intctl.verbose) return;
+    uint16_t call_target, final_dest;
+    if (resolve_im2_target(m, vector, &call_target, &final_dest))
+        fprintf(stderr, "[irq] %s requests vector=$%02X at PC=$%04X IFF1=%d "
+                        "(-> $%04X -> $%04X)\n",
+                p2500_intctl_name(source), vector, m->cpu.pc, m->cpu.iff1,
+                call_target, final_dest);
+    else
+        fprintf(stderr, "[irq] %s requests vector=$%02X at PC=$%04X - I=$%02X is not yet "
+                        "a real table page, holding\n",
+                p2500_intctl_name(source), vector, m->cpu.pc, m->cpu.i);
+}
+
+/* Every peripheral routes its interrupt request through the daisy chain in
+ * intctl.c now, instead of calling z80_gen_int() directly (TODO.md T17). A
+ * request is *held* until the CPU acknowledges it, so two devices asking in
+ * the same instruction no longer overwrite each other - which they did,
+ * constantly and silently. p2500_step() below does the arbitration. */
+static void ctc_interrupt_trampoline(void *userdata, int channel, uint8_t vector) {
+    P2500Machine *m = (P2500Machine *)userdata;
+    int source = P2500_INT_CTC0 + channel;
+    log_request(m, source, vector);
+    p2500_intctl_request(&m->intctl, source, vector);
+}
+
+static void ctc_reset_trampoline(void *userdata, int channel) {
+    P2500Machine *m = (P2500Machine *)userdata;
+    p2500_intctl_reset_source(&m->intctl, P2500_INT_CTC0 + channel);
+}
+
 static void pio_interrupt_trampoline(void *userdata, uint8_t vector) {
     P2500Machine *m = (P2500Machine *)userdata;
-    uint16_t call_target, final_dest;
-    if (!resolve_im2_target(m, vector, &call_target, &final_dest)) {
-        log_suppressed(m, "PIO", vector);
-        return;
-    }
-    fprintf(stderr, "[irq] PIO interrupt -> z80_gen_int(vector=$%02X) at PC=$%04X IFF1=%d "
-                    "(-> $%04X -> $%04X)\n",
-            vector, m->cpu.pc, m->cpu.iff1, call_target, final_dest);
-    z80_gen_int(&m->cpu, vector);
+    /* pio.c fires per port, but its callback predates needing to know
+     * which; port A is the only one this machine arms interrupts on (the
+     * FDC INT line, TODO.md T4) and port B's I/O mask makes it inputs
+     * only. Distinguish on the vector, which the two ports program
+     * separately. */
+    int source = (m->pio.vector_set[P2500_PIO_PORT_B] &&
+                  vector == m->pio.vector[P2500_PIO_PORT_B])
+                     ? P2500_INT_PIO_B : P2500_INT_PIO_A;
+    log_request(m, source, vector);
+    p2500_intctl_request(&m->intctl, source, vector);
+}
+
+static void pio_reset_trampoline(void *userdata, int port) {
+    P2500Machine *m = (P2500Machine *)userdata;
+    p2500_intctl_reset_source(&m->intctl,
+        port == P2500_PIO_PORT_B ? P2500_INT_PIO_B : P2500_INT_PIO_A);
 }
 
 static void dma_interrupt_trampoline(void *userdata, uint8_t vector) {
     P2500Machine *m = (P2500Machine *)userdata;
-    uint16_t call_target, final_dest;
-    if (!resolve_im2_target(m, vector, &call_target, &final_dest)) {
-        log_suppressed(m, "DMA", vector);
-        return;
-    }
-    fprintf(stderr, "[irq] DMA interrupt -> z80_gen_int(vector=$%02X) at PC=$%04X IFF1=%d "
-                    "(-> $%04X -> $%04X)\n",
-            vector, m->cpu.pc, m->cpu.iff1, call_target, final_dest);
-    z80_gen_int(&m->cpu, vector);
+    log_request(m, P2500_INT_DMA, vector);
+    p2500_intctl_request(&m->intctl, P2500_INT_DMA, vector);
 }
 
-static void ctc_interrupt_trampoline(void *userdata, uint8_t vector) {
+static void dma_reset_trampoline(void *userdata) {
     P2500Machine *m = (P2500Machine *)userdata;
-    uint16_t call_target, final_dest;
-    if (!resolve_im2_target(m, vector, &call_target, &final_dest)) {
-        log_suppressed(m, "CTC", vector);
-        return;
-    }
-    fprintf(stderr, "[irq] CTC interrupt -> z80_gen_int(vector=$%02X) at PC=$%04X IFF1=%d "
-                    "(-> $%04X -> $%04X)\n",
-            vector, m->cpu.pc, m->cpu.iff1, call_target, final_dest);
-    z80_gen_int(&m->cpu, vector);
+    p2500_intctl_reset_source(&m->intctl, P2500_INT_DMA);
+}
+
+/* RETI, snooped off the CPU core (see the local addition in
+ * vendor/superzazu_z80/z80.c): the highest-priority device currently under
+ * service releases its hold on the chain. */
+static void cpu_reti_trampoline(z80 *cpu) {
+    P2500Machine *m = (P2500Machine *)cpu->userdata;
+    p2500_intctl_reti(&m->intctl);
 }
 
 static uint8_t port_in(z80 *cpu, uint8_t port) {
@@ -136,10 +157,23 @@ static uint8_t port_in(z80 *cpu, uint8_t port) {
     switch (port) {
     case 0x00: case 0x01: case 0x02: case 0x03:
         return p2500_ctc_read(&m->ctc, port);
+    case 0x05: {
+        /* Serial input lines (TODO.md T20). CBIOS's CTC channel-1 receive
+         * ISR samples bit 7 once per bit cell ($F6A9: IN A,($05) / RLA),
+         * and its channel-0 transmit ISR gates on bit 6 ($F5AD: IN A,($05)
+         * / BIT 6,A). Everything else reads back as a pulled-up 1 until
+         * something is traced reading it - see ../Tracing/
+         * P2500-predicted-wiring-from-firmware.md C4, which predicted this
+         * port was readable before any code that reads it had been found. */
+        uint8_t v = 0xFF;
+        if (!m->serial_rxd) v &= (uint8_t)~(1u << P2500_PORT05_RXD_BIT);
+        if (!m->serial_tx_ready) v &= (uint8_t)~(1u << P2500_PORT05_TX_READY_BIT);
+        return v;
+    }
     case 0x06:
         return p2500_keyboard_in(&m->keyboard);
     case 0x09:
-        return m->crtc_regs[m->crtc_index & 0x0F];
+        return m->crtc_index < 18 ? m->crtc_regs[m->crtc_index] : 0x00;
     case 0x0F:
         return p2500_sesam_in(&m->sesam);
     case 0x10:
@@ -175,7 +209,10 @@ static void port_out(z80 *cpu, uint8_t port, uint8_t value) {
         m->crtc_index = value;
         break;
     case 0x09:
-        m->crtc_regs[m->crtc_index & 0x0F] = value;
+        if (m->crtc_index < 18) m->crtc_regs[m->crtc_index] = value;
+        else if (m->verbose_unknown_ports)
+            fprintf(stderr, "[crtc] write $%02X to nonexistent register R%u ignored\n",
+                    value, m->crtc_index);
         break;
     case 0x0F:
         p2500_sesam_out(&m->sesam, value);
@@ -241,6 +278,12 @@ void p2500_init(P2500Machine *m) {
     m->cpu.port_in = port_in;
     m->cpu.port_out = port_out;
     m->cpu.userdata = m;
+    m->cpu.on_reti = cpu_reti_trampoline;
+
+    p2500_intctl_init(&m->intctl);
+    m->int_offered = -1;
+    m->serial_rxd = true;      /* idle mark - nothing plugged into the serial port */
+    m->serial_tx_ready = true; /* handshake input idles asserted */
 
     p2500_sesam_init(&m->sesam, NULL, 0);
 
@@ -252,14 +295,17 @@ void p2500_init(P2500Machine *m) {
 
     p2500_pio_init(&m->pio);
     m->pio.on_interrupt = pio_interrupt_trampoline;
+    m->pio.on_int_reset = pio_reset_trampoline;
     m->pio.interrupt_userdata = m;
 
     p2500_dma_init(&m->dma);
     m->dma.on_interrupt = dma_interrupt_trampoline;
+    m->dma.on_int_reset = dma_reset_trampoline;
     m->dma.interrupt_userdata = m;
 
     p2500_ctc_init(&m->ctc);
     m->ctc.on_interrupt = ctc_interrupt_trampoline;
+    m->ctc.on_reset = ctc_reset_trampoline;
     m->ctc.interrupt_userdata = m;
 
     p2500_keyboard_init(&m->keyboard, NULL, 0);
@@ -277,9 +323,73 @@ bool p2500_load_rom(P2500Machine *m, const char *path) {
     return n == P2500_EPROM_SIZE;
 }
 
+/* CTC channel 2's CLK/TRG: a square wave at P2500_CLOCK_TICK_HZ, derived
+ * from the same T-state count everything else uses. CBIOS programs the
+ * channel for the rising edge ($D5), so one full period is one tick. */
+static void advance_clock_strobe(P2500Machine *m, uint32_t tstates) {
+    const uint32_t half_period = P2500_CPU_HZ / (2u * P2500_CLOCK_TICK_HZ);
+    m->clock_strobe_phase += tstates;
+    while (m->clock_strobe_phase >= half_period) {
+        m->clock_strobe_phase -= half_period;
+        m->clock_strobe_level = !m->clock_strobe_level;
+        p2500_ctc_set_clk_trg(&m->ctc, P2500_CTC_CLOCK_TICK_CHANNEL, m->clock_strobe_level);
+    }
+}
+
+/* CTC channel 3's CLK/TRG: the keyboard controller's "byte ready" strobe -
+ * one falling edge per byte offered, at P2500_KEYSTROKE_HZ. Channel 3's
+ * ISR ($ED2D) then reads that whole byte off port $06.
+ *
+ * This replaces the old `channel3_rx_ready` flag, which had the right idea
+ * - only strobe when a byte really is waiting - but hung it off a channel-0
+ * ZC/TO pulse that has nothing to do with the keyboard, via a chain that
+ * does not exist (see ctc.h). */
+static void advance_keyboard_strobe(P2500Machine *m, uint32_t tstates) {
+    const uint32_t interval = P2500_CPU_HZ / P2500_KEYSTROKE_HZ;
+    if (!p2500_keyboard_byte_waiting(&m->keyboard, m->cpu.cyc)) {
+        m->keyboard_strobe_phase = 0;
+        return;
+    }
+    m->keyboard_strobe_phase += tstates;
+    if (m->keyboard_strobe_phase < interval) return;
+    m->keyboard_strobe_phase -= interval;
+    p2500_ctc_set_clk_trg(&m->ctc, P2500_CTC_KEYBOARD_CHANNEL, true);
+    p2500_ctc_set_clk_trg(&m->ctc, P2500_CTC_KEYBOARD_CHANNEL, false);
+}
+
 void p2500_step(P2500Machine *m) {
+    unsigned long cyc_before = m->cpu.cyc;
     z80_step(&m->cpu);
+    uint32_t elapsed = (uint32_t)(m->cpu.cyc - cyc_before);
+
+    /* Did the core take the vector we offered? z80_step() runs the
+     * instruction and then process_interrupts(), which clears int_pending
+     * exactly when it accepts one. If it is still set, the CPU had
+     * interrupts disabled and the device is still holding /INT - which is
+     * the whole point of the chain. */
+    if (m->int_offered >= 0 && !m->cpu.int_pending) {
+        p2500_intctl_acknowledge(&m->intctl, m->int_offered);
+        m->int_offered = -1;
+    }
+
     p2500_pio_set_input_bit(&m->pio, P2500_FDC_PIO_PORT, P2500_FDC_PIO_BIT, m->fdc.int_line);
-    p2500_ctc_tick(&m->ctc, m->keyboard.pos < m->keyboard.queue_len);
+    p2500_ctc_tick(&m->ctc, elapsed);
+    p2500_ctc_set_clk_trg(&m->ctc, P2500_CTC_SERIAL_RX_CHANNEL, m->serial_rxd);
+    advance_clock_strobe(m, elapsed);
+    advance_keyboard_strobe(m, elapsed);
+
+    /* Offer the chain's winner to the core. Re-offer if a higher-priority
+     * device has since asked, or withdraw if the offered one gave up: the
+     * core's single slot is the bus, and only one device drives it. */
+    int winner = (m->cpu.i == 0x00) ? -1 : p2500_intctl_pending(&m->intctl);
+    if (winner != m->int_offered) {
+        if (winner >= 0) {
+            z80_gen_int(&m->cpu, m->intctl.vector[winner]);
+        } else {
+            m->cpu.int_pending = 0;
+        }
+        m->int_offered = winner;
+    }
+
     m->total_instructions++;
 }

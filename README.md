@@ -21,6 +21,27 @@
 > true and valuable below: the build/run instructions, the credits under
 > "Why this exists", and the SESAM byte-exact regression test under
 > "Validation".
+>
+> ### Where the emulator actually is (2026-09-27)
+>
+> **CP/M 2.2 boots to the `A>` prompt and runs typed commands.** All three
+> misidentifications above are fixed, and so is the interrupt model: the
+> vendored CPU core's single pending-interrupt slot was silently discarding
+> whole devices' interrupt streams, and `src/intctl.c` replaces it with a
+> real IM2 daisy chain (`TODO.md` T17). Try it:
+>
+> ```
+> make test        # 17 checks, ~8 s - keep this green
+> ./p2500-emu --disk "../Disk Images/extracted/P25K_B/P25K_B.raw" \
+>             --max-steps 20000000 --type 'dir\r' --dump-vram /tmp/vram.bin
+> ```
+>
+> Current flags: `--rom --disk --sesam --type --type-after --max-steps
+> --verbose-io --peek --poke --watch --count --break --dump-vram --dump-ram
+> --no-stuck-detect`. `tools/disasm_ram.sh` disassembles a `--dump-ram`
+> image at its real addresses, which is the only way to read the CP/M
+> system files (the on-disk `.phi` files are sector-interleaved, so the
+> listings in `../Disk Images/disassembly/` have no usable addresses).
 
 *A from-scratch emulator for the Philips P2000B/P2500 CPU card.* Named
 "P2500" for brevity and to stay distinct from the unrelated P2000T/P2000M/

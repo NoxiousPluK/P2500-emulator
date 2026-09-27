@@ -59,7 +59,12 @@ static void check_landmarks(const P2500Machine *m, uint16_t pc, unsigned long st
         bool matches = landmarks[i].expected < 0 ? byte != 0x00
                                                   : byte == (uint8_t)landmarks[i].expected;
         if (!matches) {
-            landmarks[i].gated_count++;
+            /* Only interesting while the landmark has never legitimately
+               hit. Once it has, a mismatch just means the address has been
+               reused - which is correct behaviour for $1000's boot sector
+               once CP/M owns that memory, and was reported as a failure
+               every run (TODO.md T25). */
+            if (landmarks[i].hit_count == 0) landmarks[i].gated_count++;
             continue;
         }
         landmarks[i].hit_count++;
@@ -75,7 +80,9 @@ static uint8_t *read_whole_file(const char *path, size_t *out_size) {
     fseek(f, 0, SEEK_END);
     long sz = ftell(f);
     fseek(f, 0, SEEK_SET);
+    if (sz <= 0) { fclose(f); return NULL; }
     uint8_t *buf = malloc((size_t)sz);
+    if (!buf) { fclose(f); return NULL; }
     if (fread(buf, 1, (size_t)sz, f) != (size_t)sz) { free(buf); fclose(f); return NULL; }
     fclose(f);
     *out_size = (size_t)sz;
@@ -88,6 +95,9 @@ int main(int argc, char **argv) {
     const char *sesam_path = NULL;
     const char *vram_dump_path = NULL;
     unsigned long max_steps = 2000000UL;
+    /* --type-after MS: emulated milliseconds to wait before the first
+     * queued keystroke. See keyboard.h for why this is needed. */
+    unsigned long type_after_ms = 4000;
     bool verbose_io = false;
     /* --type STRING - queues bytes to deliver one per port $06 (console
      * RX) read, simulating keystrokes. Supports \r \n \t \\ and \xHH.
@@ -108,6 +118,26 @@ int main(int argc, char **argv) {
     #define MAX_POKES 8
     struct { uint16_t addr; uint8_t bytes[64]; size_t len; } pokes[MAX_POKES];
     int num_pokes = 0;
+    /* --watch ADDR[:LEN] - report every change to that byte (or run of
+       bytes) with the PC and registers that caused it (TODO.md T25).
+       Defaults to $0003 and $0039 - the two page-zero corruption canaries
+       this project has needed most often - when none is given. */
+    #define MAX_WATCHES 16
+    struct { uint16_t addr; uint16_t len; uint8_t last[64]; } watches[MAX_WATCHES];
+    int num_watches = 0;
+    /* --count ADDR - count executions at that PC and print the total at
+       exit. "Does this handler ever actually run?" is the single question
+       this project asks most (TODO.md T25). */
+    #define MAX_COUNTS 16
+    struct { uint16_t addr; unsigned long hits; unsigned long first_step; } counts[MAX_COUNTS];
+    int num_counts = 0;
+    /* --break ADDR - stop the run the first time PC reaches it, so the
+       exit report's registers/peeks describe that exact moment. */
+    #define MAX_BREAKS 8
+    uint16_t breaks[MAX_BREAKS];
+    int num_breaks = 0;
+    const char *ram_dump_path = NULL;
+    bool stuck_detect = true;
 
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--rom") && i + 1 < argc) rom_path = argv[++i];
@@ -116,6 +146,8 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--dump-vram") && i + 1 < argc) vram_dump_path = argv[++i];
         else if (!strcmp(argv[i], "--max-steps") && i + 1 < argc) max_steps = strtoul(argv[++i], NULL, 0);
         else if (!strcmp(argv[i], "--verbose-io")) verbose_io = true;
+        else if (!strcmp(argv[i], "--type-after") && i + 1 < argc)
+            type_after_ms = strtoul(argv[++i], NULL, 0);
         else if (!strcmp(argv[i], "--type") && i + 1 < argc) {
             const char *s = argv[++i];
             while (*s && type_len < MAX_TYPE_LEN) {
@@ -146,6 +178,30 @@ int main(int argc, char **argv) {
             peeks[num_peeks].len = (uint16_t)strtoul(colon + 1, NULL, 0);
             num_peeks++;
         }
+        else if (!strcmp(argv[i], "--dump-ram") && i + 1 < argc) ram_dump_path = argv[++i];
+        else if (!strcmp(argv[i], "--no-stuck-detect")) stuck_detect = false;
+        else if (!strcmp(argv[i], "--watch") && i + 1 < argc) {
+            if (num_watches >= MAX_WATCHES) { fprintf(stderr, "too many --watch args\n"); return 1; }
+            char *arg = argv[++i];
+            char *colon = strchr(arg, ':');
+            if (colon) *colon = '\0';
+            watches[num_watches].addr = (uint16_t)strtoul(arg, NULL, 16);
+            watches[num_watches].len = colon ? (uint16_t)strtoul(colon + 1, NULL, 0) : 1;
+            if (watches[num_watches].len < 1) watches[num_watches].len = 1;
+            if (watches[num_watches].len > 64) watches[num_watches].len = 64;
+            num_watches++;
+        }
+        else if (!strcmp(argv[i], "--count") && i + 1 < argc) {
+            if (num_counts >= MAX_COUNTS) { fprintf(stderr, "too many --count args\n"); return 1; }
+            counts[num_counts].addr = (uint16_t)strtoul(argv[++i], NULL, 16);
+            counts[num_counts].hits = 0;
+            counts[num_counts].first_step = 0;
+            num_counts++;
+        }
+        else if (!strcmp(argv[i], "--break") && i + 1 < argc) {
+            if (num_breaks >= MAX_BREAKS) { fprintf(stderr, "too many --break args\n"); return 1; }
+            breaks[num_breaks++] = (uint16_t)strtoul(argv[++i], NULL, 16);
+        }
         else if (!strcmp(argv[i], "--poke") && i + 1 < argc) {
             if (num_pokes >= MAX_POKES) { fprintf(stderr, "too many --poke args\n"); return 1; }
             char *arg = argv[++i];
@@ -163,9 +219,11 @@ int main(int argc, char **argv) {
             num_pokes++;
         } else {
             fprintf(stderr, "unknown or malformed argument: %s\n", argv[i]);
-            fprintf(stderr, "usage: %s [--rom path] [--disk path] [--sesam path] "
-                            "[--dump-vram path] [--max-steps N] [--verbose-io] "
-                            "[--poke ADDR:HEXBYTES ...]\n", argv[0]);
+            fprintf(stderr, "usage: %s [--rom path] [--disk path] [--sesam path]\n"
+                            "  [--dump-vram path] [--dump-ram path] [--max-steps N] [--verbose-io]\n"
+                            "  [--peek ADDR:LEN ...] [--poke ADDR:HEXBYTES ...]\n"
+                            "  [--watch ADDR[:LEN] ...] [--count ADDR ...] [--type STRING] [--type-after MS]\n"
+                            "  [--break ADDR ...] [--no-stuck-detect]\n", argv[0]);
             return 1;
         }
     }
@@ -191,15 +249,17 @@ int main(int argc, char **argv) {
         m.fdc.verbose = verbose_io;
         printf("Loaded disk image from %s (%zu bytes)\n", disk_path, disk_size);
     }
+    if (type_len > 0) {
+        p2500_keyboard_init(&m.keyboard, type_buf, type_len);
+        m.keyboard.start_after_tstates = (unsigned long)type_after_ms * (P2500_CPU_HZ / 1000u);
+        printf("Queued %zu bytes to type on port $06, starting after %lu ms emulated\n",
+               type_len, type_after_ms);
+    }
     m.pio.verbose = verbose_io;
     m.dma.verbose = verbose_io;
     m.ctc.verbose = verbose_io;
     m.keyboard.verbose = verbose_io;
     m.serial.verbose = true; /* always show console TX - it's this project's only view of program output */
-    if (type_len > 0) {
-        p2500_keyboard_init(&m.keyboard, type_buf, type_len);
-        printf("Queued %zu bytes to type on port $06\n", type_len);
-    }
 
     uint8_t *sesam_buf = NULL;
     size_t sesam_size = 0;
@@ -223,34 +283,67 @@ int main(int argc, char **argv) {
     const unsigned STUCK_WINDOW = 200000;
     const unsigned CHECK_INTERVAL = 5000;
     const unsigned STUCK_DISTINCT_THRESHOLD = 8;
+    /* TODO.md T25: counting *distinct* addresses alone misses cycles - the
+     * ISSUE-5 deadlock walks 64 addresses and so ran the full 5 M steps
+     * reporting nothing. So also look for a repeating *state* sequence.
+     *
+     * It has to be state, not PC: the IPL's own 64K RAM test ($016B) is an
+     * 11-instruction loop whose PC sequence repeats perfectly for hundreds
+     * of thousands of steps while making real progress - only its
+     * registers say so. A loop that repeats PC *and* every visible
+     * register, unbroken for CYCLE_CONFIRM steps, cannot be making
+     * progress: nothing it could still be waiting on is being sampled into
+     * a register. (A polling wait on a memory location an ISR writes -
+     * exactly ISSUE-5's $EB02 - does repeat state, and is correctly
+     * reported: the ISR that would break it is not running.) */
+    const unsigned MAX_CYCLE_PERIOD = 2048;
+    const unsigned CYCLE_CONFIRM = 20000;
     uint16_t *ring = malloc(sizeof(uint16_t) * STUCK_WINDOW);
+    uint64_t *state_ring = malloc(sizeof(uint64_t) * STUCK_WINDOW);
+    if (!ring || !state_ring) { fprintf(stderr, "out of memory allocating the PC ring\n"); return 1; }
     unsigned ring_pos = 0;
     bool ring_full = false;
     static bool seen[65536];
+    unsigned detected_cycle = 0;
 
     unsigned long step = 0;
     int reset_visits = 0;
     const char *stop_reason = NULL;
 
-    uint8_t watch_addr3_last = p2500_peek(&m, 3);
-    uint8_t watch_addr39_last = p2500_peek(&m, 0x39);
+    if (num_watches == 0) { /* the two default page-zero canaries */
+        watches[num_watches].addr = 0x0003; watches[num_watches].len = 1; num_watches++;
+        watches[num_watches].addr = 0x0039; watches[num_watches].len = 1; num_watches++;
+    }
+    for (int w = 0; w < num_watches; w++)
+        for (uint16_t j = 0; j < watches[w].len; j++)
+            watches[w].last[j] = p2500_peek(&m, (uint16_t)(watches[w].addr + j));
+
     for (; step < max_steps; step++) {
         uint16_t pc = m.cpu.pc;
 
-        if (p2500_peek(&m, 3) != watch_addr3_last) {
-            fprintf(stderr, "[step %lu] [$0003 watch] changed $%02X -> $%02X, PC=$%04X SP=$%04X "
-                            "DE=$%02X%02X HL=$%02X%02X BC=$%02X%02X\n",
-                    step, watch_addr3_last, p2500_peek(&m, 3), pc, m.cpu.sp,
-                    m.cpu.d, m.cpu.e, m.cpu.h, m.cpu.l, m.cpu.b, m.cpu.c);
-            watch_addr3_last = p2500_peek(&m, 3);
+        for (int w = 0; w < num_watches; w++) {
+            for (uint16_t j = 0; j < watches[w].len; j++) {
+                uint16_t a = (uint16_t)(watches[w].addr + j);
+                uint8_t now = p2500_peek(&m, a);
+                if (now == watches[w].last[j]) continue;
+                fprintf(stderr, "[step %lu] [watch $%04X] $%02X -> $%02X, PC=$%04X SP=$%04X "
+                                "A=$%02X BC=$%02X%02X DE=$%02X%02X HL=$%02X%02X\n",
+                        step, a, watches[w].last[j], now, pc, m.cpu.sp, m.cpu.a,
+                        m.cpu.b, m.cpu.c, m.cpu.d, m.cpu.e, m.cpu.h, m.cpu.l);
+                watches[w].last[j] = now;
+            }
         }
-        if (p2500_peek(&m, 0x39) != watch_addr39_last) {
-            fprintf(stderr, "[step %lu] [$0039 watch] changed $%02X -> $%02X, PC=$%04X SP=$%04X "
-                            "DE=$%02X%02X HL=$%02X%02X BC=$%02X%02X\n",
-                    step, watch_addr39_last, p2500_peek(&m, 0x39), pc, m.cpu.sp,
-                    m.cpu.d, m.cpu.e, m.cpu.h, m.cpu.l, m.cpu.b, m.cpu.c);
-            watch_addr39_last = p2500_peek(&m, 0x39);
+        for (int c = 0; c < num_counts; c++) {
+            if (counts[c].addr != pc) continue;
+            if (counts[c].hits == 0) counts[c].first_step = step;
+            counts[c].hits++;
         }
+        for (int b = 0; b < num_breaks; b++) {
+            if (breaks[b] != pc) continue;
+            stop_reason = "--break reached";
+            break;
+        }
+        if (stop_reason) break;
 
         check_landmarks(&m, pc, step);
 
@@ -273,10 +366,17 @@ int main(int argc, char **argv) {
         }
 
         ring[ring_pos] = pc;
+        state_ring[ring_pos] =
+            (((uint64_t)pc) |
+             ((uint64_t)m.cpu.sp << 16) |
+             ((uint64_t)m.cpu.a << 32) |
+             ((uint64_t)((m.cpu.b << 8) | m.cpu.c) << 40)) ^
+            (((uint64_t)((m.cpu.d << 8) | m.cpu.e) * 0x9E3779B97F4A7C15ULL) >> 24) ^
+            (((uint64_t)((m.cpu.h << 8) | m.cpu.l) * 0xC2B2AE3D27D4EB4FULL) >> 8);
         ring_pos = (ring_pos + 1) % STUCK_WINDOW;
         if (ring_pos == 0) ring_full = true;
 
-        if (ring_full && step % CHECK_INTERVAL == 0) {
+        if (stuck_detect && ring_full && step % CHECK_INTERVAL == 0) {
             memset(seen, 0, sizeof(seen));
             unsigned distinct = 0;
             for (unsigned i = 0; i < STUCK_WINDOW; i++) {
@@ -286,6 +386,23 @@ int main(int argc, char **argv) {
                 stop_reason = "stuck: last window only touched a handful of distinct addresses";
                 break;
             }
+            /* Is the newest CYCLE_CONFIRM-step suffix periodic with some
+             * period p <= MAX_CYCLE_PERIOD? ring_pos is the next slot to
+             * write, so the newest entry sits at ring_pos-1, walking
+             * backwards modulo the ring. */
+            for (unsigned per = 1; per <= MAX_CYCLE_PERIOD; per++) {
+                bool match = true;
+                for (unsigned i = 0; i + per < CYCLE_CONFIRM; i++) {
+                    unsigned a = (ring_pos + STUCK_WINDOW - 1 - i) % STUCK_WINDOW;
+                    unsigned b = (ring_pos + STUCK_WINDOW - 1 - i - per) % STUCK_WINDOW;
+                    if (state_ring[a] != state_ring[b]) { match = false; break; }
+                }
+                if (match) { detected_cycle = per; break; }
+            }
+            if (detected_cycle) {
+                stop_reason = "stuck: the PC is repeating a fixed instruction cycle";
+                break;
+            }
         }
 
         if (m.cpu.halted) {
@@ -293,12 +410,9 @@ int main(int argc, char **argv) {
             break;
         }
 
-        /* Note: superzazu/z80's z80_step() runs the current opcode then
-         * calls process_interrupts() in the *same* call, so a z80_gen_int()
-         * triggered from a port-out callback mid-instruction is delivered
-         * before the next fetch - there's no separate "pending" step to
-         * observe here, confirmed by reading z80.c directly (see
-         * ../README.md's "Open finding" section). */
+        /* p2500_step() runs one instruction, advances every peripheral by
+         * that instruction's T-states, and then offers the interrupt daisy
+         * chain's winner to the CPU core - see machine.c and intctl.h. */
         p2500_step(&m);
     }
     if (step >= max_steps && !stop_reason) stop_reason = "hit max-steps";
@@ -310,6 +424,25 @@ int main(int argc, char **argv) {
                    "expected byte(s), not counted - see T8)\n",
                    landmarks[i].addr, landmarks[i].name, landmarks[i].gated_count);
     }
+    if (detected_cycle)
+        printf("  (repeating PC cycle of %u instructions detected)\n", detected_cycle);
+    for (int c = 0; c < num_counts; c++) {
+        if (counts[c].hits)
+            printf("  --count $%04X: %lu execution(s), first at step %lu\n",
+                   counts[c].addr, counts[c].hits, counts[c].first_step);
+        else
+            printf("  --count $%04X: never executed\n", counts[c].addr);
+    }
+    printf("Emulated time: %.3f s (%lu T-states at %u Hz)\n",
+           (double)m.cpu.cyc / (double)P2500_CPU_HZ, m.cpu.cyc, P2500_CPU_HZ);
+    printf("Interrupts (daisy chain order, requests/acknowledged):\n ");
+    for (int i = 0; i < P2500_INT_SOURCES; i++) {
+        int src = p2500_intctl_chain_order[i];
+        printf(" %s %lu/%lu%s", p2500_intctl_name(src), m.intctl.requests[src],
+               m.intctl.acknowledged[src],
+               m.intctl.under_service[src] ? " (in service)" : "");
+    }
+    printf("\n");
     printf("Final: PC=$%04X SP=$%04X A=$%02X BC=$%02X%02X DE=$%02X%02X HL=$%02X%02X "
            "I=$%02X IM=%d IFF1=%d halted=%d\n",
            m.cpu.pc, m.cpu.sp, m.cpu.a, m.cpu.b, m.cpu.c, m.cpu.d, m.cpu.e,
@@ -358,6 +491,17 @@ int main(int argc, char **argv) {
         }
     }
 
+    if (ram_dump_path) {
+        FILE *f = fopen(ram_dump_path, "wb");
+        if (f) {
+            fwrite(m.ram, 1, P2500_RAM_SIZE, f);
+            fclose(f);
+            printf("Wrote the full 64K RAM image to %s\n", ram_dump_path);
+        } else {
+            fprintf(stderr, "failed to write RAM dump to %s\n", ram_dump_path);
+        }
+    }
+
     if (vram_dump_path) {
         FILE *f = fopen(vram_dump_path, "wb");
         if (f) {
@@ -370,6 +514,7 @@ int main(int argc, char **argv) {
     }
 
     free(ring);
+    free(state_ring);
     free(disk_buf);
     free(sesam_buf);
     return 0;

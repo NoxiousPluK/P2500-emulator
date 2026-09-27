@@ -45,6 +45,15 @@ static P2500DmaByteRole queue_pop(P2500Dma *dma) {
     return role;
 }
 
+/* Any command that resets the chip or disables its interrupts also clears
+ * a pending/in-service end-of-block interrupt, releasing the DMA's place in
+ * the IM2 daisy chain (see intctl.h). This is how the IPL's handlers get
+ * away with never executing RETI: the floppy driver's own register streams
+ * send WR6 $A3 ("reset and disable interrupts") constantly. */
+static void notify_int_reset(P2500Dma *dma) {
+    if (dma->on_int_reset) dma->on_int_reset(dma->interrupt_userdata);
+}
+
 static void execute_command(P2500Dma *dma, uint8_t value) {
     switch (value) {
     case 0xC3: /* Reset */
@@ -52,6 +61,7 @@ static void execute_command(P2500Dma *dma, uint8_t value) {
         dma->loaded = false;
         dma->interrupts_enabled = false;
         dma->dma_enabled = false;
+        notify_int_reset(dma);
         break;
     case 0xCF: /* Load */
         if (dma->verbose) fprintf(stderr, "[dma] LOAD\n");
@@ -64,6 +74,7 @@ static void execute_command(P2500Dma *dma, uint8_t value) {
     case 0xAF: /* Disable interrupts */
         if (dma->verbose) fprintf(stderr, "[dma] DISABLE INTERRUPTS\n");
         dma->interrupts_enabled = false;
+        notify_int_reset(dma);
         break;
     case 0x87: /* Enable DMA */
         if (dma->verbose) fprintf(stderr, "[dma] ENABLE DMA\n");
@@ -76,6 +87,7 @@ static void execute_command(P2500Dma *dma, uint8_t value) {
     case 0xA3: /* Reset and Disable Interrupts */
         if (dma->verbose) fprintf(stderr, "[dma] RESET AND DISABLE INTERRUPTS\n");
         dma->interrupts_enabled = false;
+        notify_int_reset(dma);
         break;
     case 0xC7: /* Reset Port A Timing */
     case 0xC8: /* Reset Port B Timing */
@@ -146,7 +158,7 @@ static void decode_base_register(P2500Dma *dma, uint8_t value) {
         if (dma->verbose) fprintf(stderr, "[dma] WR5 base $%02X (Ready/CE/EOB behavior)\n", value);
         return;
     }
-    if ((value & 0x83) == 0x00) { /* WR3 fallback: D7,D1,D0 = 0,0,0 - see dma.h note */
+    if ((value & 0x83) == 0x80) { /* WR3: D7,D1,D0 = 1,0,0 - see dma.h note */
         if (dma->verbose)
             fprintf(stderr, "[dma] WR3 base $%02X (stop-on-match=%d, int-enable=%d, dma-enable=%d)\n",
                     value, (value >> 2) & 1, (value >> 5) & 1, (value >> 6) & 1);

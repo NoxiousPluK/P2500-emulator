@@ -63,6 +63,8 @@ void p2500_pio_write_control(P2500Pio *pio, int port, uint8_t value) {
         if (pio->verbose)
             fprintf(stderr, "[pio] port %c interrupt %s\n", label,
                     pio->int_enabled[port] ? "enabled" : "disabled");
+        if (!pio->int_enabled[port] && pio->on_int_reset)
+            pio->on_int_reset(pio->interrupt_userdata, port);
         evaluate_interrupt(pio, port);
         return;
     }
@@ -76,6 +78,8 @@ void p2500_pio_write_control(P2500Pio *pio, int port, uint8_t value) {
                             "active_high=%d mask_follows=%d\n", label,
                     pio->int_enabled[port], pio->and_mode[port], pio->active_high[port],
                     mask_follows);
+        if (!pio->int_enabled[port] && pio->on_int_reset)
+            pio->on_int_reset(pio->interrupt_userdata, port);
         if (mask_follows) pio->state[port] = P2500_PIO_WAIT_MONITOR_MASK;
         else evaluate_interrupt(pio, port);
         return;

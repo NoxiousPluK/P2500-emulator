@@ -49,13 +49,17 @@
  *   WR0: D7=0, D1D0 in {01,10,11} (not 00)      - class of operation
  *   WR1: D7,D2,D1,D0 = 0,1,0,0                   - Port A device/timing
  *   WR2: D7,D2,D1,D0 = 0,0,0,0                   - Port B device/timing
- *   WR3: D7,D1,D0 = 0,0,0                        - match/mask, fast enables
- *        NOTE: this pattern overlaps WR2's whenever WR3's own D2 ("stop
- *        on match") happens to be 0 - the manual doesn't resolve this,
- *        and neither real captured stream from this ROM ever sends a
- *        WR3 byte, so it's only tried after WR2 fails to match
- *        (documented judgment call, not confirmed against real
- *        hardware - see TODO.md ISSUE-2's write-up).
+ *   WR3: D7,D1,D0 = 1,0,0                        - match/mask, fast enables
+ *        This project first decoded WR3 as D7=0, which made the branch
+ *        dead code (every such byte is claimed by WR1 or WR2 above it) and
+ *        was blamed on an irreducible ambiguity in the manual. It is not
+ *        ambiguous, it is an erratum: UM008101's Figure 43 prints D7=0, but
+ *        the Zilog Component Data Book (1985) WR3 bit map - the figure
+ *        carrying DMA ENABLE / INTERRUPT ENABLE / STOP ON MATCH - shows
+ *        D7=1, which is the only value that decodes at all against WR1/WR2
+ *        and is what every other Z80-DMA implementation uses. See TODO.md
+ *        T21. WR3's D6 is DMA Enable and D5 is Interrupt Enable, the
+ *        documented one-byte alternative to WR6 $87/$AB.
  *   WR4: D7,D1,D0 = 1,0,1                        - mode, Port B addr, ints
  *   WR5: D7,D6,D2,D1,D0 = 1,0,0,1,0               - Ready/CE/EOB behavior
  *
@@ -133,6 +137,9 @@ typedef struct {
     bool dma_enabled;        /* WR6 $87 seen, cleared by $83 (or WR3 D6) */
 
     P2500DmaInterruptCallback on_interrupt;
+    /* Called when a command resets the chip or disables its interrupts -
+     * see notify_int_reset in dma.c. */
+    void (*on_int_reset)(void *userdata);
     void *interrupt_userdata;
     bool verbose;
 } P2500Dma;

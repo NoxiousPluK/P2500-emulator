@@ -57,6 +57,13 @@ typedef struct {
     bool condition_was_true[P2500_PIO_PORTS]; /* edge detection so a held level fires once */
 
     P2500PioInterruptCallback on_interrupt;
+    /* Called with the port number when that port's interrupts are
+     * disabled by a control word. On a Z80-PIO that clears any pending or
+     * in-service interrupt for the port, releasing its place in the IM2
+     * daisy chain (see intctl.h) - which is how the IPL's handlers, which
+     * never execute RETI, stay unstuck: the floppy driver writes $73/$F3
+     * around every critical section. */
+    void (*on_int_reset)(void *userdata, int port);
     void *interrupt_userdata;
     bool verbose;
 } P2500Pio;

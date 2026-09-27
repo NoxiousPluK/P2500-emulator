@@ -3,6 +3,7 @@
 
 #include <stdint.h>
 #include <stdbool.h>
+#include <stddef.h>
 #include "vendor/superzazu_z80/z80.h"
 #include "fdc.h"
 #include "sesam.h"
@@ -10,6 +11,7 @@
 #include "dma.h"
 #include "ctc.h"
 #include "keyboard.h"
+#include "intctl.h"
 
 /*
  * P2500 CPU-card machine model. Port $05 bank-switches the low 4KB between
@@ -22,11 +24,17 @@
  *   $00-$03  Z80A-CTC, one channel per port (HWTEST V100; TODO.md T16) -
  *            not touched by the IPL, needed once CP/M's CBIOS starts
  *            bit-banging the keyboard/printer serial lines against it
- *   $04      console serial TX (write-only, byte at a time - see keyboard.h)
- *   $06      console serial RX (read-only, byte at a time - see keyboard.h)
- *   $05      bank select ($07 normal, $0F EPROM-out/RAM-in, $00 video RAM
- *            window at $8000-$BFFF - the video-bank distinction isn't
- *            modeled yet, see TODO.md T1 "Extra")
+ *   $04      serial TX data bit (write; CBIOS bit-bangs it against CTC
+ *            channel 0 - see ctc.h)
+ *   $06      keyboard byte (read-only, one whole byte per CTC channel-3
+ *            strobe - see keyboard.h)
+ *   $05      write: bank select ($07 normal, $0F EPROM-out/RAM-in, $00
+ *            video RAM window at $8000-$BFFF - the video-bank distinction
+ *            isn't modeled yet, see TODO.md T1 "Extra")
+ *            read:  serial input lines. Bit 7 is RXD, sampled once per bit
+ *            cell by the CTC channel-1 receive ISR; bit 6 is a transmit
+ *            handshake/ready input the channel-0 transmit ISR waits on
+ *            before shifting a byte out. See TODO.md T20 and ctc.h.
  *   $08/$09  MC6845 CRTC (index/data)
  *   $0F      SESAM port (dongle / bootable-cartridge probe)
  *   $10/$11  Z80A-PIO data registers (Port A/B)
@@ -42,6 +50,39 @@
 
 #define P2500_RAM_SIZE 0x10000
 #define P2500_EPROM_SIZE 0x1000
+
+/* Z8400A (Z80A) at 4 MHz - confirmed from the real CPU card's silicon, see
+ * ../P2500-general-findings.md. Everything time-based in this emulator is
+ * derived from this one number and the CPU core's T-state counter; there
+ * are no independent timing constants. */
+#define P2500_CPU_HZ 4000000u
+
+/* CTC channel 2's CLK/TRG source: a periodic external strobe that CBIOS's
+ * channel-2 ISR turns into the 24-bit real-time tick counter at $F436 (see
+ * ctc.h). WHAT ACTUALLY DRIVES IT IS NOT KNOWN - on a Philips machine the
+ * two candidates are a 50 Hz mains-derived pulse and the video card's frame
+ * rate, and both are 50 Hz, which is why that is the value used here. It is
+ * an assumption, named in one place, and on ROADMAP.md's hardware
+ * measurement list; nothing else in the model depends on it. */
+#define P2500_CLOCK_TICK_HZ 50u
+
+/* How often a queued --type byte is offered to CTC channel 3 (see
+ * advance_keyboard_strobe in machine.c). This models the *user*, not the
+ * keyboard: on real hardware a keypress that arrives before CBIOS has armed
+ * channel 3 is simply lost, and the person presses the key again. Offering
+ * a pending byte at a steady human-plausible rate reproduces that without
+ * needing to know when the machine started listening. */
+#define P2500_KEYSTROKE_HZ 100u
+
+/* Which bits of port $05 read back as what (TODO.md T20). */
+#define P2500_PORT05_RXD_BIT 7
+#define P2500_PORT05_TX_READY_BIT 6
+
+/* Which CTC channel each external strobe is wired to - see ctc.h for the
+ * evidence behind each one. */
+#define P2500_CTC_SERIAL_RX_CHANNEL 1
+#define P2500_CTC_CLOCK_TICK_CHANNEL 2
+#define P2500_CTC_KEYBOARD_CHANNEL 3
 
 /* Which Z80A-PIO Port A bit the FDD card's uPD765 INT line is wired to -
  * not yet confirmed by hardware tracing (TODO.md T4), kept as a single
@@ -63,9 +104,31 @@ typedef struct {
     P2500Keyboard keyboard;
     P2500Serial serial;
 
-    /* MC6845 CRTC: 16 8-bit registers, selected by $08, read/written via $09 */
-    uint8_t crtc_regs[16];
+    /* MC6845 CRTC: 18 8-bit registers R0-R17, selected by $08, read/written
+     * via $09. It really is 18, not 16 (TODO.md T26): masking the index to
+     * 4 bits aliased R16/R17, the light-pen registers, onto R0/R1, the
+     * horizontal total and displayed counts that the geometry depends on. */
+    uint8_t crtc_regs[18];
     uint8_t crtc_index;
+
+    /* IM2 daisy chain (TODO.md T17). `int_offered` is the source whose
+     * vector is currently sitting in the CPU core's single pending slot, or
+     * -1; the core clearing int_pending is how we learn it was taken. */
+    P2500IntCtl intctl;
+    int int_offered;
+
+    /* Serial input lines read back on port $05 (TODO.md T20). Idle high:
+     * RXD marking, and the transmit handshake asserting "ready", which is
+     * what an unplugged line with a pull-up looks like. */
+    bool serial_rxd;
+    bool serial_tx_ready;
+
+    /* CTC channel 2's assumed 50 Hz strobe (see P2500_CLOCK_TICK_HZ). */
+    uint32_t clock_strobe_phase;
+    bool clock_strobe_level;
+
+    /* CTC channel 3's keyboard "byte ready" strobe. */
+    uint32_t keyboard_strobe_phase;
 
     bool verbose_unknown_ports;
     unsigned long total_instructions;

@@ -756,6 +756,7 @@ void z80_init(z80* const z) {
   z->int_pending = 0;
   z->nmi_pending = 0;
   z->int_data = 0;
+  z->on_reti = NULL;
 }
 
 // executes the next instruction in memory + handles interrupts
@@ -1554,7 +1555,12 @@ void exec_opcode_ed(z80* const z, uint8_t opcode) {
     z->iff1 = z->iff2;
     ret(z);
     break; // retn
-  case 0x4D: ret(z); break; // reti
+  case 0x4D: // reti
+    /* LOCAL ADDITION (P2500 TODO.md T17): let the interrupt daisy chain
+     * see the RETI, exactly as real peripherals do by watching the bus. */
+    if (z->on_reti) z->on_reti(z);
+    ret(z);
+    break;
 
   case 0xA0: ldi(z); break; // ldi
   case 0xB0: {
