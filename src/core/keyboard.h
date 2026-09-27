@@ -41,8 +41,12 @@ typedef struct {
     const uint8_t *queue;
     size_t queue_len;
     size_t pos;
-    /* T-states from reset before the first byte may be delivered. */
-    unsigned long start_after_tstates;
+    /* Per-byte earliest delivery time, in T-states from reset, parallel to
+     * `queue`. Per-byte rather than one queue-wide start so a session can be
+     * scripted against events the guest drives - type a command, wait for it
+     * to finish, swap the disk, then type again (see --type-at/--swap-at).
+     * NULL means "no constraint". */
+    const unsigned long *release_at;
     bool verbose;
 } P2500Keyboard;
 

@@ -1065,7 +1065,39 @@ here is blocked on hardware.
 
   **Start with `P2k5_CPM`** once T41 lands.
 
-- [ ] **T41. Read `.IMD` images directly, instead of pre-flattened `.raw`.**
+- [x] **T41a. `tools/imd_tool.py` — verify and normalize `.IMD` images. — DONE
+  (2026-09-28).** `verify` prints a per-image manifest (geometry, data rate,
+  ID cylinder sequence, absent/bad/deleted sectors) and says plainly whether
+  an image is complete; `convert` writes a `.raw` indexed by **ID cylinder**
+  rather than physical track position. The full manifest is checked in at
+  `../Disk Images/findings/IMD-integrity-manifest.txt`.
+
+  Two results worth keeping:
+  - **The normalizer is provably safe.** `convert` on a healthy image is
+    **byte-identical** to the existing `.raw` (`--compare` asserts it), so
+    ID-indexing is a strict superset of the current layout, not a change of
+    convention. The emulator already computes
+    `lba = (C-1) * sectors + (R-1)`, which *is* that layout.
+  - **It found a defect nobody had located.** `P25K_S` carries one sector
+    flagged with a data error — which matches the uploader's own report of
+    BDOS errors on that physical disk, and was previously only a vague
+    caveat in the extraction notes.
+
+  It cannot repair the four double-stepped images: the missing tracks were
+  never read. `P2k5_CPM` needs ID cylinder 2 as the *second* thing its
+  loader touches, so even a best-effort fill fails immediately — the gap is
+  at the start, not the tail. Those disks need re-imaging with
+  single-stepping.
+
+  **The per-file extractions under `../Disk Images/extracted/` were deleted**
+  (2026-09-28, with the owner's agreement). They were unreliable: 38 of 142
+  files were wrong, including `P25K_B/pip.com`, which was not PIP but a copy
+  of **`P25K_S`'s CP/M directory**, and 14 of `P2k5_CPM`'s 21 files. The
+  `.raw` images are kept — they are what this emulator and `make test`
+  consume, and they verify clean. Regenerate the per-file sets from the
+  `.IMD` originals with `cpmtools` if research ever needs them.
+
+- [ ] **T41b. Read `.IMD` images directly in the emulator.**
   The `.IMD` originals in `../Disk Images/originals/` carry, per track: the
   real sector-ID map, the **ID cylinder map**, the head map, the data rate
   mode, and per-sector "bad/deleted data" flags. Flattening to `.raw`
@@ -1091,6 +1123,34 @@ here is blocked on hardware.
 
   Keep `.raw` support: it is what `make test` uses and what the SESAM
   regression depends on. Select on file extension or magic.
+
+  Lower priority than it first looked: T41a shows the five healthy images
+  normalize to exactly the `.raw` the emulator already reads, so this buys
+  fidelity (real sector-ID lookup, honest "sector not found", bad-sector
+  modelling for `P25K_S`) rather than unblocking anything.
+
+- [ ] **T42. `P25K_G` blocks on an event that never signals.** The one
+  complete, clean image that still does not reach a prompt — so unlike the
+  double-stepped disks, this one is ours. Its CBIOS is a different build
+  (banner `PHILIPS P2000B / CP/M 2.2 - 58K`), but page zero is identical to
+  `P25K_B`'s (`C3 03 E2 / C3 06 D4`) and it loads fine: 82 DMA transfers,
+  all acknowledged, clock ticking.
+
+  It ends in a 2-instruction spin at `$EBC2`: `LD A,$01 / CP (HL) /
+  JR NZ,-3` with `HL=$EC2A` — **the same generic "post a request, wait for
+  its status to become 1" loop as the old ISSUE-5**, at a different address
+  in this build. Watching the event slots shows the machinery works: slot
+  `$EC2D` (device id 5, `B=5`) is posted and signalled repeatedly by `$ECD3`,
+  while slot `$EC2A` (device id 4, `B=4`) is posted at step 1,019,307 and
+  never signalled again.
+
+  Ruled out: it is **not** waiting for the keyboard — `--type` delivers and
+  CTC channel 3 acknowledges 4 of 4, with no effect. Not SESAM (baseline
+  access only, see T32). Not the clock (ch2 fires 3451 times). Worth noting
+  this build programs ch2 as `$C5` (falling edge) where `P25K_B` uses `$D5`
+  (rising); the emulator's square wave supplies both edges so it ticks
+  either way, but it is the one traced hardware difference between the two
+  builds. Next step: identify which ISR is supposed to signal device 4.
  Its track 0 is 14-of-16 sectors identical to
   `P25K_B`'s and its boot sector is byte-identical, so the bootstrap is
   proven to work in this emulator; only the content it goes on to load

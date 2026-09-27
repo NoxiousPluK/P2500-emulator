@@ -9,8 +9,9 @@ void p2500_keyboard_init(P2500Keyboard *kb, const uint8_t *queue, size_t queue_l
 }
 
 bool p2500_keyboard_byte_waiting(const P2500Keyboard *kb, unsigned long elapsed_tstates) {
-    return kb->queue && kb->pos < kb->queue_len &&
-           elapsed_tstates >= kb->start_after_tstates;
+    if (!kb->queue || kb->pos >= kb->queue_len) return false;
+    if (kb->release_at && elapsed_tstates < kb->release_at[kb->pos]) return false;
+    return true;
 }
 
 uint8_t p2500_keyboard_in(P2500Keyboard *kb) {

@@ -36,9 +36,20 @@
 >             --max-steps 20000000 --type 'dir\r' --dump-vram /tmp/vram.bin
 > ```
 >
-> Current flags: `--rom --disk --sesam --type --type-after --max-steps
-> --verbose-io --peek --poke --watch --count --break --dump-vram --dump-ram
-> --no-stuck-detect`. `tools/disasm_ram.sh` disassembles a `--dump-ram`
+> Current flags: `--rom --disk --sesam --type --type-at --type-after
+> --swap-at --max-steps --verbose-io --peek --poke --watch --count --break
+> --dump-vram --dump-ram --no-stuck-detect`. Disks can be changed mid-run,
+> which CP/M handles the way it does on real hardware — swap, then Ctrl-C at
+> the prompt to force a warm boot and re-read the directory:
+>
+> ```
+> ./p2500-emu --disk "../Disk Images/extracted/P25K_B/P25K_B.raw" \
+>   --max-steps 120000000 \
+>   --type-at '4000:dir\r' \
+>   --swap-at '11000:../Disk Images/extracted/P25TEST/P25TEST.raw' \
+>   --type-at '13000:\x03' --type-at '20000:dir\r' \
+>   --dump-vram /tmp/vram.bin
+> ``` `tools/disasm_ram.sh` disassembles a `--dump-ram`
 > image at its real addresses, which is the only way to read the CP/M
 > system files (the on-disk `.phi` files are sector-interleaved, so the
 > listings in `../Disk Images/disassembly/` have no usable addresses).
@@ -537,3 +548,8 @@ either front-end.
 - `tools/disasm_ram.sh` - disassembles a `--dump-ram` image at its real
   addresses; the only usable way to read the CP/M system files, whose
   on-disk `.phi` form is sector-interleaved
+- `tools/imd_tool.py` - ImageDisk verifier and normalizer. `verify` reports
+  whether an image is a complete dump (four of this project's nine are not -
+  they were double-stepped and are missing every other track); `convert`
+  writes a `.raw` indexed by sector-ID cylinder, which for a healthy image is
+  byte-identical to the existing one

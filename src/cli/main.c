@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <limits.h>
 
 typedef struct {
     uint16_t addr;
@@ -104,6 +105,7 @@ int main(int argc, char **argv) {
      * CP/M wants CR (\r), not LF, to end a line. */
     #define MAX_TYPE_LEN 4096
     static uint8_t type_buf[MAX_TYPE_LEN];
+    static unsigned long type_release[MAX_TYPE_LEN];
     size_t type_len = 0;
     /* --peek ADDR:LEN - hex-dump `len` bytes at `addr` (bank-aware, same
      * view the CPU has) at exit. For live debugging of whatever region a
@@ -138,6 +140,15 @@ int main(int argc, char **argv) {
     int num_breaks = 0;
     const char *ram_dump_path = NULL;
     bool stuck_detect = true;
+    /* --swap-at MS:PATH - change the disk in the drive partway through a
+     * run, the way a person would. CP/M caches directory state, so the
+     * guest must be told: type Ctrl-C at the prompt afterwards to force a
+     * warm boot and re-read. Times are emulated milliseconds, like
+     * --type-after. */
+    #define MAX_SWAPS 4
+    struct { unsigned long at_ms; const char *path; uint8_t *buf; size_t size; bool done; }
+        swaps[MAX_SWAPS];
+    int num_swaps = 0;
 
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--rom") && i + 1 < argc) rom_path = argv[++i];
@@ -148,8 +159,18 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--verbose-io")) verbose_io = true;
         else if (!strcmp(argv[i], "--type-after") && i + 1 < argc)
             type_after_ms = strtoul(argv[++i], NULL, 0);
-        else if (!strcmp(argv[i], "--type") && i + 1 < argc) {
+        else if ((!strcmp(argv[i], "--type") || !strcmp(argv[i], "--type-at")) && i + 1 < argc) {
+            bool timed = !strcmp(argv[i], "--type-at");
             const char *s = argv[++i];
+            unsigned long at_ms = 0;
+            if (timed) {
+                char *colon = strchr((char *)s, ':');
+                if (!colon) { fprintf(stderr, "bad --type-at syntax, want MS:STRING\n"); return 1; }
+                *colon = '\0';
+                at_ms = strtoul(s, NULL, 0);
+                s = colon + 1;
+            }
+            size_t seg_start = type_len;
             while (*s && type_len < MAX_TYPE_LEN) {
                 if (*s == '\\' && s[1]) {
                     s++;
@@ -167,6 +188,10 @@ int main(int argc, char **argv) {
                     s++;
                 }
             }
+            /* --type uses the shared --type-after default, applied below;
+               --type-at pins this segment to its own time. */
+            for (size_t j = seg_start; j < type_len; j++)
+                type_release[j] = timed ? at_ms : ULONG_MAX;
         }
         else if (!strcmp(argv[i], "--peek") && i + 1 < argc) {
             if (num_peeks >= MAX_PEEKS) { fprintf(stderr, "too many --peek args\n"); return 1; }
@@ -179,6 +204,19 @@ int main(int argc, char **argv) {
             num_peeks++;
         }
         else if (!strcmp(argv[i], "--dump-ram") && i + 1 < argc) ram_dump_path = argv[++i];
+        else if (!strcmp(argv[i], "--swap-at") && i + 1 < argc) {
+            if (num_swaps >= MAX_SWAPS) { fprintf(stderr, "too many --swap-at args\n"); return 1; }
+            char *arg = argv[++i];
+            char *colon = strchr(arg, ':');
+            if (!colon) { fprintf(stderr, "bad --swap-at syntax, want MS:PATH\n"); return 1; }
+            *colon = '\0';
+            swaps[num_swaps].at_ms = strtoul(arg, NULL, 0);
+            swaps[num_swaps].path = colon + 1;
+            swaps[num_swaps].buf = NULL;
+            swaps[num_swaps].size = 0;
+            swaps[num_swaps].done = false;
+            num_swaps++;
+        }
         else if (!strcmp(argv[i], "--no-stuck-detect")) stuck_detect = false;
         else if (!strcmp(argv[i], "--watch") && i + 1 < argc) {
             if (num_watches >= MAX_WATCHES) { fprintf(stderr, "too many --watch args\n"); return 1; }
@@ -223,7 +261,7 @@ int main(int argc, char **argv) {
                             "  [--dump-vram path] [--dump-ram path] [--max-steps N] [--verbose-io]\n"
                             "  [--peek ADDR:LEN ...] [--poke ADDR:HEXBYTES ...]\n"
                             "  [--watch ADDR[:LEN] ...] [--count ADDR ...] [--type STRING] [--type-after MS]\n"
-                            "  [--break ADDR ...] [--no-stuck-detect]\n", argv[0]);
+                            "  [--break ADDR ...] [--swap-at MS:PATH ...] [--no-stuck-detect]\n", argv[0]);
             return 1;
         }
     }
@@ -251,8 +289,11 @@ int main(int argc, char **argv) {
     }
     if (type_len > 0) {
         p2500_keyboard_init(&m.keyboard, type_buf, type_len);
-        m.keyboard.start_after_tstates = (unsigned long)type_after_ms * (P2500_CPU_HZ / 1000u);
-        printf("Queued %zu bytes to type on port $06, starting after %lu ms emulated\n",
+        for (size_t j = 0; j < type_len; j++)
+            type_release[j] = (type_release[j] == ULONG_MAX ? type_after_ms : type_release[j])
+                              * (P2500_CPU_HZ / 1000u);
+        m.keyboard.release_at = type_release;
+        printf("Queued %zu bytes to type on port $06 (untimed segments start at %lu ms)\n",
                type_len, type_after_ms);
     }
     m.pio.verbose = verbose_io;
@@ -261,6 +302,16 @@ int main(int argc, char **argv) {
     m.sesam.verbose = verbose_io;
     m.keyboard.verbose = verbose_io;
     m.serial.verbose = true; /* always show console TX - it's this project's only view of program output */
+
+    for (int sw = 0; sw < num_swaps; sw++) {
+        swaps[sw].buf = read_whole_file(swaps[sw].path, &swaps[sw].size);
+        if (!swaps[sw].buf) {
+            fprintf(stderr, "failed to load swap disk image %s\n", swaps[sw].path);
+            return 1;
+        }
+        printf("Will swap in %s (%zu bytes) at %lu ms emulated\n",
+               swaps[sw].path, swaps[sw].size, swaps[sw].at_ms);
+    }
 
     uint8_t *sesam_buf = NULL;
     size_t sesam_size = 0;
@@ -346,6 +397,17 @@ int main(int argc, char **argv) {
         }
         if (stop_reason) break;
 
+        for (int sw = 0; sw < num_swaps; sw++) {
+            if (swaps[sw].done) continue;
+            if (m.cpu.cyc < swaps[sw].at_ms * (P2500_CPU_HZ / 1000u)) continue;
+            m.fdc.disk = swaps[sw].buf;
+            m.fdc.disk_size = swaps[sw].size;
+            swaps[sw].done = true;
+            fprintf(stderr, "[step %lu] disk swapped: now %s (%zu bytes). CP/M caches "
+                            "directory state - send Ctrl-C at the prompt to re-read.\n",
+                    step, swaps[sw].path, swaps[sw].size);
+        }
+
         check_landmarks(&m, pc, step);
 
         if (getenv("P2500_TRACE_FROM") && getenv("P2500_TRACE_TO")) {
@@ -359,9 +421,18 @@ int main(int argc, char **argv) {
         }
 
         if (pc == 0x0000) {
+            /* Re-entering $0000 means a runaway reset only while the IPL
+             * still owns page zero, where $0000 is "JP $0100". Once CP/M is
+             * up it is "JP $E203", the CBIOS warm-boot vector, and passing
+             * through it is exactly what Ctrl-C at the prompt does - so
+             * gate on the documented invariant rather than on the address.
+             * See TODO.md's "Known-good invariants". */
+            bool ipl_owns_page_zero = p2500_peek(&m, 0) == 0xC3 &&
+                                      p2500_peek(&m, 1) == 0x00 &&
+                                      p2500_peek(&m, 2) == 0x01;
             reset_visits++;
-            if (reset_visits > 1) {
-                stop_reason = "re-entered reset vector $0000";
+            if (reset_visits > 1 && ipl_owns_page_zero) {
+                stop_reason = "re-entered reset vector $0000 while the IPL still owns page zero";
                 break;
             }
         }
@@ -516,6 +587,7 @@ int main(int argc, char **argv) {
         }
     }
 
+    for (int sw = 0; sw < num_swaps; sw++) free(swaps[sw].buf);
     free(ring);
     free(state_ring);
     free(disk_buf);
