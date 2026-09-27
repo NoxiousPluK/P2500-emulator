@@ -261,6 +261,7 @@ int main(int argc, char **argv) {
                             "  [--dump-vram path] [--dump-ram path] [--max-steps N] [--verbose-io]\n"
                             "  [--peek ADDR:LEN ...] [--poke ADDR:HEXBYTES ...]\n"
                             "  [--watch ADDR[:LEN] ...] [--count ADDR ...] [--type STRING] [--type-after MS]\n"
+                            "  [--type-at MS:STRING ...]\n"
                             "  [--break ADDR ...] [--swap-at MS:PATH ...] [--no-stuck-detect]\n", argv[0]);
             return 1;
         }
