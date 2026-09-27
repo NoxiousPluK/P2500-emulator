@@ -513,6 +513,21 @@ int main(int argc, char **argv) {
            (double)m.cpu.cyc / (double)P2500_CPU_HZ, m.cpu.cyc, P2500_CPU_HZ);
     if (m.sesam.reads || m.sesam.writes)
         printf("SESAM port $0F: %lu read(s), %lu write(s)\n", m.sesam.reads, m.sesam.writes);
+    {
+        int any = 0;
+        for (int pn = 0; pn < 256; pn++)
+            if (m.unhandled_out[pn] || m.unhandled_in[pn]) any = 1;
+        if (any) {
+            printf("Ports with no model (silently ignored):\n ");
+            for (int pn = 0; pn < 256; pn++) {
+                if (m.unhandled_out[pn])
+                    printf(" $%02X out x%lu", pn, m.unhandled_out[pn]);
+                if (m.unhandled_in[pn])
+                    printf(" $%02X in x%lu", pn, m.unhandled_in[pn]);
+            }
+            printf("\n");
+        }
+    }
     if (m.unknown_bank_writes)
         printf("Port $05: %lu write(s) selected an undecoded $8000-$BFFF window "
                "- see TODO.md T27\n", m.unknown_bank_writes);

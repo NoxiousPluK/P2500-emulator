@@ -205,6 +205,7 @@ static uint8_t port_in(z80 *cpu, uint8_t port) {
     case 0x15:
         return p2500_fdc_read_data(&m->fdc);
     default:
+        m->unhandled_in[port]++;
         if (m->verbose_unknown_ports)
             fprintf(stderr, "[io] unhandled IN ($%02X)\n", port);
         return 0xFF;
@@ -294,6 +295,7 @@ static void port_out(z80 *cpu, uint8_t port, uint8_t value) {
             fprintf(stderr, "[io] OUT ($%02X) <- $%02X (not modeled)\n", port, value);
         break;
     default:
+        m->unhandled_out[port]++;
         if (m->verbose_unknown_ports)
             fprintf(stderr, "[io] unhandled OUT ($%02X) <- $%02X\n", port, value);
         break;

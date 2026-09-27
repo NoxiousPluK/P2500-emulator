@@ -180,6 +180,15 @@ not exist yet. **Nothing in `core/` may depend on either front-end.**
   addresses. The only usable way to read the CP/M system files, whose
   on-disk `.phi` form is sector-interleaved, so the `org 0` listings in
   `../Disk Images/disassembly/` have no meaningful addresses
+- `tools/cpm_extract.py` — extracts files from a P2500 CP/M disk image.
+  Necessary rather than convenient: P2500 tracks store their logical sectors
+  in the physical order `0,2,…,14,1,3,…,15`, and a `.raw` is in physical
+  order, so an extractor that ignores the interleave reads half the disk
+  from the wrong place. Derives reserved tracks, block size and extent mask
+  from the image, then verifies what it produced — block-boundary continuity
+  is the check that actually catches a bad sector map. Validated by
+  producing exactly the six files `DIR` reports on `P25K_B`, and a
+  byte-identical `PIP.COM` from three independently dumped floppies
 - `tools/imd_tool.py` — ImageDisk verifier and normalizer. `verify` reports
   whether an image is a complete dump (four of this project's nine are not —
   they were double-stepped and are missing every other track); `convert`

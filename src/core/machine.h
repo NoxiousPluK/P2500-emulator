@@ -142,6 +142,12 @@ typedef struct {
     uint8_t vram_attr[P2500_VRAM_SIZE]; /* 4-bit attribute plane; see above */
     uint8_t bank; /* last value written to port $05 */
     unsigned long unknown_bank_writes; /* OUT ($05) values we cannot decode */
+    /* Ports this emulator has no model for. Counted unconditionally, not
+     * just under --verbose-io: an unhandled port is a silent drop, and a
+     * silent drop is how this project has lost the most time. The exit
+     * report prints any that are non-zero. */
+    unsigned long unhandled_out[256];
+    unsigned long unhandled_in[256];
 
     P2500Fdc fdc;
     P2500Sesam sesam;

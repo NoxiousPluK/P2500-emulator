@@ -239,8 +239,44 @@ contexts where a GUI dependency would make it unrunnable.
     16 KB. That is a separate mode, not an attribute, and it is out of scope
     until something needs it.
 
-  What is left here: find software that sets an attribute (the tripwire will
-  say so), or trace which line selects the nibble plane on real hardware.
+  **Software that sets an attribute has since been found, and it narrowed
+  the question rather than answering it (2026-09-28).** `VALLEY.BAS` on
+  `P2500GAM` — an adventure dated `83-08-26`, extracted with
+  `tools/cpm_extract.py` — is the only program in this project that uses
+  P2500 screen attributes, and it names the machine in a comment:
+
+  ```basic
+  12 COFF$=CHR$(27)+"c"                                  ' cursor off
+  13 CON$=CHR$(27)+"C"                                   ' cursor on
+  14 O1$=CHR$(27)+"0Q"                                   ' attribute on
+  15 O2$=CHR$(27)+"0@"                                   ' attribute off
+  20 DEF FNPRI$(X,Y)=CHR$(13)+CHR$(27)+"Y"+CHR$(31+X)+CHR$(31+Y)  'P2500
+  ```
+
+  `ESC Y row col` is the documented ADDS Regent 100 cursor address. `O1$`
+  and `O2$` bracket every character the game draws for borders and terrain
+  (`O1$;SCEN$;O2$`), which is exactly an attribute set/reset pair.
+
+  **Tested against the real CBIOS**, by driving MBASIC-80 in the emulator
+  (`--type-at` into `MBASIC`, which is on `P25TEST`) with
+  `PRINT CHR$(27);"0Q";"HELLO";CHR$(27);"0@";"WORLD"`. Result: CBIOS
+  **consumes** the sequence — `HELLOWORLD` prints with no stray `0Q` on
+  screen, so the three bytes are recognised and swallowed — and then does
+  nothing with it. Measured, not inferred:
+  - no write to port `$05` selecting an undecoded window (tripwire silent)
+  - nothing anywhere in the 16 KB video window outside the text area
+  - **no access to any unmodelled port at all**, in this run or in a
+    matched control run without the escape
+
+  So this CBIOS build parses `ESC 0 <c>` and discards it. Note the P2219
+  manual describes CONFIG-selectable BIOS profiles (`SYS09/11/12/13.PHI` on
+  `p25k_prg`) — an attribute-capable profile may simply not be the one on
+  these disks, which would also explain why nothing else here sets one.
+
+  What is left: read the `ESC 0` handler in the CBIOS RAM image to confirm
+  it is a deliberate discard rather than a stub, try an alternate
+  `SYSxx.PHI` profile (blocked — `p25k_prg` is a double-stepped dump), or
+  trace which line selects the nibble plane on real hardware.
 
 - [x] **T27a. The character cell is 8×12, not 8×8. — DONE (2026-09-28).**
   Fell out of T27 and fixes a visible bug, so it landed immediately rather
