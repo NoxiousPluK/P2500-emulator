@@ -306,6 +306,10 @@ Two symptoms that are probably one bug. Fix the cause, not either symptom.
   is invalid, breaking the IPL at `$0AC7` long before CP/M loads. Do T43
   properly and re-test this.
 
+  **Corroborated externally**: the image's own author describes it as a
+  *"Bootable disk with games"* and lists what is on it, so reaching a prompt
+  is what it is supposed to do. The failure is ours.
+
   Ruled out: not the keyboard (CTC ch3 acknowledges 4 of 4, no effect), not
   SESAM (baseline access only), not the clock (ch2 fires 3451 times).
 
@@ -324,6 +328,19 @@ Two symptoms that are probably one bug. Fix the cause, not either symptom.
   | `P2k5_CPM` | **The P2219 system diskette itself** — its IMD label reads `8702 221 90021 P 2219`. `CONFIG.COM`, `CPM58`/`PBI58`/`CBI58`, `ED`, `ASM`, `DDT`, `SUBMIT`, `CPYDSK` |
   | `p25k_prg` | `CONFIG.BAS/.COM/.HLP`, **`SYS09` `SYS11` `SYS12` `SYS13`** (alternate BIOS profiles), **`CFTABLES.PHI`**, `MBASIC`, `BACKUP` |
   | `P2k5_LOGIC`, `P2k5_TKS` | UCSD p-System (see T32b) |
+
+  **The write-back procedure is known and has been done.** The author of the
+  `P25K_*` images put them back on real disks with ImageDisk using
+  `250 kbps --> 300 kbps`, `Singleside`, `Doublestep: On`, `80 Tracks`
+  (`../Information from the internet/P25Kinfo.txt ...`). The rate
+  translation is the load-bearing part: those images are recorded at
+  250 kbps, a PC drive's rate, while the P2500's own format is 300 kbps.
+  The same procedure puts a `tools/cpm_build.py` image onto real media.
+
+  **There is a person with a working P2500 at the other end of this.** The
+  same notes say they ran these disks on their own machine and saw BDOS
+  errors — so some bad sectors are the media's, not the dump's. They are the
+  obvious lead for both halves of this task and for T43.
 
   **About 60% of each file is already recoverable** —
   `tools/cpm_extract.py --double-step`. Logical track `t` is present exactly
