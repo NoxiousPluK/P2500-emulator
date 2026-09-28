@@ -5,6 +5,10 @@
 #include <stddef.h>
 #include <stdbool.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /*
  * Keyboard input (port $06) and serial transmit (port $04).
  *
@@ -75,5 +79,9 @@ typedef struct {
 
 void p2500_serial_init(P2500Serial *s);
 void p2500_serial_out(P2500Serial *s, uint8_t value); /* port $04 */
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

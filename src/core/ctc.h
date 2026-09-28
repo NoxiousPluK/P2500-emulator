@@ -4,6 +4,10 @@
 #include <stdint.h>
 #include <stdbool.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /*
  * Z80A-CTC (Z8430) model for the CPU card's ports $00-$03 - four
  * independently programmable counter/timer channels, one per port
@@ -115,5 +119,9 @@ void p2500_ctc_tick(P2500Ctc *ctc, uint32_t tstates);
 /* Drive one channel's CLK/TRG pin. A COUNTER-mode channel counts down on
  * whichever edge its control word selected. */
 void p2500_ctc_set_clk_trg(P2500Ctc *ctc, int channel, bool level);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

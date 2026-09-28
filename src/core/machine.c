@@ -379,6 +379,39 @@ bool p2500_load_rom(P2500Machine *m, const char *path) {
     return n == P2500_EPROM_SIZE;
 }
 
+void p2500_reset(P2500Machine *m) {
+    uint8_t eprom[P2500_EPROM_SIZE];
+    uint8_t charrom[sizeof m->charrom];
+    memcpy(eprom, m->eprom, sizeof eprom);
+    memcpy(charrom, m->charrom, sizeof charrom);
+
+    const uint8_t *disk = m->fdc.disk;
+    size_t disk_size = m->fdc.disk_size;
+    const uint8_t *sesam = m->sesam.stream;
+    size_t sesam_len = m->sesam.stream_len;
+    const uint8_t *keys = m->keyboard.queue;
+    size_t keys_len = m->keyboard.queue_len;
+    const unsigned long *release_at = m->keyboard.release_at;
+    bool verbose = m->verbose_unknown_ports;
+    bool fdc_verbose = m->fdc.verbose;
+    bool serial_verbose = m->serial.verbose;
+
+    p2500_init(m);
+
+    memcpy(m->eprom, eprom, sizeof eprom);
+    memcpy(m->charrom, charrom, sizeof charrom);
+    m->fdc.disk = disk;
+    m->fdc.disk_size = disk_size;
+    m->sesam.stream = sesam;
+    m->sesam.stream_len = sesam_len;
+    m->keyboard.queue = keys;
+    m->keyboard.queue_len = keys_len;
+    m->keyboard.release_at = release_at;
+    m->verbose_unknown_ports = verbose;
+    m->fdc.verbose = fdc_verbose;
+    m->serial.verbose = serial_verbose;
+}
+
 unsigned long p2500_run_tstates(P2500Machine *m, unsigned long tstates) {
     const unsigned long start = m->cpu.cyc;
     unsigned long steps = 0;

@@ -4,6 +4,10 @@
 #include <stdint.h>
 #include <stdbool.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /*
  * Z80 IM2 interrupt controller - the daisy chain (TODO.md T17).
  *
@@ -124,5 +128,9 @@ void p2500_intctl_acknowledge(P2500IntCtl *ic, int source);
  * is currently under service is the one that sees it (everything ahead of
  * it is idle, so its IEI is high) and releases. */
 void p2500_intctl_reti(P2500IntCtl *ic);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

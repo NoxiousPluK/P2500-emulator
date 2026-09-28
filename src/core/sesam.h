@@ -5,6 +5,10 @@
 #include <stddef.h>
 #include <stdbool.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /*
  * SESAM port ($0F) model - the copy-protection dongle / bootable-cartridge
  * slot. Protocol confirmed both from community reverse-engineering of the
@@ -33,5 +37,9 @@ typedef struct {
 void p2500_sesam_init(P2500Sesam *s, const uint8_t *stream, size_t stream_len);
 uint8_t p2500_sesam_in(P2500Sesam *s);
 void p2500_sesam_out(P2500Sesam *s, uint8_t value);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

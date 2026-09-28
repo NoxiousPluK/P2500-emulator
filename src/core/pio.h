@@ -4,6 +4,10 @@
 #include <stdint.h>
 #include <stdbool.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /*
  * Z80A-PIO (Z8420A) model for the FDD card's ports $10 (Port A data) /
  * $11 (Port B data) / $12 (Port A control) / $13 (Port B control).
@@ -78,5 +82,9 @@ uint8_t p2500_pio_read_data(P2500Pio *pio, int port);                 /* $10/$11
  * transition if the port is in mode 3 with interrupts enabled and a
  * vector has been programmed. */
 void p2500_pio_set_input_bit(P2500Pio *pio, int port, int bit, bool level);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

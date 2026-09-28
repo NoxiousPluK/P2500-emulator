@@ -89,7 +89,14 @@ suite is the only thing standing between this project and silently
 regressing CP/M boot, and a headless check, a bisect or CI are exactly the
 contexts where a GUI dependency would make it unrunnable.
 
-- [ ] **T34. Make the core embeddable: a log callback, and a real reset.**
+- [~] **T34. Make the core embeddable: a log callback, and a real reset.**
+  **The reset half is done (2026-09-28)** — the GUI's Reset menu item needed
+  it. `p2500_reset()` keeps the EPROM and character ROM images, the mounted
+  disk, the SESAM stream and any scripted keystrokes, and clears everything
+  else. It is implemented as "copy the attachments aside, `p2500_init()`,
+  put them back", which **fails safe as the struct grows**: a field added
+  later is cleared by default, and only what is explicitly listed survives.
+  The log callback is still outstanding.
   Do this first; both are concrete blockers found by audit.
   - **63 `fprintf(stderr, ...)` calls in the core** (`dma.c` 24, `fdc.c` 12,
     `pio.c` 8, `machine.c` 7, `ctc.c` 5, `intctl.c` 4, `keyboard.c` 3). A
@@ -206,11 +213,32 @@ contexts where a GUI dependency would make it unrunnable.
     make/break pairs rather than single codes. Nothing traced suggests it
     does.
 
-- [ ] **T39. ImGui debugger panels — the actual point of the GUI.** Vendor
-  Dear ImGui (not in the Arch repos, and designed to be vendored — the same
-  treatment `vendor/superzazu_z80` already gets) with the `imgui_impl_sdl3`
-  + `imgui_impl_sdlrenderer3` backends so it shares T36's renderer. **Keep
-  all C++ inside `src/gui/`**; the core never sees it.
+- [~] **T39. ImGui: menu bar DONE, debugger panels outstanding.**
+  **Dear ImGui 1.92.1 is vendored** (`src/gui/vendor/imgui/`, MIT) with the
+  `imgui_impl_sdl3` + `imgui_impl_sdlrenderer3` backends, so the UI shares
+  the front-end's `SDL_Renderer`. All C++ is inside `src/gui/`; the core
+  never sees it, and the core headers gained `extern "C"` guards so C++ can
+  link against them.
+
+  A **File** menu is up — Load Disk, Reset, Pause, Screenshot, Quit — styled
+  on the emulator's own phosphor palette (square corners, green on the bezel
+  colour) so it reads as part of the machine rather than as a debug overlay,
+  and the emulated screen is offset below it and integer-scaled by hand
+  rather than with `SDL_SetRenderLogicalPresentation`, which would have
+  scaled the UI too.
+
+  Load Disk uses `SDL_ShowOpenFileDialog`, so on Linux it is the desktop's
+  own portal dialog. Its callback may run on another thread, so it only
+  parks the path and raises an atomic flag; the load happens in
+  `SDL_AppIterate`.
+
+  Checked headlessly: ImGui runs under the dummy video driver, and
+  `--shot-window` captures the whole composited window via
+  `SDL_RenderReadPixels`, so `make test` asserts the bar drew and the screen
+  really is offset below it. `--screenshot` stays the emulated screen alone,
+  which is what keeps the GUI-vs-CLI byte comparison meaningful.
+
+  **Still to do here: the panels**, which are the actual reason for the GUI.
 
   Panels, in the order they would have paid for themselves historically:
   1. **Device state** — the IM2 daisy chain (`requested` / `under_service` /

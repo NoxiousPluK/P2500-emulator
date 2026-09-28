@@ -182,6 +182,34 @@ check(any(lit(5 * 8 + x, y) for x in range(8) for y in (8, 9)),
       "no descender under the 'p' of Philips")
 sys.exit(0 if ok else 1)
 PY
+
+    # The ImGui menu bar renders even under the dummy video driver, so it can
+    # be checked with no display: capture the whole composited window and
+    # confirm there is UI in the top band and that the emulated screen has
+    # been pushed below it.
+    SDL_VIDEODRIVER=dummy ./p2500-gui --disk "$DISK" --frames 200 \
+        --shot-window "$TMP/win.ppm" >>"$TMP/gui.log" 2>&1
+    python3 - "$TMP/win.ppm" <<'PY' && pass "menu bar renders and offsets the screen" || fail "menu bar missing or screen not offset"
+import sys
+d = open(sys.argv[1], 'rb').read()
+hdr = d.split(b'\n', 3)
+w, h = (int(v) for v in hdr[1].split())
+px = d[len(b'\n'.join(hdr[:3])) + 1:]
+def lit(x, y):
+    o = (y * w + x) * 3
+    return px[o + 1] > 0x60
+ok = True
+def check(cond, why):
+    global ok
+    if not cond:
+        print("    menu check failed: " + why); ok = False
+bar = sum(1 for y in range(0, 18) for x in range(w) if lit(x, y))
+check(bar > 20, "no lit pixels in the menu bar band - the UI did not draw")
+# The emulated screen must start below the bar, not at y=0.
+check(not any(lit(x, 1) for x in range(200, w)),
+      "content at y=1 outside the menu area - screen was not offset")
+sys.exit(0 if ok else 1)
+PY
 else
     echo "== 7. SDL3 front-end - skipped (run 'make gui' to build it)"
 fi

@@ -6,6 +6,10 @@
 #include <stddef.h>
 #include "dma.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /*
  * Behavioral uPD765 model for the P2500 CPU card's on-board floppy driver.
  *
@@ -138,5 +142,9 @@ bool p2500_fdc_raise_startup_interrupt(P2500Fdc *fdc);
 uint8_t p2500_fdc_read_status(P2500Fdc *fdc);   /* port $14 */
 uint8_t p2500_fdc_read_data(P2500Fdc *fdc);     /* port $15 read */
 void p2500_fdc_write_data(P2500Fdc *fdc, uint8_t value); /* port $15 write */
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

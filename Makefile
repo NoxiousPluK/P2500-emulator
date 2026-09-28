@@ -15,12 +15,19 @@
 # needs no edit here.
 
 CC = cc
+CXX = c++
 AR = ar
 # -MMD -MP emits a .d per object listing the headers it used, so editing a
 # header rebuilds everything that includes it. Without this, changing a
 # struct in a header silently leaves other objects compiled against the old
 # layout - which is a memory-corruption bug, not a stale-build annoyance.
 CFLAGS = -std=c11 -Wall -Wextra -O2 -Isrc -MMD -MP
+# The GUI is C++ because Dear ImGui is. It is confined to src/gui/ and the
+# vendored ImGui is compiled without -Wall/-Wextra: it is upstream code, not
+# ours, and its warnings would drown out warnings we should act on.
+IMGUI_DIR = src/gui/vendor/imgui
+CXXFLAGS = -std=c++17 -O2 -Isrc -I$(IMGUI_DIR) -I$(IMGUI_DIR)/backends -MMD -MP
+GUI_CXXFLAGS = $(CXXFLAGS) -Wall -Wextra
 
 LIB = libp2500.a
 BIN = p2500-emu
@@ -36,11 +43,16 @@ SDL_LIBS = $(shell pkg-config --libs sdl3 2>/dev/null)
 
 CORE_SRC = $(wildcard src/core/*.c) src/core/vendor/superzazu_z80/z80.c
 CLI_SRC = $(wildcard src/cli/*.c)
-GUI_SRC = $(wildcard src/gui/*.c)
+GUI_SRC = $(wildcard src/gui/*.cpp)
+IMGUI_SRC = $(IMGUI_DIR)/imgui.cpp $(IMGUI_DIR)/imgui_draw.cpp \
+            $(IMGUI_DIR)/imgui_tables.cpp $(IMGUI_DIR)/imgui_widgets.cpp \
+            $(IMGUI_DIR)/backends/imgui_impl_sdl3.cpp \
+            $(IMGUI_DIR)/backends/imgui_impl_sdlrenderer3.cpp
+IMGUI_OBJ = $(IMGUI_SRC:.cpp=.o)
 CORE_OBJ = $(CORE_SRC:.c=.o)
 CLI_OBJ = $(CLI_SRC:.c=.o)
-GUI_OBJ = $(GUI_SRC:.c=.o)
-DEPS = $(CORE_OBJ:.o=.d) $(CLI_OBJ:.o=.d) $(GUI_OBJ:.o=.d)
+GUI_OBJ = $(GUI_SRC:.cpp=.o)
+DEPS = $(CORE_OBJ:.o=.d) $(CLI_OBJ:.o=.d) $(GUI_OBJ:.o=.d) $(IMGUI_OBJ:.o=.d)
 
 .PHONY: all clean run test gui
 
@@ -61,19 +73,22 @@ $(BIN): $(CLI_OBJ) $(LIB)
 
 gui: $(GUI)
 
-$(GUI): $(GUI_OBJ) $(LIB)
+$(GUI): $(GUI_OBJ) $(IMGUI_OBJ) $(LIB)
 	@test "$(HAVE_SDL3)" = yes || { echo "sdl3 not found by pkg-config - install it to build the GUI"; exit 1; }
-	$(CC) $(CFLAGS) -o $@ $(GUI_OBJ) $(LIB) $(SDL_LIBS)
+	$(CXX) $(CXXFLAGS) -o $@ $(GUI_OBJ) $(IMGUI_OBJ) $(LIB) $(SDL_LIBS)
 
-src/gui/%.o: src/gui/%.c
+src/gui/%.o: src/gui/%.cpp
 	@test "$(HAVE_SDL3)" = yes || { echo "sdl3 not found by pkg-config - install it to build the GUI"; exit 1; }
-	$(CC) $(CFLAGS) $(SDL_CFLAGS) -c -o $@ $<
+	$(CXX) $(GUI_CXXFLAGS) $(SDL_CFLAGS) -c -o $@ $<
+
+$(IMGUI_DIR)/%.o: $(IMGUI_DIR)/%.cpp
+	$(CXX) $(CXXFLAGS) $(SDL_CFLAGS) -c -o $@ $<
 
 %.o: %.c
 	$(CC) $(CFLAGS) -c -o $@ $<
 
 clean:
-	rm -f $(BIN) $(GUI) $(LIB) $(CORE_OBJ) $(CLI_OBJ) $(GUI_OBJ) $(DEPS)
+	rm -f $(BIN) $(GUI) $(LIB) $(CORE_OBJ) $(CLI_OBJ) $(GUI_OBJ) $(IMGUI_OBJ) $(DEPS)
 
 -include $(DEPS)
 

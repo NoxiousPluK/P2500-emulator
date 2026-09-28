@@ -5,6 +5,10 @@
 #include <stdbool.h>
 #include <stddef.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /*
  * Z80A-DMA (Z8410) model for port $16 - the FDD card's data path between
  * the uPD765 (fixed I/O address $15) and RAM.
@@ -154,5 +158,9 @@ void p2500_dma_write(P2500Dma *dma, uint8_t value); /* port $16 */
  * vector if interrupts are enabled. No-op if the DMA hasn't been enabled
  * for an IO->memory transfer. */
 void p2500_dma_deliver(P2500Dma *dma, uint8_t *ram, const uint8_t *src, size_t len);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

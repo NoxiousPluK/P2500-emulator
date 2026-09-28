@@ -13,6 +13,10 @@
 #include "keyboard.h"
 #include "intctl.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /*
  * P2500 CPU-card machine model. Port $05 bank-switches the low 4KB between
  * the IPL EPROM and RAM (see TODO.md T1): the EPROM image lives in its own
@@ -199,6 +203,16 @@ typedef struct {
 
 void p2500_init(P2500Machine *m);
 
+/* Power-cycle the machine while KEEPING everything a front-end attached:
+ * the boot EPROM and character ROM images, the mounted disk, the SESAM
+ * stream and any scripted keystrokes (TODO.md T34). Everything else - CPU,
+ * RAM, video memory, every device, every counter - is cleared.
+ *
+ * Implemented as "copy the attachments aside, p2500_init(), put them back",
+ * which fails safe as the struct grows: a field added later is cleared by
+ * default, and only what is explicitly listed here survives. */
+void p2500_reset(P2500Machine *m);
+
 /* T-states in one 50 Hz field. The machine's own clock strobe and a
  * front-end's frame boundary are the same event, so a GUI paces itself by
  * running one of these per presented frame (TODO.md T35). */
@@ -225,5 +239,9 @@ bool p2500_video_window_selected(const P2500Machine *m);
  * likely lives (TODO.md T27). Such a write is currently routed to main DRAM,
  * which would be silently wrong - so it is counted and logged instead. */
 bool p2500_bank_is_unknown(const P2500Machine *m);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

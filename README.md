@@ -64,6 +64,15 @@ being hardcoded, so the window follows whatever the guest programs.
 | Ctrl+letter | `^A`–`^Z`, so Ctrl-C warm-boots CP/M |
 | F11 | turbo (8x) |
 | F12 | pause |
+| F10 | screenshot (BMP, timestamped, written to the working directory) |
+| Ctrl+O / Ctrl+R / Ctrl+Q | load disk / reset / quit |
+
+There is a **File** menu with Load Disk, Reset, Pause, Screenshot and Quit.
+It is drawn by Dear ImGui rather than being a native menu bar, styled on the
+same phosphor palette as the screen — see `TODO.md` T39 for why a native one
+is not viable on Wayland. "Load Disk" uses `SDL_ShowOpenFileDialog`, which
+goes through the XDG desktop portal on Linux, so it is the desktop's own
+file dialog. Reset keeps whatever media is attached.
 
 `--scale N` sets the initial zoom; the window is resizable and letterboxes
 with integer scaling rather than stretching. `--frames N --screenshot f.ppm`
@@ -200,13 +209,17 @@ not exist yet. **Nothing in `core/` may depend on either front-end.**
   as such: an optional `on_reti` callback, without which the daisy chain
   cannot see `RETI` and so cannot model IEO release
 
-**`src/gui/` → `p2500-gui`**
+**`src/gui/` → `p2500-gui`** (the only C++ in the tree)
 
-- `main.c` — SDL3 front-end on the callback app model
+- `main.cpp` — SDL3 front-end on the callback app model
   (`SDL_AppInit`/`SDL_AppIterate`/`SDL_AppEvent`), one streaming texture,
   integer scaling, single-threaded. One video field of emulation per
   presented frame, so the frame loop and the guest's own 50 Hz clock strobe
-  are the same event by construction
+  are the same event by construction. Draws the menu bar and (in time) the
+  debugger panels with Dear ImGui
+- `vendor/imgui/` — Dear ImGui 1.92.1 (MIT) plus the `sdl3` +
+  `sdlrenderer3` backends, so the UI shares the front-end's `SDL_Renderer`.
+  Nothing outside `src/gui/` may include it
 
 **`src/cli/` → `p2500-emu`**
 

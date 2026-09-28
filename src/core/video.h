@@ -6,6 +6,10 @@
 
 #include "machine.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /*
  * Text-mode renderer, driven by the MC6845's own registers rather than a
  * hardcoded 80x24 (TODO.md T37).
@@ -70,5 +74,9 @@ void p2500_video_render(const P2500Machine *m, const P2500Palette *pal,
  * the displayed area. CP/M keeps this up to date: after DIR it reads
  * row 6 x 80 + 2, exactly where the A> prompt leaves it. */
 int p2500_video_cursor_cell(const P2500Machine *m);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif
