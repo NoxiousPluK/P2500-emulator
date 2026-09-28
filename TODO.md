@@ -289,26 +289,60 @@ contexts where a GUI dependency would make it unrunnable.
   and `O2$` bracket every character the game draws for borders and terrain
   (`O1$;SCEN$;O2$`), which is exactly an attribute set/reset pair.
 
-  **Tested against the real CBIOS**, by driving MBASIC-80 in the emulator
-  (`--type-at` into `MBASIC`, which is on `P25TEST`) with
-  `PRINT CHR$(27);"0Q";"HELLO";CHR$(27);"0@";"WORLD"`. Result: CBIOS
-  **consumes** the sequence — `HELLOWORLD` prints with no stray `0Q` on
-  screen, so the three bytes are recognised and swallowed — and then does
-  nothing with it. Measured, not inferred:
+  **Tested against the real CBIOS.** Two programs, two disks, same answer:
+  `PRINT CHR$(27);"0Q";"HELLO";CHR$(27);"0@";"WORLD"` driven into MBASIC-80
+  on `P25TEST`, and **SuperCalc2 (`SC2.COM`) on `P25K_S`** — an OEM build
+  whose own splash reads `PHILIPS P2000`, so it is software written for this
+  exact machine. SuperCalc2 boots to its full spreadsheet grid and drives
+  the cursor correctly (R14/R15 tracks it to the input line at row 23), and
+  in neither case does anything reach the attribute plane. Measured:
   - no write to port `$05` selecting an undecoded window (tripwire silent)
   - nothing anywhere in the 16 KB video window outside the text area
-  - **no access to any unmodelled port at all**, in this run or in a
-    matched control run without the escape
+  - **no access to any unmodelled port at all**
 
-  So this CBIOS build parses `ESC 0 <c>` and discards it. Note the P2219
-  manual describes CONFIG-selectable BIOS profiles (`SYS09/11/12/13.PHI` on
-  `p25k_prg`) — an attribute-capable profile may simply not be the one on
-  these disks, which would also explain why nothing else here sets one.
+  **Correction to the 2026-09-28 first reading.** That entry said CBIOS
+  "parses `ESC 0 <c>` and discards it". The parsing is real; the discarding
+  is not. Re-reading CONOUT (`$E4C3`) shows **every path falls through to
+  `$E4EF`**, which stores the byte and posts it to the screen driver at
+  `$E354`. The escape bytes reach the driver like any other.
 
-  What is left: read the `ESC 0` handler in the CBIOS RAM image to confirm
-  it is a deliberate discard rather than a stub, try an alternate
-  `SYSxx.PHI` profile (blocked — `p25k_prg` is a double-stepped dump), or
-  trace which line selects the nibble plane on real hardware.
+  What the counter at `$E34D` actually gates is `call nz,$E4F8`, the
+  national-character **translation** lookup — it suppresses translation
+  *inside* an escape sequence so that parameter bytes are not mangled by the
+  accented-character table. And the counter is a length table: `ESC` sets it
+  to `$FF`, the following byte takes it to `$00`, then `'0'` adds one
+  (`$E4E3`) and `'Y'` adds two (`$E4E2`/`$E4E3`), after which each byte
+  decrements it.
+
+  **That is itself evidence.** CBIOS knows `ESC 0` carries exactly one
+  parameter byte and `ESC Y` exactly two. It would not need that knowledge
+  if it did not handle the sequence — and `ESC Y` demonstrably works, since
+  SuperCalc2 positions its cursor correctly. So the `ESC 0` handler is in
+  the driver reached through `$E354`, not in CONOUT, and that is where to
+  look next.
+
+  **The escape alphabet, counted across all 11 disk images.** Three values
+  dominate and everything else is noise (`1B 30` occurring incidentally in
+  Z80 code, 1-5 hits each):
+
+  | sequence | byte | bits | count | seen in |
+  |---|---|---|---|---|
+  | `ESC 0 @` | `$40` | `0100 0000` | 160 | 7 images |
+  | `ESC 0 P` | `$50` | `0101 0000` | 122 | 8 images |
+  | `ESC 0 Q` | `$51` | `0101 0001` | 41 | 6 images |
+
+  `VALLEY.BAS` uses `Q` as "on" and `@` as "off"; SuperCalc2 uses `@` and
+  `P`. Bit 6 is set on all three, which is what makes the byte printable.
+  Bit 4 separates `@` from `P`/`Q`, and bit 0 separates `P` from `Q`. **Do
+  not read a nibble assignment out of that yet** — three values is not
+  enough to pin four attribute bits, and guessing one is exactly the failure
+  mode this project's guiding principle warns about.
+
+  What is left: **disassemble the screen driver reached through `$E354` and
+  find its `ESC 0` handler** — that is now a bounded, concrete task rather
+  than a search. Failing that, try an alternate `SYSxx.PHI` BIOS profile
+  (blocked — `p25k_prg` is a double-stepped dump), or trace which line
+  selects the nibble plane on real hardware.
 
 - [x] **T27a. The character cell is 8×12, not 8×8. — DONE (2026-09-28).**
   Fell out of T27 and fixes a visible bug, so it landed immediately rather

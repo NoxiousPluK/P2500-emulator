@@ -50,7 +50,10 @@ make gui
 ./p2500-gui --disk "../Disk Images/extracted/P25K_B/P25K_B.raw"
 ```
 
-It boots to `A>` in a window and you can type at it. Geometry, cursor
+It boots to `A>` in a window and you can type at it — far enough that real
+CP/M applications run: **SuperCalc2** (an OEM build whose splash reads
+`PHILIPS P2000`) loads from `P25K_S` and opens files, and MBASIC-80 runs
+from `P25TEST`. Geometry, cursor
 position and cursor shape all come from the MC6845's registers rather than
 being hardcoded, so the window follows whatever the guest programs.
 
