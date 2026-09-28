@@ -691,6 +691,52 @@ the `.IMD` originals with `cpmtools` if research needs them.
 
   **Next step: identify which ISR is supposed to signal device 4.**
 
+- [ ] **T45. Re-image the double-stepped disks — they are the most valuable
+  media this project has.** Asked 2026-09-28 whether we have the `CONFIG`
+  utility the P2219 manual describes. **We do, on two disks, and both are
+  half dumps.** Searching every directory on every image, including deleted
+  entries:
+
+  | Disk | Files |
+  |---|---|
+  | `P2k5_CPM` | `CONFIG.COM`, plus `CPM58`, `PBI58`, `CBI58`, `ED`, `ASM`, `DDT`, `SUBMIT`, `XSUB`, `CPYDSK`, `ADMIN` … |
+  | `p25k_prg` | `CONFIG.BAS`, `CONFIG.COM`, `CONFIG.HLP`, **`SYS09` `SYS11` `SYS12` `SYS13`**, **`CFTABLES`**, `MBASIC`, `BACKUP`, `KSM80` … |
+
+  `P2k5_CPM`'s IMD label settles what it is: `P2500 CPM 2.2 / CP/M DISKETTE
+  SERIAL: CP 2 - 666 - 02050 / **8702 221 90021 P 2219** / PHILIPS P2500
+  300kB`. It is the P2219 system diskette the manual documents.
+
+  **What CONFIG does** (manual §2.5.1). It draws a CONFIGURATION PROFILE
+  screen with three columns — PRINTER (ten `P2121`/`P2123`/`P2131`
+  variants), DISK (`5" ONLY` / `5" AND 8"`), KEYBOARD (`ASCII, CH, D/A,
+  DK/N, E, F, I, P, S/SF, UK/NL`) — with the current selection in each
+  column shown **in inverse video**. Three things follow that matter here:
+
+  - **The KEYBOARD column is the national-layout selector**, which is what
+    the `$E274` dead-key table T38 defers on is an instance of. CONFIG plus
+    `CFTABLES` is the authoritative source for those tables rather than
+    guessing them from one disk.
+  - **The DISK column explains SELDSK's availability table** (T44). The
+    manual states 8-inch drives are addressed as **G: and H:** — so the
+    `$E87C` map showing only A:/B:/C: available is simply the `5" ONLY`
+    profile, not a hard limit.
+  - **`SYS09/11/12/13` are the alternate BIOS profiles**, which is exactly
+    what T27 wants: an attribute-capable build would show whether the
+    `ESC 0` handler does more on a different profile.
+
+  **Neither copy is extractable.** `tools/imd_tool.py verify` on
+  `P2k5_CPM.IMD` reports 39 of 79 cylinders absent, and the arithmetic is
+  unforgiving: an allocation block `b` lives at logical track `OFF + b/2`,
+  and only *even* logical tracks were captured, so consecutive blocks
+  alternate between present and absent. `CONFIG.COM` on `P2k5_CPM` occupies
+  blocks 45/46/47 and extracts as pure `$E5`. `p25k_prg` is worse — its
+  directory references blocks up to 146, needing ~74 tracks of the 40 that
+  exist.
+
+  The directories themselves read perfectly (same sector skew as the
+  healthy disks), which is why the file *names* are trustworthy while the
+  contents are not. Re-imaging with single-stepping recovers all of it.
+
 - [ ] **T32b. UCSD p-System boot.** `P2k5_LOGIC` and `P2k5_TKS` use a
   genuinely different bootstrap, so they are the best independent check on
   the disk path that exists — and the first thing to test the IM2 chain
