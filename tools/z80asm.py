@@ -28,6 +28,7 @@ import argparse
 import re
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 R8 = {'b': 0, 'c': 1, 'd': 2, 'e': 3, 'h': 4, 'l': 5, '(hl)': 6, 'a': 7}
@@ -288,9 +289,22 @@ def encode_base(mnem, ops, pc, syms, where, strict=True):
 
 
 def split_ops(rest):
-    """Split an operand list on commas that are not inside parentheses."""
-    ops, depth, cur = [], 0, ''
+    """Split an operand list on commas outside parentheses AND outside quotes.
+
+    The quote part matters for `db "a,b"` - a string operand is one operand
+    however many commas it contains.
+    """
+    ops, depth, cur, quote = [], 0, '', None
     for ch in rest:
+        if quote:
+            cur += ch
+            if ch == quote:
+                quote = None
+            continue
+        if ch in '"\'':
+            quote = ch
+            cur += ch
+            continue
         if ch == '(':
             depth += 1
         elif ch == ')':
@@ -446,17 +460,24 @@ def verify(binary: bytes, org: int, listing, syms, emu='./p2500-emu'):
     rom = bytearray(b'\x00' * 4096)
     body = binary[:4096 - 0x100]
     rom[0x100:0x100 + len(body)] = body
-    tmp = Path('/tmp/.z80asm-verify.bin')
-    tmp.write_bytes(bytes(rom))
+    # A unique file, not a fixed name: `make -j` assembles several sources at
+    # once and a shared scratch file means each one verifies whichever binary
+    # happened to be written last.
+    with tempfile.NamedTemporaryFile(suffix='.bin', delete=False) as f:
+        f.write(bytes(rom))
+        tmp = Path(f.name)
     # Ask for as many instructions as there are BYTES of code, not as many as
     # there are instructions: a `db` sitting between two routines decodes as
     # an instruction of its own, so the decoded stream is longer than the
     # listing and asking for len(listing) stops short of the last one.
     span = (listing[-1][0] + len(listing[-1][1]) - org) if listing else 0
     n = min(span, 4096 - org)
-    res = subprocess.run([emu, '--rom', str(tmp), '--max-steps', '0',
-                          '--disasm', f'100:{n}'],
-                         capture_output=True, text=True)
+    try:
+        res = subprocess.run([emu, '--rom', str(tmp), '--max-steps', '0',
+                              '--disasm', f'100:{n}'],
+                             capture_output=True, text=True)
+    finally:
+        tmp.unlink(missing_ok=True)
     got = {}
     for line in res.stdout.splitlines():
         mo = re.match(r'\s*\$([0-9A-F]{4}): (?:[0-9A-F]{2} |   ){4} (.*)$', line)

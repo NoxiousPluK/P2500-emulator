@@ -30,9 +30,12 @@ both.
 - **`docs/porting-cpm-software.md`** — what it takes to move a CP/M program
   from another machine to this one. The binary runs unmodified; the screen
   control codes are what differ.
-- **`demos/`** — three graphics demos for the 512 × 256 mode, with their own
-  README on how the screen is laid out and how a demo finds the field
-  boundary. `make demos` builds a bootable disk.
+- **`demos/`** — three graphics demos for the 512 × 256 mode plus `BENCH`,
+  which times CPU, RAM, video RAM in both modes, firmware plotting, console
+  output and disk reads against the 50 Hz tick counter — the same binary runs
+  on real hardware, so the two can be compared directly. Their README covers
+  how the screen is laid out and how a demo finds the field boundary.
+  `make demos` builds a bootable disk.
 
 ## Building
 
@@ -43,7 +46,7 @@ make test   # the regression suite
 
 `make` needs a C11 compiler; the GUI additionally needs SDL3 (`extra/sdl3`
 on Arch) and a C++17 compiler, and Dear ImGui is vendored. The core stays
-dependency-free so `make test` runs with no display at all: **70 checks**,
+dependency-free so `make test` runs with no display at all: **71 checks**,
 exit 1 on any failure. The GUI checks skip themselves if SDL3 is absent.
 
 ## Running it as a machine

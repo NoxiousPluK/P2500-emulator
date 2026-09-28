@@ -19,7 +19,7 @@ SuperCalc2 (an OEM build whose splash reads `PHILIPS P2000`) loads from
 `P25K_S` and opens files; MBASIC-80 runs from `P25TEST`; `VALLEY.BAS` runs
 off drive B with working screen attributes. Three of nine disk images boot.
 
-`make test` is the proof and the guard: 70 checks, exit 1 on any failure.
+`make test` is the proof and the guard: 71 checks, exit 1 on any failure.
 
 ```
 make                 # libp2500.a, p2500-emu, and p2500-gui if SDL3 is present
@@ -82,6 +82,15 @@ vector at `$E1AD`** (the pair `$E1AF` is the login vector; the BDOS reset at
 `$E086` clears both, and `$E117` is the function that reads `$E1AD` back).
 That costs write access, not visibility. It has no observable consequence
 until T30 lands.
+
+**Video RAM is charged the same as main RAM — no CRTC contention is
+modelled.** A real card shares that DRAM with the display fetches and may
+stall the CPU during active display; nothing here does. `demos/bench.asm`
+times both against the tick counter so a real machine can supply the ratio,
+and `make test` pins the emulator's current answer (they are equal) so the
+day someone models it, they do so on purpose. The firmware gives no clue
+either way: it never reads the CRTC ports, and it scrolls by moving the start
+address rather than copying memory, so it never does a bulk video write.
 
 **The tick counter at `$F436` is the only vertical sync software has.** The
 MC6845's status register is not wired anywhere the CPU can read, but CBIOS's

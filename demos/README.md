@@ -18,6 +18,7 @@ the CP/M system files from; it defaults to `P25K_B` and takes
 | **LOGO** | The P2000 wordmark, bouncing — 144 × 45 pixels, drawn from `p2000logo.bmp` at 1:1 so nothing is resampled. Eight pre-shifted copies of the sprite give single-pixel horizontal motion: video memory is byte-addressed, so a sprite drawn from one bitmap could only move eight pixels at a time. Direction and starting position come from the tick counter, so the angle differs every run. |
 | **STARS** | 48 stars flying outward from the centre. Each has a fixed direction and a distance that grows every field; position is `centre + direction × z / 32`, so the apparent speed grows with the distance, which is what sells the forward motion. The distance is 8.8 fixed point so the step can be a fraction of a unit — the only way to slow it without dropping to half the frame rate. |
 | **SPIRO** | Lissajous figures, one point at a time. Two phase accumulators step by co-prime amounts, so the only multiply left is amplitude × sine. 60 points a field, and the figure changes every 110. |
+| **BENCH** | Not a demo — eleven timings, for comparing this emulator against real hardware. See below. |
 
 ## Drawing a mover without flicker
 
@@ -49,6 +50,56 @@ Three bugs came out of removing the erase, all of which it had been hiding:
   45 contiguous rows at the top of the screen look exactly like 45 contiguous
   rows anywhere else. The check now also requires the vertical position to
   differ between samples.
+
+## BENCH
+
+```
+A>BENCH
+
+P2500 BENCH - ticks at 50 Hz, so x20 = ms
+T = text mode, G = graphics mode
+
+CPU regs      92        registers only: instruction fetch and execute
+RAM write     81        24 x 16 KB of byte stores
+RAM read      80        24 x 16 KB of byte loads
+RAM ldir      52        12 x 16 KB block copy
+VID write T   81        the same stores into the video window, text mode
+VID ldir  T   52
+VID write G   81        and again after ESC 3, with the CRTC reprogrammed
+VID ldir  G   52
+Firmware  .   33        192 dots through CBIOS's set-point call
+Console   .   28        512 characters through BDOS 2
+Disk read .    9        64 records read sequentially from SYSCPM.PHI
+```
+
+Everything is timed against CBIOS's 50 Hz tick counter, so the same binary
+gives comparable numbers on the emulator and on a real P2500. Results are
+collected first and printed afterwards, because console output costs about a
+millisecond a character here and would otherwise be inside the timings.
+
+**The rows worth staring at are the VID ones.** This emulator charges a write
+to the video window exactly what it charges main RAM — it models no CRTC
+contention at all — so `VID write` equals `RAM write` above by construction,
+and `make test` asserts that so nobody changes it by accident. A real video
+card shares that DRAM with the CRTC's display fetches and may well stall the
+CPU during active display. If the real machine's VID rows come out higher
+than its RAM rows, that ratio *is* the missing wait-state model. Text and
+graphics modes are timed separately because the CRTC fetches on a different
+rhythm in each (64 columns of 4 scanlines against 80 of 12).
+
+`Disk read` is the other likely mismatch: the emulator hands over a whole
+sector in one `memcpy`, with no seek and no rotational latency.
+
+Interrupts stay enabled throughout — they have to, since the clock being
+measured is one — so every figure includes the 50 Hz ISR. That is the same on
+both sides and is a fraction of a percent.
+
+For scale, from the numbers above: a full 512 × 256 screen costs about
+**0.17 s** written directly and about **437 s** a dot at a time through the
+firmware. Nearly all of that is BDOS and console overhead rather than
+plotting — a plain character costs *more* per byte than a graphics command
+byte does. It is why the demos bypass CBIOS, and why anything drawing through
+the documented set-point call will feel glacial.
 
 ## How they draw
 

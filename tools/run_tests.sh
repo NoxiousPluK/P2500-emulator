@@ -762,7 +762,7 @@ echo "== 12. The graphics demos (demos/)"
 # writes video memory directly rather than through CBIOS - so the emulator's
 # renderer and the layout in demos/p2500.inc have to agree independently.
 demo_ok=yes
-for src in demos/logo.asm demos/stars.asm demos/spiro.asm; do
+for src in demos/logo.asm demos/stars.asm demos/spiro.asm demos/bench.asm; do
     if ! python3 tools/z80asm.py "$src" -o "$TMP/$(basename "$src" .asm).COM" --verify \
             >"$TMP/asm.log" 2>&1; then
         fail "$src did not assemble and verify"
@@ -775,6 +775,7 @@ done
 if [ "$demo_ok" = yes ]; then
     python3 tools/cpm_build.py "$TMP/demo.raw" "$TMP/logo.COM:LOGO.COM" \
         "$TMP/stars.COM:STARS.COM" "$TMP/spiro.COM:SPIRO.COM" \
+        "$TMP/bench.COM:BENCH.COM" \
         --boot-from "$DISK" >"$TMP/demobuild.log" 2>&1
     $EMU --disk "$TMP/demo.raw" --max-steps 8000000 --type-at '4000:dir\r' \
          --dump-vram "$TMP/demodir.bin" >/dev/null 2>&1
@@ -808,6 +809,47 @@ if max(x for x, _ in lit) - min(x for x, _ in lit) < 200:
 sys.exit(0)
 PY
 
+    # BENCH times each category against the 50 Hz tick counter, so the same
+    # binary gives comparable numbers here and on real hardware. What is
+    # asserted is the emulator's own position: it charges a write to the video
+    # window exactly what it charges main RAM, because it models no CRTC
+    # contention at all. If someone gives it a wait-state model, this check
+    # fails and makes them say so on purpose rather than by accident.
+    $EMU --disk "$TMP/demo.raw" --max-steps 120000000 --type-at '4000:bench\r' \
+         --no-stuck-detect --dump-vram "$TMP/bench.bin" >/dev/null 2>&1
+    screen "$TMP/bench.bin" >"$TMP/bench.screen"
+    python3 - "$TMP/bench.screen" <<'PY' && pass "BENCH reports every category, and VRAM costs what RAM costs" || fail "BENCH did not report as expected"
+import re, sys
+text = open(sys.argv[1]).read()
+rows = {}
+for line in text.splitlines():
+    m = re.match(r'\s*(CPU regs|RAM write|RAM read|RAM ldir|VID write T|VID ldir  T'
+                 r'|VID write G|VID ldir  G|Firmware  \.|Console   \.|Disk read \.)'
+                 r'\s+(\d+)\s*$', line)
+    if m:
+        rows[m.group(1).strip()] = int(m.group(2))
+want = ['CPU regs', 'RAM write', 'RAM read', 'RAM ldir', 'VID write T',
+        'VID ldir  T', 'VID write G', 'VID ldir  G', 'Firmware  .',
+        'Console   .', 'Disk read .']
+missing = [w for w in want if w not in rows]
+if missing:
+    print("    missing rows: %s" % missing); sys.exit(1)
+if any(v == 0 for k, v in rows.items() if k != 'Disk read .'):
+    print("    a test measured zero ticks: %s" % rows); sys.exit(1)
+# The emulator models no video contention, so these must match exactly.
+for vid, ram in (('VID write T', 'RAM write'), ('VID write G', 'RAM write'),
+                 ('VID ldir  T', 'RAM ldir'), ('VID ldir  G', 'RAM ldir')):
+    if rows[vid] != rows[ram]:
+        print("    %s (%d) != %s (%d) - the emulator has grown a VRAM timing "
+              "model; update this check deliberately"
+              % (vid, rows[vid], ram, rows[ram]))
+        sys.exit(1)
+# Firmware plotting must be vastly dearer than direct writes, or the demos'
+# whole reason for bypassing CBIOS has gone away.
+if rows['Firmware  .'] * 100 < rows['RAM write']:
+    print("    firmware plotting looks implausibly cheap: %s" % rows); sys.exit(1)
+sys.exit(0)
+PY
     # LOGO is the only demo that walks down the screen a row at a time, so it
     # is the only one that exercises next_row - the raster-bank wrap that
     # makes row y+1 sometimes +$1000 and sometimes -12224.

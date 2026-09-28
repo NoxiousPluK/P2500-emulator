@@ -91,7 +91,7 @@ $(IMGUI_DIR)/%.o: $(IMGUI_DIR)/%.cpp
 # verifies its own output against the disassembler in libp2500, and packaged
 # by tools/cpm_build.py onto a bootable image. Not part of `all`: it needs a
 # donor disk for the CP/M system files, which lives outside the repo.
-DEMO_ASM = demos/logo.asm demos/stars.asm demos/spiro.asm
+DEMO_ASM = demos/logo.asm demos/stars.asm demos/spiro.asm demos/bench.asm
 DEMO_COM = $(DEMO_ASM:.asm=.COM)
 DEMO_DISK = demos/P2500DEMO.raw
 BOOT_DONOR ?= ../Disk Images/extracted/P25K_B/P25K_B.raw
