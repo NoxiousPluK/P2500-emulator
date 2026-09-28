@@ -226,9 +226,9 @@ PY
     # be checked with no display: capture the whole composited window and
     # confirm there is UI in the top band and that the emulated screen has
     # been pushed below it.
-    SDL_VIDEODRIVER=dummy ./p2500-gui --disk "$DISK" --frames 200 \
+    SDL_VIDEODRIVER=dummy ./p2500-gui --disk "$DISK" --frames 400 \
         --shot-window "$TMP/win.ppm" >>"$TMP/gui.log" 2>&1
-    python3 - "$TMP/win.ppm" <<'PY' && pass "menu bar renders and offsets the screen" || fail "menu bar missing or screen not offset"
+    python3 - "$TMP/win.ppm" <<'PY' && pass "menu bar renders" || fail "menu bar did not draw"
 import sys
 d = open(sys.argv[1], 'rb').read()
 hdr = d.split(b'\n', 3)
@@ -244,11 +244,21 @@ def check(cond, why):
         print("    menu check failed: " + why); ok = False
 bar = sum(1 for y in range(0, 18) for x in range(w) if lit(x, y))
 check(bar > 20, "no lit pixels in the menu bar band - the UI did not draw")
-# The emulated screen must start below the bar, not at y=0.
-check(not any(lit(x, 1) for x in range(200, w)),
-      "content at y=1 outside the menu area - screen was not offset")
+# The emulated screen must start below the bar. Probe a strip that is empty
+# in the menu bar - to the right of the menu labels, left of the
+# right-aligned status and lock indicator - but which the "Philips P2500"
+# banner would occupy if the screen were drawn at y=0.
+check(not any(lit(x, y) for x in range(140, 200) for y in range(2, 16)),
+      "banner ink inside the menu band - screen was not offset")
 sys.exit(0 if ok else 1)
 PY
+    # The offset itself comes from the front-end's own layout report: a
+    # screenshot cannot distinguish an offset screen from one drawn at y=0,
+    # because the screen background and the window clear colour are the same
+    # and the top rows of a character cell are blank.
+    if grep -qE 'layout: menu [0-9]+ px, screen at y=[1-9]' "$TMP/gui.log"; then
+        pass "screen is offset below the menu bar"
+    else fail "screen not offset below the menu bar"; fi
 else
     echo "== 7. SDL3 front-end - skipped (run 'make gui' to build it)"
 fi

@@ -289,8 +289,18 @@ contexts where a GUI dependency would make it unrunnable.
 
   Checked headlessly: ImGui runs under the dummy video driver, and
   `--shot-window` captures the whole composited window via
-  `SDL_RenderReadPixels`, so `make test` asserts the bar drew and the screen
-  really is offset below it. `--screenshot` stays the emulated screen alone,
+  `SDL_RenderReadPixels`, so `make test` asserts the bar actually drew.
+
+  **The offset is asserted from the front-end's own layout report, not from
+  pixels** — and that distinction was earned. A screenshot *cannot*
+  distinguish an offset screen from one drawn at `y=0`: the emulated
+  screen's background and the window's clear colour are the same, and the
+  top rows of a character cell are blank, so the two captures look alike
+  where it matters. The first pixel-probe version of this check passed
+  happily with the offset deleted — an assertion that cannot fail is worse
+  than none, which is the same lesson the stale-GUI-binary episode taught.
+  The front-end now logs `layout: menu N px, screen at y=M` and the suite
+  greps that. Negative-tested: with the offset removed it fails. `--screenshot` stays the emulated screen alone,
   which is what keeps the GUI-vs-CLI byte comparison meaningful.
 
   **Still to do here: the panels**, which are the actual reason for the GUI.

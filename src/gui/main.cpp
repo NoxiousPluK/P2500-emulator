@@ -595,6 +595,15 @@ SDL_AppResult SDL_AppIterate(void *appstate)
     dst.y = (float)top + ((float)avail_h - dst.h) * 0.5f;
     if (dst.y < (float)top) dst.y = (float)top;
 
+    /* Reported so a headless run can assert the layout directly. Inferring
+     * the offset from the captured pixels does not work: the screen's own
+     * background and the window's clear colour are the same, and the top
+     * text rows of a character cell are blank, so a screen drawn at y=0
+     * looks identical to a correctly offset one in a screenshot. */
+    if (app->win_shot_path && app->frames == 2)
+        SDL_Log("layout: menu %d px, screen at y=%.0f, %.0fx%.0f",
+                top, dst.y, dst.w, dst.h);
+
     SDL_SetRenderDrawColor(app->renderer, 8, 12, 8, 255);
     SDL_RenderClear(app->renderer);
     SDL_RenderTexture(app->renderer, app->screen, NULL, &dst);
