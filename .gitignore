@@ -5,3 +5,5 @@ libp2500.a
 *.o
 *.d
 p2500-gui
+tools/__pycache__/
+assets/

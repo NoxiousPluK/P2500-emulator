@@ -27,6 +27,9 @@ both.
   references. Read it first if you are here to do work.
 - **`ROADMAP.md`** — the shape of the project and the reasoning about
   sequencing.
+- **`docs/porting-cpm-software.md`** — what it takes to move a CP/M program
+  from another machine to this one. The binary runs unmodified; the screen
+  control codes are what differ.
 
 ## Building
 
@@ -37,7 +40,7 @@ make test   # the regression suite
 
 `make` needs a C11 compiler; the GUI additionally needs SDL3 (`extra/sdl3`
 on Arch) and a C++17 compiler, and Dear ImGui is vendored. The core stays
-dependency-free so `make test` runs with no display at all: **50 checks**,
+dependency-free so `make test` runs with no display at all: **55 checks**,
 exit 1 on any failure. The GUI checks skip themselves if SDL3 is absent.
 
 ## Running it as a machine
@@ -155,6 +158,32 @@ consequence, which is why Ctrl-C is not needed in practice today. A disk
 with no system tracks cannot be warm-booted from at all — Ctrl-C echoes and
 the machine sits there, which is also authentic.
 
+## Building disk images
+
+`tools/cpm_build.py` writes a P2500 CP/M image from host files — the exact
+inverse of the extractor, and written against its constants so the reader
+and the writer cannot drift apart. Every build is read back through
+`cpm_extract.py` and compared byte for byte before it is called done.
+
+```
+# A bootable disk with one program on it.
+tools/cpm_build.py othello.raw OTHELLO.COM \
+    --boot-from "../Disk Images/extracted/P25K_B/P25K_B.raw"
+
+# A data disk for drive B:.
+tools/cpm_build.py games.raw *.BAS
+```
+
+`--boot-from` exists because a bootable P2500 disk needs **two** things: the
+loader in the two reserved tracks, *and* the CP/M system as ordinary
+directory files (`SYSCPM.PHI`, `SYSCBI.PHI`, `SYSPBI.PHI`, `SYSLOAD.PHI`).
+A disk with the loader alone gets nowhere — `make test` asserts that in both
+directions.
+
+`tools/mk_cpm_probe.py` builds a nine-byte CP/M program that prints one
+string, which is how the screen control codes get settled: put the sequence
+on a generated boot disk, run it, and read `--dump-vram-attr`.
+
 ## Validation
 
 Three independent guards, all run by `make test`.
@@ -252,6 +281,11 @@ window, pacing, input and menu bar; `panels.cpp` is the debugger)
 - `render_vram.py` — video-RAM-dump-to-PNG, 8×12 cells and attributes;
   `--demo-attrs` synthesises an attribute plane
 - `disasm_ram.sh` — disassembles a `--dump-ram` image at real addresses
+- `cpm_build.py` — builds a P2500 CP/M image from host files, bootable with
+  `--boot-from`. Verifies every build by reading it back through the
+  extractor
+- `mk_cpm_probe.py` — builds a minimal CP/M `.COM` that prints one string,
+  for probing screen behaviour no surviving program exercises
 - `cpm_extract.py` — extracts files from a P2500 CP/M image. Necessary
   rather than convenient: the sector skew means a naive extractor reads half
   the disk from the wrong place. Derives the format from the image and then

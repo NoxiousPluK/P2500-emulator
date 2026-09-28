@@ -19,7 +19,7 @@ SuperCalc2 (an OEM build whose splash reads `PHILIPS P2000`) loads from
 `P25K_S` and opens files; MBASIC-80 runs from `P25TEST`; `VALLEY.BAS` runs
 off drive B with working screen attributes. Three of nine disk images boot.
 
-`make test` is the proof and the guard: 50 checks, exit 1 on any failure.
+`make test` is the proof and the guard: 55 checks, exit 1 on any failure.
 
 ```
 make                 # libp2500.a, p2500-emu, and p2500-gui if SDL3 is present
@@ -403,6 +403,25 @@ Two symptoms that are probably one bug. Fix the cause, not either symptom.
   supported disk formats in detail, the CP/M utility descriptions, and the
   8-bit code table on page 27 — which is printed sideways, is detected as
   such, and is **too dense for OCR**; it has to be read from the page image.
+
+---
+
+## P6b — Software for the machine
+
+- [ ] **T53. Port `p2000m-othello` to the P2500.** Not started, and not
+  urgent — but the analysis is done and written up in
+  `docs/porting-cpm-software.md`, so it is a short job for whoever picks it
+  up (upstream, most likely — it is Ivo's program).
+
+  `OTHELLO.COM` v1.0.0 **runs unmodified**: the board, the CPU player and
+  the key handling all work, so nothing about the CP/M layer or the z88dk
+  build needs touching. Only three escape sequences differ, all in
+  `src/othello.c`: `ESC H`/`ESC J` (clear screen) and `ESC p`/`ESC q`
+  (inverse video). Cursor addressing and erase-to-end-of-line are already
+  identical, and both machines are 80×24.
+
+  Measured, not assumed — each sequence was put in a probe built with
+  `tools/mk_cpm_probe.py` on a disk built with `tools/cpm_build.py`.
 
 ---
 

@@ -543,6 +543,64 @@ sys.exit(0)
 PY
 fi
 
+echo "== 10. Building a disk image (tools/cpm_build.py)"
+# The write half of the disk format had nothing testing it: cpm_extract.py
+# has been checked against nine real images, but nothing proved this project
+# could produce one. Build a bootable disk from scratch, boot it, and run a
+# program off it - which exercises the sector skew, the directory encoding,
+# the block map and the system-file copy in one go. A wrong skew fails here
+# and not subtly.
+if python3 tools/mk_cpm_probe.py "$TMP/PROBE.COM" 'BEFORE\eY\x20\x20\ek\e0PREVERSED\e0@ plain' >/dev/null 2>&1 &&
+   python3 tools/cpm_build.py "$TMP/probe.raw" "$TMP/PROBE.COM" \
+        --boot-from "$DISK" >"$TMP/build.log" 2>&1; then
+    pass "cpm_build.py built a bootable image ($(sed -n 's/^Verified *: .*, \([0-9]*\) file.*/\1/p' "$TMP/build.log") files verified)"
+else
+    fail "cpm_build.py failed"
+    sed 's/^/    /' "$TMP/build.log"
+fi
+
+if [ -s "$TMP/probe.raw" ]; then
+    $EMU --disk "$TMP/probe.raw" --max-steps 8000000 --type-at '4000:dir\r' \
+         --dump-vram "$TMP/built.bin" >"$TMP/built.log" 2>&1
+    screen "$TMP/built.bin" >"$TMP/built.screen"
+    if grep -q '58K CP/M Ver. 2.2' "$TMP/built.screen"; then
+        pass "a generated disk boots CP/M"
+    else fail "a generated disk did not boot"; fi
+    if grep -q 'PROBE    COM' "$TMP/built.screen"; then
+        pass "DIR lists the file that was written into it"
+    else fail "the written file is not in the directory"; fi
+
+    # Running it proves the data blocks landed where the directory says, not
+    # merely that the directory parses.
+    $EMU --disk "$TMP/probe.raw" --max-steps 20000000 --type-at '4000:probe\r' \
+         --dump-vram "$TMP/pr.bin" --dump-vram-attr "$TMP/pr.attr" \
+         >"$TMP/probe.log" 2>&1
+    screen "$TMP/pr.bin" >"$TMP/pr.screen"
+    # The probe clears the screen first, so the CP/M banner must be gone.
+    if grep -q 'REVERSED plain' "$TMP/pr.screen" &&
+       ! grep -q '58K CP/M' "$TMP/pr.screen"; then
+        pass "a program written by cpm_build.py loads and runs"
+    else fail "the written program did not run"; fi
+    # ESC 0 P must set the reverse bit on exactly the eight characters of
+    # "REVERSED" and on nothing after ESC 0 @.
+    python3 - "$TMP/pr.bin" "$TMP/pr.attr" <<'PY' && pass "ESC 0 P sets the reverse attribute, ESC 0 @ clears it" || fail "the attribute plane is wrong"
+import sys
+ch = open(sys.argv[1], 'rb').read()
+at = open(sys.argv[2], 'rb').read()
+row = ch[:80].decode('latin-1')
+col = row.find('REVERSED')
+if col < 0:
+    print("    'REVERSED' not on the top row: %r" % row.rstrip()); sys.exit(1)
+rev = [at[col + i] & 0x0F for i in range(8)]
+after = [at[col + 8 + i] & 0x0F for i in range(6)]   # " plain"
+if any(a != 0x04 for a in rev):
+    print("    reverse run is %r, wanted eight 4s" % rev); sys.exit(1)
+if any(a != 0x00 for a in after):
+    print("    attribute leaked past ESC 0 @: %r" % after); sys.exit(1)
+sys.exit(0)
+PY
+fi
+
 echo
 if [ "$fails" -eq 0 ]; then echo "All checks passed."; exit 0; fi
 echo "$fails check(s) failed."
