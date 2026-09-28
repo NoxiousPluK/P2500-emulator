@@ -19,7 +19,7 @@ SuperCalc2 (an OEM build whose splash reads `PHILIPS P2000`) loads from
 `P25K_S` and opens files; MBASIC-80 runs from `P25TEST`; `VALLEY.BAS` runs
 off drive B with working screen attributes. Three of nine disk images boot.
 
-`make test` is the proof and the guard: 57 checks, exit 1 on any failure.
+`make test` is the proof and the guard: 62 checks, exit 1 on any failure.
 
 ```
 make                 # libp2500.a, p2500-emu, and p2500-gui if SDL3 is present
@@ -126,7 +126,10 @@ What is left in this phase is T34, which is also the fourth panel.
      and unit and its command/result bytes, CRTC registers and geometry,
      the attribute latch. "Copy all" emits exactly what `--state` prints.
   2. **Memory** (F2) — bank-aware, with the character and attribute planes
-     as separate views, and watches.
+     as separate views, and watches. A watch names the instruction that
+     wrote the byte — the poll runs between instructions, so the naive
+     answer is the one *after* the write, which is what this used to
+     report. Ticking `stop` makes it a watchpoint.
   3. **Disassembly** (F3) — around PC, clickable breakpoint gutter,
      Step / Step 100 / Step field. Forwards from an anchor only: a Z80
      stream cannot be decoded backwards, and a guess would look confident.

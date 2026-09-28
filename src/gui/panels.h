@@ -29,11 +29,15 @@ struct P2500Panels {
     int mem_plane = 0; /* 0 CPU, 1 video characters, 2 video attributes */
     int mem_goto = -1; /* >= 0 for one frame after a jump is requested */
     char mem_entry[8] = "";
+    bool new_watch_stops = false;   /* arm newly added watches as watchpoints */
     bool mem_follow_pc = false;
-    /* Where the "go to" field ended up on screen, so a headless run can
-     * click it without the suite pinning a pixel column that any layout
+    /* Where an address control ended up on screen, so a headless run can
+     * click it without the suite pinning pixel columns that any layout
      * change would invalidate. -1 until the panel has been drawn. */
-    float goto_field_x = -1.0f, goto_field_y = -1.0f;
+    struct Geom { float field_x = -1.0f, field_y = -1.0f,
+                        button_x = -1.0f, button_y = -1.0f; };
+    Geom goto_geom;
+    Geom watch_geom;
 
     /* Disassembly. */
     bool disasm_follow_pc = true;

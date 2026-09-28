@@ -151,7 +151,7 @@ else
     if grep -q 'watch \$E1AD\] \$00 -> \$01' "$TMP/swap.err"; then
         pass "BDOS marks the swapped drive read-only (\$E1AD bit 0)"
     else fail "BDOS did not mark the swapped drive read-only"; fi
-    if grep -q 'watch \$E1AD\] \$01 -> \$00.*PC=\$E089' "$TMP/swap.err"; then
+    if grep -q 'watch \$E1AD\] \$01 -> \$00.*written by \$E086' "$TMP/swap.err"; then
         pass "Ctrl-C clears the read-only flag"
     else fail "Ctrl-C did not clear the read-only flag"; fi
 fi
@@ -465,7 +465,7 @@ PY
     # not on WantCaptureKeyboard, which looks correct throughout.
     SDL_VIDEODRIVER=dummy ./p2500-gui --disk "$DISK" --frames 8 --panels memory \
         --shot-window "$TMP/mem.ppm" >"$TMP/mem.log" 2>&1
-    FIELD=$(sed -n 's/.*memory panel: goto field at \([0-9]*\),\([0-9]*\).*/\1,\2/p' "$TMP/mem.log" | head -1)
+    FIELD=$(sed -n 's/.*goto field \([0-9]*\),\([0-9]*\).*/\1,\2/p' "$TMP/mem.log" | head -1)
     if [ -z "$FIELD" ]; then
         fail "the memory panel did not report its field position"
     else
@@ -479,6 +479,30 @@ PY
         if [ "$(grep -c 'guest text input: on' "$TMP/focus.log")" -ge 1 ]; then
             pass "the guest gets its keyboard back when the field is done"
         else fail "text input never came back - the P2500 is untypeable"; fi
+        # An address control commits on its label, which is a button rather
+        # than a caption - clicking the words next to a box is what people
+        # try first. Driven end to end: focus the box, type into it, click
+        # the label. The control run types the same thing and never clicks,
+        # so this cannot pass on the typing alone.
+        GEOM=$(sed -n 's/.*watch field \([0-9]*\),\([0-9]*\) button \([0-9]*\),\([0-9]*\).*/\1,\2 \3,\4/p' "$TMP/mem.log" | head -1)
+        WFIELD=$(echo "$GEOM" | cut -d' ' -f1)
+        WBUTTON=$(echo "$GEOM" | cut -d' ' -f2)
+        if [ -z "$WBUTTON" ]; then
+            fail "the memory panel did not report its add-watch control"
+        else
+            SDL_VIDEODRIVER=dummy ./p2500-gui --disk "$DISK" --frames 60 --panels memory \
+                --mouse "10:$WFIELD,left" --ui-type '20:E200' --mouse "30:$WBUTTON,left" \
+                >"$TMP/btn.log" 2>&1
+            SDL_VIDEODRIVER=dummy ./p2500-gui --disk "$DISK" --frames 60 --panels memory \
+                --mouse "10:$WFIELD,left" --ui-type '20:E200' \
+                >"$TMP/btn-control.log" 2>&1
+            if grep -q 'watches: 1' "$TMP/btn.log"; then
+                pass "clicking an address control's label commits it"
+            else fail "the label button did not commit the address"; fi
+            if grep -q 'watches: 1' "$TMP/btn-control.log"; then
+                fail "a watch was added without clicking the label"
+            else pass "typing alone adds nothing - the click is what commits"; fi
+        fi
     fi
 else
     echo "== 7. SDL3 front-end - skipped (run 'make gui' to build it)"
@@ -518,6 +542,41 @@ if command -v z80dasm >/dev/null 2>&1; then
     fi
 else
     echo "   (z80dasm not installed - disassembler cross-check skipped)"
+fi
+
+# A watch can stop the run, not just report it. $E1AD is written during the
+# boot copy at a fixed step, so this is deterministic.
+$EMU --disk "$DISK" --max-steps 6000000 --watch-break E1AD \
+    >"$TMP/wp.out" 2>"$TMP/wp.err"
+if grep -q -- '--watch-break: a watched byte changed' "$TMP/wp.out"; then
+    pass "--watch-break stops the run when a watched byte changes"
+else fail "--watch-break did not stop the run"; fi
+# The control: the same watch without --watch-break must run to the end.
+$EMU --disk "$DISK" --max-steps 6000000 --watch E1AD >"$TMP/wc.out" 2>/dev/null
+if grep -q 'hit max-steps' "$TMP/wc.out"; then
+    pass "a plain --watch does not stop the run"
+else fail "a plain --watch stopped the run"; fi
+
+# The watch report must name the instruction that WROTE the byte, not the one
+# after it. The poll happens between instructions, so the naive answer is one
+# late - which is what this used to print.
+$EMU --disk "$DISK" --max-steps 6000000 --watch-break E1AD >/dev/null 2>"$TMP/wp2.err"
+WROTE=$(sed -n 's/.*written by \$\([0-9A-F]*\).*/\1/p' "$TMP/wp2.err" | head -1)
+NOWPC=$(sed -n 's/.*now PC=\$\([0-9A-F]*\).*/\1/p' "$TMP/wp2.err" | head -1)
+if [ -n "$WROTE" ] && [ -n "$NOWPC" ]; then
+    # The write is an LDIR block copy, which repeats at one address - so here
+    # the two agree. What must hold everywhere is that the named writer is an
+    # instruction that actually stores: check the opcode at it.
+    OPC=$($EMU --disk "$DISK" --max-steps 6000000 --break "$WROTE" \
+              --disasm "$WROTE:1" 2>/dev/null | sed -n 's/^  \$[0-9A-F]*: [0-9A-F ]* \(.*\)$/\1/p' | head -1)
+    case "$OPC" in
+        ld*|ldi*|ldd*|push*|ex*|in*|out*|rst*|call*)
+            pass "the watch names a storing instruction ($WROTE: $OPC)" ;;
+        *)
+            fail "the watch named \$$WROTE, which is '$OPC' - not a write" ;;
+    esac
+else
+    fail "the watch report did not name a writing instruction"
 fi
 
 # Breakpoints survived being lifted out of the CLI into core/debug.c.

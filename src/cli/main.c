@@ -163,8 +163,9 @@ int main(int argc, char **argv) {
     int num_pokes = 0;
     /* --watch ADDR[:LEN], --count ADDR and --break ADDR all live in
      * core/debug.c now, so the GUI drives the identical code (TODO.md T39).
-     * --watch reports every change to a byte with the PC and registers that
-     * caused it; --count answers "does this handler ever actually run?",
+     * --watch reports every change to a byte, naming the instruction that
+     * wrote it; --watch-break also stops the run there. --count answers
+     * "does this handler ever actually run?",
      * the single question this project asks most; --break stops the run at
      * a PC so the exit report describes that exact moment.
      * With no --watch given, $0003 and $0039 are watched - the two
@@ -288,15 +289,17 @@ int main(int argc, char **argv) {
             num_pushes++;
         }
         else if (!strcmp(argv[i], "--no-stuck-detect")) stuck_detect = false;
-        else if (!strcmp(argv[i], "--watch") && i + 1 < argc) {
+        else if ((!strcmp(argv[i], "--watch") || !strcmp(argv[i], "--watch-break"))
+                 && i + 1 < argc) {
+            const bool stop = argv[i][7] == '-';   /* --watch-break */
             char *arg = argv[++i];
             char *colon = strchr(arg, ':');
             if (colon) *colon = '\0';
             uint16_t addr = (uint16_t)strtoul(arg, NULL, 16);
             uint16_t len = colon ? (uint16_t)strtoul(colon + 1, NULL, 0) : 1;
-            if (p2500_debug_add_watch(&dbg, addr, len) < 0) {
-                fprintf(stderr, "too many --watch args\n"); return 1;
-            }
+            int w = p2500_debug_add_watch(&dbg, addr, len);
+            if (w < 0) { fprintf(stderr, "too many --watch args\n"); return 1; }
+            if (stop) dbg.watch[w].stop = true;
         }
         else if (!strcmp(argv[i], "--count") && i + 1 < argc) {
             if (p2500_debug_add_count(&dbg, (uint16_t)strtoul(argv[++i], NULL, 16)) < 0) {
@@ -341,7 +344,8 @@ int main(int argc, char **argv) {
                             "  [--dump-ram path]\n"
                             "  [--max-steps N] [--verbose-io]\n"
                             "  [--peek ADDR:LEN ...] [--poke ADDR:HEXBYTES ...]\n"
-                            "  [--watch ADDR[:LEN] ...] [--count ADDR ...] [--type STRING] [--type-after MS]\n"
+                            "  [--watch ADDR[:LEN] ...] [--watch-break ADDR[:LEN] ...]\n"
+                            "  [--count ADDR ...] [--type STRING] [--type-after MS]\n"
                             "  [--type-at MS:STRING ...]\n"
                             "  [--break ADDR ...] [--swap-at MS:PATH ...] [--push-at MS:STRING ...]\n"
                             "  [--state] [--disasm ADDR[:COUNT] ...]\n"
@@ -470,7 +474,10 @@ int main(int argc, char **argv) {
         uint16_t pc = m.cpu.pc;
 
         if (p2500_debug_before_step(&dbg, &m, step)) {
-            stop_reason = "--break reached";
+            /* A watchpoint stops one instruction past the write; the report
+             * above names the instruction that did it. */
+            stop_reason = dbg.hit_watch >= 0 ? "--watch-break: a watched byte changed"
+                                             : "--break reached";
             break;
         }
 

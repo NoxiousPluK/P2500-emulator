@@ -40,7 +40,7 @@ make test   # the regression suite
 
 `make` needs a C11 compiler; the GUI additionally needs SDL3 (`extra/sdl3`
 on Arch) and a C++17 compiler, and Dear ImGui is vendored. The core stays
-dependency-free so `make test` runs with no display at all: **57 checks**,
+dependency-free so `make test` runs with no display at all: **62 checks**,
 exit 1 on any failure. The GUI checks skip themselves if SDL3 is absent.
 
 ## Running it as a machine
@@ -92,9 +92,10 @@ with integer scaling. `--frames N --screenshot f.ppm`, `--shot-window f.ppm`,
 `--watch ADDR` let the front-end and its panels be driven and captured with no
 display, which is how `make test` checks them. `--mouse [FRAME:]X,Y[,left|right]`
 scripts a synthetic pointer — repeat it to click one thing and then another —
-so the menu-bar lamps and the panels' own widgets are covered too. The
-front-end reports its lamp geometry and its field positions to the log rather
-than the suite hardcoding pixel columns that a new menu would quietly
+and `--ui-type FRAME:TEXT` types into whatever panel widget has focus, so the
+menu-bar lamps and the panels' own address fields are covered too. The
+front-end reports its lamp geometry and its widget positions to the log
+rather than the suite hardcoding pixel columns that a new menu would quietly
 invalidate.
 
 ## The debugger
@@ -110,8 +111,12 @@ away from what the harness reports.
   result bytes; the CRTC registers and the geometry they imply; the attribute
   latch. "Copy all" puts the same text `--state` prints on the clipboard.
 - **Memory** (F2) — bank-aware through `p2500_peek`, with the video
-  character and attribute planes as separate views, and watches that report
-  to the log when they change.
+  character and attribute planes as separate views, and watches. A watch
+  reports to the log when its byte changes, naming **the instruction that
+  wrote it**; tick `stop` and it becomes a watchpoint that pauses the
+  machine there. Note what a watchpoint can see: the check is a poll between
+  instructions, so it catches every *change* but not a write that stores the
+  value already present. "What put this here" is always a change.
 - **Disassembly** (F3) — around PC, with a clickable breakpoint gutter and
   Step / Step 100 / Step field. Forwards from an anchor only: a Z80 stream
   cannot be decoded backwards, and guessing would show confident nonsense.
@@ -141,6 +146,7 @@ project has used.
 | `--dump-screen f.ppm` | render through the core's own renderer — the same call the GUI makes |
 | `--peek ADDR:LEN` / `--poke ADDR:HEX` | inspect / patch memory |
 | `--watch ADDR[:LEN]` / `--count ADDR` / `--break ADDR` | trace writes, count executions, stop |
+| `--watch-break ADDR[:LEN]` | a watchpoint — stop the run when that byte changes |
 | `--state` | every device's live state — the same lines the GUI's device panel draws |
 | `--disasm ADDR[:COUNT]` | disassemble, bank-aware, through the same decoder the GUI uses |
 | `--verbose-io` | arm every device's diagnostics — ports, the daisy chain, CTC/PIO/DMA/FDC (very noisy) |

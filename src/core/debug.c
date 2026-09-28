@@ -252,6 +252,8 @@ void p2500_debug_init(P2500Debug *d)
 {
     memset(d, 0, sizeof *d);
     d->hit_break = -1;
+    d->hit_watch = -1;
+    d->last_pc = 0xFFFF;
 }
 
 int p2500_debug_add_watch(P2500Debug *d, uint16_t addr, uint16_t len)
@@ -328,12 +330,15 @@ void p2500_debug_baseline(P2500Debug *d, const P2500Machine *m)
 void p2500_debug_resume(P2500Debug *d)
 {
     d->hit_break = -1;
+    d->hit_watch = -1;
     d->skip_one = true;
 }
 
 bool p2500_debug_before_step(P2500Debug *d, const P2500Machine *m, unsigned long step)
 {
     const uint16_t pc = m->cpu.pc;
+    bool stop = false;
+    d->hit_watch = -1;
 
     for (int i = 0; i < d->watches; i++) {
         if (!d->watch[i].enabled) continue;
@@ -343,22 +348,38 @@ bool p2500_debug_before_step(P2500Debug *d, const P2500Machine *m, unsigned long
             if (now == d->watch[i].last[j]) continue;
             uint8_t was = d->watch[i].last[j];
             d->watch[i].last[j] = now;
+            if (d->watch[i].stop) {
+                stop = true;
+                d->hit_watch = i;
+                d->hit_watch_addr = a;
+            }
             if (!d->on_watch) continue;
-            char text[192];
+            /* The change is noticed on the poll AFTER the instruction that
+             * made it, so `pc` is the next instruction, not the culprit.
+             * last_pc is: report both, because "what wrote this" is the
+             * question being asked and the other number is one instruction
+             * away from answering it. */
+            char text[224];
             snprintf(text, sizeof text,
-                     "[step %lu] [watch $%04X] $%02X -> $%02X, PC=$%04X SP=$%04X "
-                     "A=$%02X BC=$%02X%02X DE=$%02X%02X HL=$%02X%02X",
-                     step, a, was, now, pc, m->cpu.sp, m->cpu.a,
+                     "[step %lu] [watch $%04X] $%02X -> $%02X, written by $%04X, "
+                     "now PC=$%04X SP=$%04X A=$%02X BC=$%02X%02X DE=$%02X%02X HL=$%02X%02X",
+                     step, a, was, now, d->last_pc, pc, m->cpu.sp, m->cpu.a,
                      m->cpu.b, m->cpu.c, m->cpu.d, m->cpu.e, m->cpu.h, m->cpu.l);
             d->on_watch(d->userdata, a, was, now, text);
         }
     }
+    d->last_pc = pc;
 
     for (int i = 0; i < d->counts; i++) {
         if (!d->count[i].enabled || d->count[i].addr != pc) continue;
         if (d->count[i].hits == 0) d->count[i].first_step = step;
         d->count[i].hits++;
     }
+
+    /* A watchpoint stop is not bypassed by resume(): the byte has already
+     * been recorded as its new value, so continuing cannot re-trigger on
+     * the same change the way stepping off a breakpoint address would. */
+    if (stop) return true;
 
     if (d->skip_one) { d->skip_one = false; return false; }
     for (int i = 0; i < d->breaks; i++) {

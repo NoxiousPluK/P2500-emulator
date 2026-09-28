@@ -45,6 +45,12 @@ typedef struct {
     uint16_t len;
     uint8_t last[P2500_DEBUG_WATCH_MAX_LEN];
     bool enabled;
+    /* Stop the run when this byte changes - a watchpoint, not just a log
+     * line. Note what it can and cannot see: the check is a poll made
+     * between instructions, so it catches every CHANGE but no write that
+     * stores the value already there. Hunting "what put this here" is what
+     * it is for, and that is always a change. */
+    bool stop;
 } P2500Watch;
 
 typedef struct {
@@ -76,11 +82,17 @@ typedef struct {
     P2500DebugWatchFn on_watch;
     void *userdata;
 
+    /* Index into watch[] of the watchpoint that stopped the run, else -1,
+     * and the byte within it that changed. */
+    int hit_watch;
+    uint16_t hit_watch_addr;
+
     /* Index into brk[] of the breakpoint that stopped the run, else -1.
      * Cleared by p2500_debug_resume() so a caller that steps off the
      * breakpoint does not immediately re-trigger on the same address. */
     int hit_break;
     bool skip_one; /* set by resume: ignore breakpoints for exactly one step */
+    uint16_t last_pc; /* PC of the previous step - the instruction that wrote */
 } P2500Debug;
 
 void p2500_debug_init(P2500Debug *d);
@@ -107,9 +119,12 @@ void p2500_debug_toggle_break(P2500Debug *d, uint16_t addr);
 void p2500_debug_baseline(P2500Debug *d, const P2500Machine *m);
 
 /* Call immediately before each p2500_step(). Reports watch changes through
- * on_watch, tallies counters at the current PC, and returns true when PC
- * sits on an enabled breakpoint - in which case the caller must stop
- * *before* executing, so the machine state describes that exact moment. */
+ * on_watch, tallies counters at the current PC, and returns true when the
+ * run should stop: either PC sits on an enabled breakpoint - in which case
+ * the caller must stop *before* executing, so the machine state describes
+ * that exact moment - or a watch marked `stop` has just seen its byte
+ * change, in which case the writing instruction has already run and the
+ * machine is standing on the one after it. */
 bool p2500_debug_before_step(P2500Debug *d, const P2500Machine *m,
                              unsigned long step);
 

@@ -97,6 +97,11 @@ struct App {
     int mouse_x = -1, mouse_y = -1;   /* where the script has left it */
     bool ui_had_keyboard = false;     /* to log capture/release transitions */
     bool text_input_was = true;       /* SDL_StartTextInput() runs at init */
+    /* Characters typed into whatever ImGui widget has focus - the keyboard
+     * half of --mouse, and the only way to drive an address field headlessly. */
+    struct { unsigned long at_frame; const char *text; } ui_type[MAX_PUSHES];
+    int ui_types = 0;
+    int watches_was = 0;
     SDL_AtomicInt disk_pending;  /* set by the file-dialog callback */
     char disk_path[1024];
     unsigned pending_unit;       /* which drive the dialog was opened for */
@@ -621,17 +626,27 @@ static void gui_watch(void *userdata, uint16_t, uint8_t, uint8_t, const char *te
     p2500_panels_log(*(P2500Panels *)userdata, P2500_LOG_INFO, "watch", "%s", text);
 }
 
-static void hit_breakpoint(App *app)
+/* Both kinds of stop land here. Also logged to stderr, so a headless run can
+ * assert that one fired rather than inferring it from pixels. */
+static void hit_stop(App *app)
 {
     app->paused = true;
-    set_status(app, "stopped at breakpoint $%04X", app->m.cpu.pc);
-    p2500_panels_log(app->panels, P2500_LOG_INFO, "brk",
-                     "[step %lu] breakpoint $%04X reached",
-                     app->m.total_instructions, app->m.cpu.pc);
-    /* Also to the log the harness reads, so a headless run can assert that
-     * the breakpoint fired rather than inferring it from pixels. */
-    SDL_Log("breakpoint: stopped at $%04X after %lu instructions",
-            app->m.cpu.pc, app->m.total_instructions);
+    if (app->dbg.hit_watch >= 0) {
+        const uint16_t a = app->dbg.hit_watch_addr;
+        set_status(app, "stopped: $%04X changed", a);
+        p2500_panels_log(app->panels, P2500_LOG_INFO, "brk",
+                         "[step %lu] watch $%04X changed - stopped at $%04X",
+                         app->m.total_instructions, a, app->m.cpu.pc);
+        SDL_Log("watchpoint: $%04X changed, stopped at $%04X after %lu instructions",
+                a, app->m.cpu.pc, app->m.total_instructions);
+    } else {
+        set_status(app, "stopped at breakpoint $%04X", app->m.cpu.pc);
+        p2500_panels_log(app->panels, P2500_LOG_INFO, "brk",
+                         "[step %lu] breakpoint $%04X reached",
+                         app->m.total_instructions, app->m.cpu.pc);
+        SDL_Log("breakpoint: stopped at $%04X after %lu instructions",
+                app->m.cpu.pc, app->m.total_instructions);
+    }
     app->panels.show_disasm = true;
 }
 
@@ -649,7 +664,7 @@ static void run_machine(App *app, unsigned long tstates)
     const unsigned long start = app->m.cpu.cyc;
     while (app->m.cpu.cyc - start < tstates) {
         if (p2500_debug_before_step(&app->dbg, &app->m, app->m.total_instructions)) {
-            hit_breakpoint(app);
+            hit_stop(app);
             return;
         }
         p2500_step(&app->m);
@@ -663,7 +678,7 @@ static void step_instructions(App *app, unsigned long n)
     p2500_debug_resume(&app->dbg);
     for (unsigned long i = 0; i < n; i++) {
         if (p2500_debug_before_step(&app->dbg, &app->m, app->m.total_instructions)) {
-            hit_breakpoint(app);
+            hit_stop(app);
             return;
         }
         p2500_step(&app->m);
@@ -705,10 +720,14 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[])
     bool verbose_devices = false;
     struct { unsigned long at_frame; int x, y, button; } mouse_script[MAX_PUSHES];
     int mouse_steps = 0;
+    struct { unsigned long at_frame; const char *text; } ui_type_script[MAX_PUSHES];
+    int ui_type_steps = 0;
     uint16_t break_at[MAX_PUSHES] = {0};
     int nbreak = 0;
     uint16_t watch_at[MAX_PUSHES] = {0};
     int nwatch = 0;
+    uint16_t wbreak_at[MAX_PUSHES] = {0};
+    int nwbreak = 0;
 
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--rom") && i + 1 < argc) rom = argv[++i];
@@ -726,6 +745,14 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[])
          * the screen be checked headlessly. */
         else if (!strcmp(argv[i], "--panels") && i + 1 < argc) panels_arg = argv[++i];
         else if (!strcmp(argv[i], "--verbose-io")) verbose_devices = true;
+        else if (!strcmp(argv[i], "--ui-type") && i + 1 < argc && ui_type_steps < MAX_PUSHES) {
+            char *arg = argv[++i], *colon = strchr(arg, ':');
+            if (!colon) { SDL_Log("bad --ui-type, want FRAME:TEXT"); return SDL_APP_FAILURE; }
+            *colon = '\0';
+            ui_type_script[ui_type_steps].at_frame = strtoul(arg, NULL, 0);
+            ui_type_script[ui_type_steps].text = colon + 1;
+            ui_type_steps++;
+        }
         else if (!strcmp(argv[i], "--mouse") && i + 1 < argc && mouse_steps < MAX_PUSHES) {
             /* [FRAME:]X,Y[,left|right] - the frame is optional and defaults
              * to 3, which is the earliest the UI has laid itself out. */
@@ -746,6 +773,8 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[])
             break_at[nbreak++] = (uint16_t)strtoul(argv[++i], NULL, 16);
         else if (!strcmp(argv[i], "--watch") && i + 1 < argc && nwatch < MAX_PUSHES)
             watch_at[nwatch++] = (uint16_t)strtoul(argv[++i], NULL, 16);
+        else if (!strcmp(argv[i], "--watch-break") && i + 1 < argc && nwbreak < MAX_PUSHES)
+            wbreak_at[nwbreak++] = (uint16_t)strtoul(argv[++i], NULL, 16);
         else if (!strcmp(argv[i], "--push-at") && i + 1 < argc && npush < MAX_PUSHES) {
             char *arg = argv[++i], *colon = strchr(arg, ':');
             if (!colon) { SDL_Log("bad --push-at, want MS:STRING"); return SDL_APP_FAILURE; }
@@ -761,7 +790,9 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[])
                     "                 [--push-at MS:STRING ...] [--no-caps-lock]\n"
                     "                 [--panels devices,memory,disasm,log] [--verbose-io]\n"
                     "                 [--mouse [FRAME:]X,Y[,left|right] ...]\n"
-                    "                 [--break ADDR ...] [--watch ADDR ...]");
+                    "                 [--ui-type FRAME:TEXT ...]\n"
+                    "                 [--break ADDR ...] [--watch ADDR ...]\n"
+                    "                 [--watch-break ADDR ...]");
             return SDL_APP_FAILURE;
         }
     }
@@ -835,6 +866,10 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[])
     app->dbg.userdata = &app->panels;
     for (int b = 0; b < nbreak; b++) p2500_debug_add_break(&app->dbg, break_at[b]);
     for (int w = 0; w < nwatch; w++) p2500_debug_add_watch(&app->dbg, watch_at[w], 1);
+    for (int w = 0; w < nwbreak; w++) {
+        int i = p2500_debug_add_watch(&app->dbg, wbreak_at[w], 1);
+        if (i >= 0) app->dbg.watch[i].stop = true;
+    }
     p2500_debug_baseline(&app->dbg, &app->m);
     if (panels_arg) {
         app->panels.show_devices = strstr(panels_arg, "devices") != NULL;
@@ -843,6 +878,11 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[])
         app->panels.show_log = strstr(panels_arg, "log") != NULL;
     }
     app->panels.verbose_devices = verbose_devices;
+    app->ui_types = ui_type_steps;
+    for (int i = 0; i < ui_type_steps; i++) {
+        app->ui_type[i].at_frame = ui_type_script[i].at_frame;
+        app->ui_type[i].text = ui_type_script[i].text;
+    }
     app->mouse_steps = mouse_steps;
     for (int i = 0; i < mouse_steps; i++) {
         app->mouse[i].at_frame = mouse_script[i].at_frame;
@@ -983,6 +1023,10 @@ SDL_AppResult SDL_AppIterate(void *appstate)
                 }
             if (app->mouse_x >= 0)
                 io.AddMousePosEvent((float)app->mouse_x, (float)app->mouse_y);
+            for (int i = 0; i < app->ui_types; i++)
+                if (app->frames == app->ui_type[i].at_frame)
+                    for (const char *c = app->ui_type[i].text; *c; c++)
+                        io.AddInputCharacter((unsigned)(unsigned char)*c);
             for (int i = 0; i < app->mouse_steps; i++) {
                 if (!app->mouse[i].button) continue;
                 if (app->frames == app->mouse[i].at_frame + 1)
@@ -1023,6 +1067,10 @@ SDL_AppResult SDL_AppIterate(void *appstate)
          * the state actually is costs nothing. */
         if (!captured && !SDL_TextInputActive(app->window))
             SDL_StartTextInput(app->window);
+        if (app->dbg.watches != app->watches_was) {
+            app->watches_was = app->dbg.watches;
+            SDL_Log("watches: %d", app->dbg.watches);
+        }
         if (app->text_input_was != SDL_TextInputActive(app->window)) {
             app->text_input_was = !app->text_input_was;
             SDL_Log("guest text input: %s", app->text_input_was ? "on" : "off");
@@ -1068,9 +1116,13 @@ SDL_AppResult SDL_AppIterate(void *appstate)
     if (app->win_shot_path && app->frames == 2) {
         SDL_Log("layout: menu %d px, screen at y=%.0f, %.0fx%.0f",
                 top, dst.y, dst.w, dst.h);
-        if (app->panels.goto_field_x >= 0.0f)
-            SDL_Log("memory panel: goto field at %.0f,%.0f",
-                    app->panels.goto_field_x, app->panels.goto_field_y);
+        if (app->panels.goto_geom.field_x >= 0.0f)
+            SDL_Log("memory panel: goto field %.0f,%.0f button %.0f,%.0f;"
+                    " watch field %.0f,%.0f button %.0f,%.0f",
+                    app->panels.goto_geom.field_x, app->panels.goto_geom.field_y,
+                    app->panels.goto_geom.button_x, app->panels.goto_geom.button_y,
+                    app->panels.watch_geom.field_x, app->panels.watch_geom.field_y,
+                    app->panels.watch_geom.button_x, app->panels.watch_geom.button_y);
     }
 
     SDL_SetRenderDrawColor(app->renderer, 8, 12, 8, 255);

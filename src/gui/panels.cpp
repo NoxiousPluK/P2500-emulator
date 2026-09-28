@@ -45,15 +45,40 @@ void p2500_panels_menu(P2500Panels &p)
     }
 }
 
-/* A hex address entry that commits on Enter. Returns true, with *out set,
- * on the frame it commits. */
-static bool addr_input(const char *label, char *buf, size_t buflen, uint16_t *out)
+/* A hex address entry. Commits on Enter or on its own label, which is a
+ * button rather than a caption: clicking the words next to a text box is
+ * what people try first, and a label that looks like a control but is not
+ * is worse than no label at all. Greyed out while the box is empty, so
+ * "nothing happened" reads as "there is nothing to submit".
+ *
+ * `geom` reports where the box and the button each landed, separately: the
+ * button sits after the box now, and a headless test that aimed at the
+ * label when it meant the field would be testing the wrong widget. */
+static bool addr_input(const char *label, char *buf, size_t buflen, uint16_t *out,
+                       P2500Panels::Geom *geom = nullptr)
 {
+    char id[48];
+    snprintf(id, sizeof id, "##%s", label);
     ImGui::SetNextItemWidth(ImGui::GetFontSize() * 5.0f);
-    bool done = ImGui::InputText(label, buf, buflen,
+    bool done = ImGui::InputText(id, buf, buflen,
                                 ImGuiInputTextFlags_CharsHexadecimal |
                                 ImGuiInputTextFlags_EnterReturnsTrue);
-    if (!done || buf[0] == '\0') return false;
+    if (geom) {
+        const ImVec2 lo = ImGui::GetItemRectMin(), hi = ImGui::GetItemRectMax();
+        geom->field_x = (lo.x + hi.x) * 0.5f;
+        geom->field_y = (lo.y + hi.y) * 0.5f;
+    }
+    ImGui::SameLine();
+    const bool empty = buf[0] == '\0';
+    ImGui::BeginDisabled(empty);
+    if (ImGui::Button(label)) done = true;
+    ImGui::EndDisabled();
+    if (geom) {
+        const ImVec2 lo = ImGui::GetItemRectMin(), hi = ImGui::GetItemRectMax();
+        geom->button_x = (lo.x + hi.x) * 0.5f;
+        geom->button_y = (lo.y + hi.y) * 0.5f;
+    }
+    if (!done || empty) return false;
     *out = (uint16_t)strtoul(buf, NULL, 16);
     buf[0] = '\0';
     return true;
@@ -149,12 +174,8 @@ static void draw_memory(P2500Panels &p, const P2500Machine &m, P2500Debug &dbg)
     ImGui::Combo("plane", &p.mem_plane, planes, 3);
     ImGui::SameLine();
     uint16_t want = 0;
-    if (addr_input("go to", p.mem_entry, sizeof p.mem_entry, &want)) p.mem_goto = want;
-    {
-        const ImVec2 lo = ImGui::GetItemRectMin(), hi = ImGui::GetItemRectMax();
-        p.goto_field_x = (lo.x + hi.x) * 0.5f;
-        p.goto_field_y = (lo.y + hi.y) * 0.5f;
-    }
+    if (addr_input("go to", p.mem_entry, sizeof p.mem_entry, &want, &p.goto_geom))
+        p.mem_goto = want;
     ImGui::SameLine();
     ImGui::Checkbox("follow PC", &p.mem_follow_pc);
     if (p.mem_follow_pc) p.mem_goto = m.cpu.pc;
@@ -200,16 +221,32 @@ static void draw_memory(P2500Panels &p, const P2500Machine &m, P2500Debug &dbg)
     ImGui::Separator();
     ImGui::TextDisabled("Watches - reported to the log when they change");
     uint16_t addr = 0;
-    if (addr_input("add watch", p.watch_entry, sizeof p.watch_entry, &addr)) {
-        p2500_debug_add_watch(&dbg, addr, 1);
+    if (addr_input("add watch", p.watch_entry, sizeof p.watch_entry, &addr,
+                   &p.watch_geom)) {
+        int w = p2500_debug_add_watch(&dbg, addr, 1);
+        if (w >= 0) dbg.watch[w].stop = p.new_watch_stops;
         p2500_debug_baseline(&dbg, &m);
     }
+    ImGui::SameLine();
+    ImGui::Checkbox("stop on change", &p.new_watch_stops);
+    ImGui::SetItemTooltip("Applies to watches added from here.\n"
+                          "Each existing watch has its own box below.");
+
     for (int i = 0; i < dbg.watches; i++) {
         ImGui::PushID(i);
-        ImGui::Checkbox("", &dbg.watch[i].enabled);
+        ImGui::Checkbox("##on", &dbg.watch[i].enabled);
+        ImGui::SetItemTooltip("Watch this address");
         ImGui::SameLine();
-        ImGui::Text("$%04X:%u  = %02X", dbg.watch[i].addr, dbg.watch[i].len,
+        ImGui::Text("$%04X:%u = %02X", dbg.watch[i].addr, dbg.watch[i].len,
                     dbg.watch[i].last[0]);
+        ImGui::SameLine();
+        /* A watchpoint, not a breakpoint: it fires on the poll after the
+         * instruction that wrote, so the machine stops one instruction past
+         * the culprit - and the log line names the culprit. */
+        ImGui::Checkbox("stop", &dbg.watch[i].stop);
+        ImGui::SetItemTooltip("Pause the machine when this byte changes.\n"
+                              "A write that stores the value already there is "
+                              "invisible - this watches for changes.");
         ImGui::SameLine();
         if (ImGui::SmallButton("x")) { p2500_debug_remove_watch(&dbg, i); ImGui::PopID(); break; }
         ImGui::PopID();
