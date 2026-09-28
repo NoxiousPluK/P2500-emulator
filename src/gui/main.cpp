@@ -23,6 +23,13 @@
  * because pace_field() makes them, against the wall clock - so the speed
  * does not depend on the monitor's refresh rate either.
  *
+ * The speed setting (T54) does not change that period. It changes how much
+ * emulated time one iteration covers: half a field at 0.5x, two fields at
+ * 2x. Keeping the period fixed is what holds the picture at 50 Hz however
+ * slowly the guest is running, and it is also the only way up - the
+ * presented frame rate is capped by vsync, so a 4x speed cannot come from
+ * presenting four times as often.
+ *
  * The menu bar is drawn by ImGui rather than being a native one. See
  * TODO.md T39 for why: the native options cover Windows and macOS, and on
  * Wayland there is no way to attach a GTK menu to an SDL window nor a
@@ -74,7 +81,20 @@ struct App {
     struct { unsigned long at_ms; const char *text; bool done; } push[MAX_PUSHES];
     int pushes;
     bool paused;
-    bool turbo;
+    /* Speed (T54): a multiplier on how fast emulated time runs against the
+     * wall clock. 1 is the real machine; 0 means unlimited, i.e. whatever
+     * this host manages. */
+    float speed = 1.0f;
+    double tstate_carry = 0.0;    /* the fraction of a field owed below 1x */
+    /* What the machine is ACTUALLY managing, measured rather than assumed:
+     * a set speed the host cannot reach is a claim, not a reading. */
+    float speed_measured = 0.0f;
+    Uint64 speed_ns = 0;          /* start of the measurement window */
+    unsigned long speed_cyc = 0;
+    /* Where the speed list's entries landed, reported to the log the first
+     * time it opens so a headless run can click one. */
+    float speed_item_x = 0.0f, speed_item_y[8] = {0};
+    bool speed_popup_logged = false;
     /* The machine boots with capitals lock ENGAGED: $E34C in the shipped
      * CBIOS image is $20, and CONIN XORs alphabetic input with it ($E4B7),
      * so an unshifted key produces a capital. The manual documents a
@@ -282,6 +302,105 @@ static void toggle_pause(App *app)
     if (!app->paused) p2500_debug_resume(&app->dbg);
     set_status(app, app->paused ? "paused" : "running");
     SDL_Log("run state: %s", app->paused ? "paused" : "running");
+}
+
+/*
+ * Speed.
+ *
+ * Halves and doubles rather than a slider: the useful speeds are a handful
+ * of ratios you want to name and come back to ("run it at half speed and
+ * watch the bounce"), and a slider invites hunting for a value that reads
+ * 1.00x when 1x is the one setting that must be exact.
+ *
+ * 0 is unlimited and sorts last.
+ */
+static const float SPEED_STEPS[] = { 0.25f, 0.5f, 1.0f, 2.0f, 4.0f, 8.0f, 0.0f };
+
+/* %g rather than %.2f so the labels come out 0.25x, 0.5x, 1x - no trailing
+ * zeroes to read past, and 1x stays two characters wide. */
+static void speed_label(float s, char *out, size_t n)
+{
+    if (s == 0.0f) SDL_strlcpy(out, "unlimited", n);
+    else SDL_snprintf(out, n, "%gx", (double)s);
+}
+
+static void set_speed(App *app, float s)
+{
+    app->speed = s;
+    app->tstate_carry = 0.0;
+    app->next_field_ns = 0;       /* restart the pacing clock */
+    app->speed_ns = 0;            /* and the measurement window */
+    app->speed_measured = 0.0f;
+    char label[16];
+    speed_label(s, label, sizeof label);
+    set_status(app, "speed: %s", label);
+    SDL_Log("speed: %s", label);
+}
+
+/*
+ * Measure what emulated time is really doing against the wall clock.
+ *
+ * Taken from the CPU's own T-state count rather than from a count of
+ * iterations, so it does not care how the budget was split up, and it stays
+ * right when a breakpoint cuts an iteration short. The window is a quarter
+ * second: long enough that one slow frame does not swing the reading,
+ * short enough to respond while you watch it.
+ */
+static void measure_speed(App *app)
+{
+    const Uint64 now = SDL_GetTicksNS();
+    if (app->speed_ns == 0) {
+        app->speed_ns = now;
+        app->speed_cyc = app->m.cpu.cyc;
+        return;
+    }
+    const Uint64 dt = now - app->speed_ns;
+    if (dt < 250000000ull) return;
+    const double emulated = (double)(app->m.cpu.cyc - app->speed_cyc) / (double)P2500_CPU_HZ;
+    app->speed_measured = (float)(emulated / ((double)dt / 1e9));
+    app->speed_ns = now;
+    app->speed_cyc = app->m.cpu.cyc;
+}
+
+/*
+ * What the status cell shows.
+ *
+ * The set value, normally: it is the value the user chose and it should read
+ * back unchanged. The measured value when that is the only honest answer -
+ * under "unlimited" there is no set value, and when the host cannot keep up
+ * the set value is a claim the machine is not meeting, so both are shown.
+ */
+static void speed_reading(const App *app, char *out, size_t n)
+{
+    if (app->speed == 0.0f) {
+        if (app->paused || app->speed_measured <= 0.0f) SDL_strlcpy(out, "max", n);
+        else SDL_snprintf(out, n, "~%.1fx", (double)app->speed_measured);
+    } else if (app->paused || app->speed_measured <= 0.0f) {
+        SDL_snprintf(out, n, "%gx", (double)app->speed);
+    } else if (app->speed_measured < app->speed * 0.85f) {
+        SDL_snprintf(out, n, "%gx (%.1f)", (double)app->speed, (double)app->speed_measured);
+    } else {
+        SDL_snprintf(out, n, "%gx", (double)app->speed);
+    }
+}
+
+/* Shared by the Machine menu and the status cell's right-click, so the two
+ * lists cannot drift apart. */
+static void speed_menu_items(App *app)
+{
+    char label[16];
+    for (size_t i = 0; i < SDL_arraysize(SPEED_STEPS); i++) {
+        const float s = SPEED_STEPS[i];
+        if (s == 0.0f) ImGui::Separator();
+        speed_label(s, label, sizeof label);
+        if (ImGui::MenuItem(label, s == 0.0f ? "F11" : NULL, app->speed == s))
+            set_speed(app, s);
+        if (i < SDL_arraysize(app->speed_item_y)) {
+            const ImVec2 mn = ImGui::GetItemRectMin(), mx = ImGui::GetItemRectMax();
+            app->speed_item_x = (mn.x + mx.x) * 0.5f;
+            app->speed_item_y[i] = (mn.y + mx.y) * 0.5f;
+        }
+    }
 }
 
 /* CBIOS supports A:, B: and C: (TODO.md T44), so the dialog is opened per
@@ -497,6 +616,10 @@ static void draw_menu_bar(App *app)
             app->caps_lock = !app->caps_lock;
             set_status(app, "capitals lock %s", app->caps_lock ? "on (as shipped)" : "off");
         }
+        if (ImGui::BeginMenu("Speed")) {
+            speed_menu_items(app);
+            ImGui::EndMenu();
+        }
         ImGui::EndMenu();
     }
 
@@ -508,7 +631,7 @@ static void draw_menu_bar(App *app)
     /* Right-aligned, laid out from the right edge inwards and in a fixed
      * order, so no indicator ever moves as the status text changes:
      *
-     *   status text | A B C | run/pause | capitals lock
+     *   status text | speed | A B C | run/pause | capitals lock
      *
      * Each indicator is always drawn - bright when it applies, faint when it
      * does not - because a lamp that disappears is a lamp you cannot read
@@ -554,6 +677,17 @@ static void draw_menu_bar(App *app)
         x = drives_left - gap;
         dl->AddLine(ImVec2(x + 0.5f, bar_y + 3.0f), ImVec2(x + 0.5f, bar_y + bar_h - 3.0f),
                     ImGui::GetColorU32(ImGuiCol_Separator), 1.0f);
+        x -= gap;
+
+        /* The speed cell. Its width is reserved off the widest string it can
+         * ever hold, not the current one, so a reading that changes width -
+         * "1x" to "~18.6x" - moves neither the cell nor the status text
+         * beside it. */
+        const float speed_w = ImGui::CalcTextSize("0.25x (9.9)").x;
+        const float speed_centre = x - speed_w * 0.5f;
+        x -= speed_w + gap;
+        dl->AddLine(ImVec2(x + 0.5f, bar_y + 3.0f), ImVec2(x + 0.5f, bar_y + bar_h - 3.0f),
+                    ImGui::GetColorU32(ImGuiCol_Separator), 1.0f);
         const float status_right = x - gap;
 
         /* Only draw once there is room left of the menus, so a narrow window
@@ -572,12 +706,13 @@ static void draw_menu_bar(App *app)
              * that hardcodes these pixel columns silently stops testing the
              * lamps the moment a menu is added or the font changes. */
             if (app->win_shot_path && app->frames == 2)
-                SDL_Log("lamps: caps %.0f run %.0f drives %.0f %.0f %.0f rows %.0f-%.0f",
+                SDL_Log("lamps: caps %.0f run %.0f drives %.0f %.0f %.0f rows %.0f-%.0f"
+                        " speed %.0f",
                         caps_centre, run_centre,
                         drives_left + letter_w * 0.5f,
                         drives_left + drive_cell + letter_w * 0.5f,
                         drives_left + 2 * drive_cell + letter_w * 0.5f,
-                        bar_y + 2.0f, bar_y + bar_h - 2.0f);
+                        bar_y + 2.0f, bar_y + bar_h - 2.0f, speed_centre);
 
             Lamp caps = lamp_button("##caps", caps_centre, caps_w, bar_y, bar_h);
             if (caps.clicked || caps.alt_clicked) {
@@ -621,6 +756,49 @@ static void draw_menu_bar(App *app)
                 const ImU32 ink = lamp_paint(dl, d, loaded);
                 const char letter[2] = { (char)('A' + u), '\0' };
                 dl->AddText(ImVec2(cx - letter_w * 0.5f, mid_y - font_h * 0.5f), ink, letter);
+            }
+
+            /* Speed. Lit when the machine is NOT running at its own rate,
+             * which is the state worth noticing - the same reason the run
+             * lamp is bright when paused. Left click toggles the two speeds
+             * anyone switches between mid-session; right click opens the
+             * whole list, so the menu is not the only way to reach 0.5x. */
+            char reading[24];
+            speed_reading(app, reading, sizeof reading);
+            Lamp sp = lamp_button("##speed", speed_centre, speed_w, bar_y, bar_h);
+            if (sp.clicked) set_speed(app, app->speed == 0.0f ? 1.0f : 0.0f);
+            if (sp.alt_clicked) ImGui::OpenPopup("##speedmenu");
+            if (app->speed == 0.0f)
+                ImGui::SetItemTooltip("Speed: unlimited, measuring %.1fx\n"
+                                      "Click for 1x, right-click for the list.  (F11)",
+                                      (double)app->speed_measured);
+            else
+                ImGui::SetItemTooltip("Speed: %gx, measuring %.1fx\n"
+                                      "Click for unlimited, right-click for the list."
+                                      "  (F11)",
+                                      (double)app->speed, (double)app->speed_measured);
+            const ImU32 sink = lamp_paint(dl, sp, app->speed != 1.0f);
+            const float tw = ImGui::CalcTextSize(reading).x;
+            dl->AddText(ImVec2(speed_centre - tw * 0.5f, mid_y - font_h * 0.5f),
+                        sink, reading);
+            if (ImGui::BeginPopup("##speedmenu")) {
+                speed_menu_items(app);
+                /* Reported once, for the same reason the lamp columns are: a
+                 * suite that pins a pixel row per entry stops testing the
+                 * list the moment a speed is added to it. */
+                if (!app->speed_popup_logged) {
+                    app->speed_popup_logged = true;
+                    char line[256] = "speed menu:";
+                    for (size_t i = 0; i < SDL_arraysize(SPEED_STEPS); i++) {
+                        char one[48], lbl[16];
+                        speed_label(SPEED_STEPS[i], lbl, sizeof lbl);
+                        SDL_snprintf(one, sizeof one, " %s %.0f,%.0f", lbl,
+                                     app->speed_item_x, app->speed_item_y[i]);
+                        SDL_strlcat(line, one, sizeof line);
+                    }
+                    SDL_Log("%s", line);
+                }
+                ImGui::EndPopup();
             }
         }
     }
@@ -703,7 +881,7 @@ static void step_instructions(App *app, unsigned long n)
  */
 static void pace_field(App *app)
 {
-    if ((app->frame_limit && !app->force_pacing) || app->turbo) {
+    if ((app->frame_limit && !app->force_pacing) || app->speed == 0.0f) {
         app->next_field_ns = 0;
         return;
     }
@@ -750,6 +928,7 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[])
     const char *win_shot_path = NULL;
     bool caps_lock = true; /* as the disks ship */
     bool force_pacing = false;
+    float speed = 1.0f;
     unsigned long push_at[MAX_PUSHES] = {0};
     const char *push_text[MAX_PUSHES] = {0};
     int npush = 0;
@@ -780,6 +959,14 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[])
         /* --frames runs flat out so tests do not wait; --paced puts the 50 Hz
          * throttle back, which is how the throttle itself gets tested. */
         else if (!strcmp(argv[i], "--paced")) force_pacing = true;
+        /* --speed X | unlimited - the same setting the Machine > Speed menu
+         * holds, so a headless run can be given one. */
+        else if (!strcmp(argv[i], "--speed") && i + 1 < argc) {
+            const char *s = argv[++i];
+            speed = (!strcmp(s, "unlimited") || !strcmp(s, "max")) ? 0.0f
+                                                                  : (float)atof(s);
+            if (speed < 0.0f) speed = 0.0f;
+        }
         /* The debug flags exist so the panels can be driven - and captured -
          * with no display, the same way --frames/--shot-window already let
          * the screen be checked headlessly. */
@@ -829,7 +1016,7 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[])
                     "                 [--frames N] [--screenshot out.ppm] [--shot-window out.ppm]\n"
                     "                 [--push-at MS:STRING ...] [--no-caps-lock]\n"
                     "                 [--panels devices,memory,disasm,log] [--verbose-io]\n"
-                    "                 [--paced]\n"
+                    "                 [--paced] [--speed X|unlimited]\n"
                     "                 [--mouse [FRAME:]X,Y[,left|right] ...]\n"
                     "                 [--ui-type FRAME:TEXT ...]\n"
                     "                 [--break ADDR ...] [--watch ADDR ...]\n"
@@ -849,6 +1036,7 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[])
     app->win_shot_path = win_shot_path;
     app->caps_lock = caps_lock;
     app->force_pacing = force_pacing;
+    app->speed = speed;
     app->start_ns = SDL_GetTicksNS();
     app->pushes = npush;
     for (int i = 0; i < npush; i++) {
@@ -975,7 +1163,7 @@ SDL_AppResult SDL_AppEvent(void *appstate, SDL_Event *event)
         if (ctrl && k == SDLK_Q) return SDL_APP_SUCCESS;
         if (k == SDLK_F10) { save_screenshot(app); return SDL_APP_CONTINUE; }
         if (k == SDLK_F12) { toggle_pause(app); return SDL_APP_CONTINUE; }
-        if (k == SDLK_F11) { app->turbo = !app->turbo; set_status(app, app->turbo ? "turbo" : "running"); return SDL_APP_CONTINUE; }
+        if (k == SDLK_F11) { set_speed(app, app->speed == 0.0f ? 1.0f : 0.0f); return SDL_APP_CONTINUE; }
         if (k == SDLK_F1) { app->panels.show_devices = !app->panels.show_devices; return SDL_APP_CONTINUE; }
         if (k == SDLK_F2) { app->panels.show_memory = !app->panels.show_memory; return SDL_APP_CONTINUE; }
         if (k == SDLK_F3) { app->panels.show_disasm = !app->panels.show_disasm; return SDL_APP_CONTINUE; }
@@ -1028,10 +1216,32 @@ SDL_AppResult SDL_AppIterate(void *appstate)
     }
 
     if (!app->paused) {
-        unsigned long budget = P2500_TSTATES_PER_FRAME;
-        if (app->turbo) budget *= 8;
-        run_machine(app, budget);
+        if (app->speed == 0.0f) {
+            /* Unlimited: emulate for a slice of wall time rather than a
+             * fixed number of fields. A fixed batch has to be guessed, and
+             * both ways of guessing wrong are bad - too small and vsync caps
+             * the speed at the display's refresh rate, too large and the UI
+             * stops answering the mouse. A deadline saturates whatever the
+             * host can manage without anyone naming a number, and the slice
+             * is shorter than one displayed frame so input still lands. */
+            const Uint64 deadline = SDL_GetTicksNS() + 12000000ull;   /* 12 ms */
+            do {
+                run_machine(app, P2500_TSTATES_PER_FRAME);
+            } while (!app->paused && SDL_GetTicksNS() < deadline);
+        } else {
+            /* One field scaled by the speed, carrying the fraction: at 0.5x
+             * that is half a field per iteration, which is what keeps the
+             * display at 50 Hz while the guest runs slow. The carry matters
+             * at 0.25x and below, where truncating each budget would lose a
+             * measurable slice of every field. */
+            const double want = (double)P2500_TSTATES_PER_FRAME * (double)app->speed
+                                + app->tstate_carry;
+            const unsigned long budget = (unsigned long)want;
+            app->tstate_carry = want - (double)budget;
+            if (budget) run_machine(app, budget);
+        }
     }
+    measure_speed(app);
     app->frames++;
 
     /* The CRTC can be reprogrammed by the guest - the manual's graphics mode
@@ -1199,10 +1409,17 @@ void SDL_AppQuit(void *appstate, SDL_AppResult)
     if (!app) return;
     if (app->frames && app->start_ns) {
         const double secs = (double)(SDL_GetTicksNS() - app->start_ns) / 1e9;
-        if (secs > 0.0)
-            SDL_Log("ran %lu fields in %.2f s (%.1f fields/s; the machine's own "
-                    "rate is %u)", app->frames, secs, (double)app->frames / secs,
-                    P2500_CLOCK_TICK_HZ);
+        if (secs > 0.0) {
+            SDL_Log("presented %lu frames in %.2f s (%.1f frames/s; the machine's "
+                    "field rate is %u)", app->frames, secs,
+                    (double)app->frames / secs, P2500_CLOCK_TICK_HZ);
+            /* The line that says whether the speed setting was honoured.
+             * Emulated time comes from the CPU's T-state count, so this is
+             * the real ratio and not the one that was asked for. */
+            const double emulated = (double)app->m.cpu.cyc / (double)P2500_CPU_HZ;
+            SDL_Log("emulated %.3f s of machine time in %.2f s of wall clock (%.2fx)",
+                    emulated, secs, emulated / secs);
+        }
     }
     if (app->has_ui) {
         ImGui_ImplSDLRenderer3_Shutdown();

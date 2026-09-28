@@ -8,7 +8,7 @@ sequencing and the reasoning behind it.
 > `git log -p --follow TODO.md`, or by task ID: `git log --all --grep 'T27'`.
 > Source comments still cite the task IDs that produced them, which is why
 > **open task IDs are never renumbered** even when the sections around them
-> are. New work continues from T47.
+> are. New work continues from T55.
 
 ---
 
@@ -19,7 +19,7 @@ SuperCalc2 (an OEM build whose splash reads `PHILIPS P2000`) loads from
 `P25K_S` and opens files; MBASIC-80 runs from `P25TEST`; `VALLEY.BAS` runs
 off drive B with working screen attributes. Three of nine disk images boot.
 
-`make test` is the proof and the guard: 71 checks, exit 1 on any failure.
+`make test` is the proof and the guard: 79 checks, exit 1 on any failure.
 
 ```
 make                 # libp2500.a, p2500-emu, and p2500-gui if SDL3 is present
@@ -183,6 +183,46 @@ What is left in this phase is T34, which is also the fourth panel.
   Still worth adding when a chase calls for it: run-to-cursor, a
   step-over that runs past a `CALL`, and symbol names from the CBIOS tables
   so the listing reads `SELDSK` rather than `$E620`.
+
+- [x] **T54. A speed setting.** 0.25x to 8x and unlimited, in
+  *Machine > Speed*, on the status bar, and as `--speed X|unlimited` on both
+  binaries. F11 toggles unlimited, which is what it used to do under the name
+  "turbo".
+
+  The design decision worth recording: **the speed changes the emulation
+  budget, never the pacing period.** One iteration always takes 20 ms of wall
+  clock and always presents one frame; what changes is how much emulated time
+  it covers — half a field at 0.5x (with the fraction carried, or 0.25x would
+  lose a slice of every field to truncation), two fields at 2x. Pacing the
+  iterations faster instead would work below 1x and fail above it, because
+  `SDL_RenderPresent` blocks on vsync: a 4x speed on a 60 Hz panel cannot come
+  from presenting 200 times a second. Keeping the period fixed also keeps the
+  picture updating 50 times a second while the guest crawls.
+
+  Unlimited emulates to a **12 ms wall-clock deadline** rather than a fixed
+  batch. A fixed batch has to be guessed and both errors are bad: too small
+  and vsync caps the speed at the refresh rate, too large and the UI stops
+  answering the mouse. The deadline saturates whatever the host manages on its
+  own.
+
+  The status cell shows the set value normally, and the *measured* one when
+  that is the only honest answer — under unlimited there is no set value, and
+  a set value the host cannot reach is a claim, not a reading, so both appear
+  as `4x (2.1)`. The measurement comes from the CPU's own T-state counter, so
+  it cannot agree with the setting by construction the way a count of
+  iterations would.
+
+  **What building it measured:** the old "the core manages 950 fields a
+  second, nineteen times too fast" was render-bound, not core-bound — it was
+  paying one texture upload and one ImGui pass per emulated field. Batching
+  puts the same core at **~95x real time** (~4,800 fields/s) on this host.
+
+  And `p2500-emu` spent two `getenv()` calls plus two `strtoul()` calls per
+  emulated instruction on `P2500_TRACE_FROM`/`TO`, in the innermost loop of
+  every test run. Hoisting them out took the harness from 10.6x to ~14.5x real
+  time — about 30% off every `make test`. The remaining gap to the GUI's 95x is
+  the per-step instrumentation the harness exists to do: landmark checks, the
+  PC and state rings, the cycle detector.
 
 - [x] **T34. A log callback in the core.** Done. `src/core/log.{c,h}` is one
   `P2500Log` on the machine; every device holds a pointer to it and writes

@@ -1,7 +1,12 @@
+/* clock_gettime/nanosleep, for --speed and the host-speed report. The core
+ * itself stays plain C11 with no POSIX dependency; this is the harness. */
+#define _POSIX_C_SOURCE 200809L
+
 #include "core/machine.h"
 #include "core/debug.h"
 #include "core/video.h"
 #include <ctype.h>
+#include <time.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -113,6 +118,23 @@ static void print_state(const P2500Machine *m) {
     }
 }
 
+/* Monotonic wall-clock seconds. Used for --speed's throttle and for the
+ * host-speed line in the exit report - never for anything the guest can
+ * observe, which is driven by T-states alone. */
+static double wall_seconds(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (double)ts.tv_sec + (double)ts.tv_nsec / 1e9;
+}
+
+static void wall_sleep(double secs) {
+    struct timespec ts;
+    if (secs <= 0.0) return;
+    ts.tv_sec = (time_t)secs;
+    ts.tv_nsec = (long)((secs - (double)ts.tv_sec) * 1e9);
+    nanosleep(&ts, NULL);
+}
+
 static uint8_t *read_whole_file(const char *path, size_t *out_size) {
     FILE *f = fopen(path, "rb");
     if (!f) return NULL;
@@ -141,6 +163,13 @@ int main(int argc, char **argv) {
      * queued keystroke. See keyboard.h for why this is needed. */
     unsigned long type_after_ms = 4000;
     bool verbose_io = false;
+    /* --speed X - hold the run to X times the real machine's rate. 0 is
+     * unlimited and is the DEFAULT, unlike the GUI: a batch run has nobody
+     * watching it and every test wants it flat out. The throttle is here for
+     * the cases where wall-clock time is the point - watching a demo's
+     * console output arrive at the pace the hardware would manage, or pacing
+     * a run against something outside the emulator. */
+    double speed = 0.0;
     /* --type STRING - queues bytes to deliver one per port $06 (console
      * RX) read, simulating keystrokes. Supports \r \n \t \\ and \xHH.
      * CP/M wants CR (\r), not LF, to end a line. */
@@ -210,6 +239,11 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--charrom") && i + 1 < argc) charrom_path = argv[++i];
         else if (!strcmp(argv[i], "--max-steps") && i + 1 < argc) max_steps = strtoul(argv[++i], NULL, 0);
         else if (!strcmp(argv[i], "--verbose-io")) verbose_io = true;
+        else if (!strcmp(argv[i], "--speed") && i + 1 < argc) {
+            const char *s = argv[++i];
+            speed = (!strcmp(s, "unlimited") || !strcmp(s, "max")) ? 0.0 : atof(s);
+            if (speed < 0.0) speed = 0.0;
+        }
         else if (!strcmp(argv[i], "--type-after") && i + 1 < argc)
             type_after_ms = strtoul(argv[++i], NULL, 0);
         else if ((!strcmp(argv[i], "--type") || !strcmp(argv[i], "--type-at")) && i + 1 < argc) {
@@ -342,7 +376,7 @@ int main(int argc, char **argv) {
                             "  [--sesam path]\n"
                             "  [--dump-vram path] [--dump-vram-attr path] [--dump-screen file.ppm]\n"
                             "  [--dump-ram path]\n"
-                            "  [--max-steps N] [--verbose-io]\n"
+                            "  [--max-steps N] [--verbose-io] [--speed X|unlimited]\n"
                             "  [--peek ADDR:LEN ...] [--poke ADDR:HEXBYTES ...]\n"
                             "  [--watch ADDR[:LEN] ...] [--watch-break ADDR[:LEN] ...]\n"
                             "  [--count ADDR ...] [--type STRING] [--type-after MS]\n"
@@ -463,6 +497,16 @@ int main(int argc, char **argv) {
     unsigned long step = 0;
     int reset_visits = 0;
     const char *stop_reason = NULL;
+    const double wall_start = wall_seconds();
+    /* P2500_TRACE_FROM/TO, read once. This used to be two getenv() calls and
+     * two strtoul() calls per instruction, in the innermost loop of every
+     * test run - the environment cannot change under us, so hoisting it is
+     * free speed for `make test`. */
+    const char *trace_from_env = getenv("P2500_TRACE_FROM");
+    const char *trace_to_env = getenv("P2500_TRACE_TO");
+    const bool tracing = trace_from_env && trace_to_env;
+    const unsigned long trace_from = tracing ? strtoul(trace_from_env, NULL, 0) : 0;
+    const unsigned long trace_to = tracing ? strtoul(trace_to_env, NULL, 0) : 0;
 
     if (dbg.watches == 0) { /* the two default page-zero canaries */
         p2500_debug_add_watch(&dbg, 0x0003, 1);
@@ -472,6 +516,15 @@ int main(int argc, char **argv) {
 
     for (; step < max_steps; step++) {
         uint16_t pc = m.cpu.pc;
+
+        /* --speed: sleep off whatever time the run is ahead by. Checked
+         * every 8192 steps - about 5 ms of emulated time - because the check
+         * costs a syscall and the sleep granularity is coarser than that
+         * anyway. */
+        if (speed > 0.0 && (step & 0x1FFF) == 0) {
+            const double due = (double)m.cpu.cyc / ((double)P2500_CPU_HZ * speed);
+            wall_sleep(due - (wall_seconds() - wall_start));
+        }
 
         if (p2500_debug_before_step(&dbg, &m, step)) {
             /* A watchpoint stops one instruction past the write; the report
@@ -511,15 +564,11 @@ int main(int argc, char **argv) {
 
         check_landmarks(&m, pc, step);
 
-        if (getenv("P2500_TRACE_FROM") && getenv("P2500_TRACE_TO")) {
-            unsigned long from = strtoul(getenv("P2500_TRACE_FROM"), NULL, 0);
-            unsigned long to = strtoul(getenv("P2500_TRACE_TO"), NULL, 0);
-            if (step >= from && step <= to)
-                fprintf(stderr, "[trace %lu] PC=$%04X op=%02X %02X %02X SP=$%04X BC=$%02X%02X DE=$%02X%02X HL=$%02X%02X A=$%02X\n",
-                        step, pc, p2500_peek(&m, pc), p2500_peek(&m, (uint16_t)(pc+1)),
-                        p2500_peek(&m, (uint16_t)(pc+2)),
-                        m.cpu.sp, m.cpu.b, m.cpu.c, m.cpu.d, m.cpu.e, m.cpu.h, m.cpu.l, m.cpu.a);
-        }
+        if (tracing && step >= trace_from && step <= trace_to)
+            fprintf(stderr, "[trace %lu] PC=$%04X op=%02X %02X %02X SP=$%04X BC=$%02X%02X DE=$%02X%02X HL=$%02X%02X A=$%02X\n",
+                    step, pc, p2500_peek(&m, pc), p2500_peek(&m, (uint16_t)(pc+1)),
+                    p2500_peek(&m, (uint16_t)(pc+2)),
+                    m.cpu.sp, m.cpu.b, m.cpu.c, m.cpu.d, m.cpu.e, m.cpu.h, m.cpu.l, m.cpu.a);
 
         if (pc == 0x0000) {
             /* Re-entering $0000 means a runaway reset only while the IPL
@@ -608,6 +657,18 @@ int main(int argc, char **argv) {
     }
     printf("Emulated time: %.3f s (%lu T-states at %u Hz)\n",
            (double)m.cpu.cyc / (double)P2500_CPU_HZ, m.cpu.cyc, P2500_CPU_HZ);
+    {
+        /* What this host manages, which is the number to put beside BENCH's
+         * timings when comparing the emulator against real hardware. */
+        const double wall = wall_seconds() - wall_start;
+        const double emulated = (double)m.cpu.cyc / (double)P2500_CPU_HZ;
+        if (wall > 0.0)
+            printf("Host speed: %.1fx real time (%.2f s of wall clock, "
+                   "%.1f M instructions/s)%s\n",
+                   emulated / wall, wall,
+                   (double)m.total_instructions / wall / 1e6,
+                   speed > 0.0 ? " - throttled by --speed" : "");
+    }
     if (m.sesam.reads || m.sesam.writes)
         printf("SESAM port $0F: %lu read(s), %lu write(s)\n", m.sesam.reads, m.sesam.writes);
     {

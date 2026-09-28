@@ -80,9 +80,11 @@ falsifiable check — CBIOS's baud table decodes to 75–2400 baud each within
 **Phase 3, an interactive machine.** An SDL3 + ImGui front-end with a
 CRTC-driven renderer, live keyboard, a styled menu bar and native file
 dialogs. The renderer lives in the core so both front-ends call it and
-cannot drift; pacing is one video field per presented frame, making the
-frame loop and the guest's own 50 Hz clock strobe the same event by
-construction. Along the way the video card was fully decoded: 16K × 12 bits,
+cannot drift; pacing holds the guest to 50 fields a second against the wall
+clock — not against the display's refresh rate, and not "by construction",
+which is what an earlier version of this paragraph claimed while the guest
+ran at whatever rate the host allowed. The speed setting (T54) scales the
+emulation budget per iteration rather than that period. Along the way the video card was fully decoded: 16K × 12 bits,
 the attribute nibble latched in port `$0A`, the 8×12 character cell, and the
 complete escape-code set — which the P2219 manual then confirmed entry for
 entry.

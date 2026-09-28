@@ -403,7 +403,7 @@ PY
     python3 - "$TMP/paced.log" <<'PY' && pass "the guest is paced to 50 fields a second" || fail "pacing is wrong"
 import re, sys
 t = open(sys.argv[1]).read()
-m = re.search(r'ran (\d+) fields in ([0-9.]+) s \(([0-9.]+) fields/s', t)
+m = re.search(r'presented (\d+) frames in ([0-9.]+) s \(([0-9.]+) frames/s', t)
 if not m:
     print("    no pacing report in the log"); sys.exit(1)
 rate = float(m.group(3))
@@ -902,6 +902,99 @@ if len(tops) < 2:
           "travelling horizontally" % tops); sys.exit(1)
 sys.exit(0)
 PY
+fi
+
+echo "== 13. The speed control (TODO.md T54)"
+# Every claim here is about the RATIO of emulated time to wall time, taken
+# from the front-end's own report - which reads the CPU's T-state counter, so
+# it cannot agree with the setting by construction the way a count of
+# iterations would.
+#
+# Tolerances are one-sided in spirit: a loaded host can only ever come out
+# slow, so the floor is what catches a broken throttle and the ceiling is
+# what catches a setting that did nothing.
+ratio() {
+    sed -n 's/.*of wall clock (\([0-9.]*\)x).*/\1/p' "$1" | tail -1
+}
+if [ -x ./p2500-gui ] && [ -f "$DISK" ]; then
+    for spec in "2 1.6 2.4" "0.5 0.40 0.60" "0.25 0.20 0.30"; do
+        # shellcheck disable=SC2086
+        set -- $spec
+        SPEED=$1; LO=$2; HI=$3
+        SDL_VIDEODRIVER=dummy ./p2500-gui --disk "$DISK" --frames 60 --paced \
+            --speed "$SPEED" >"$TMP/speed-$SPEED.log" 2>&1
+        R=$(ratio "$TMP/speed-$SPEED.log")
+        F=$(sed -n 's/.*(\([0-9.]*\) frames\/s.*/\1/p' "$TMP/speed-$SPEED.log" | tail -1)
+        if [ -z "$R" ]; then
+            fail "no speed report at ${SPEED}x"
+        elif awk "BEGIN{exit !($R >= $LO && $R <= $HI)}"; then
+            # The other half of the claim, and the one that is easy to get
+            # wrong: changing the speed must not change how often the screen
+            # is drawn. Below 1x the budget shrinks; above it, one iteration
+            # covers several fields.
+            if awk "BEGIN{exit !($F >= 40 && $F <= 56)}"; then
+                pass "${SPEED}x runs at ${R}x with the display still at ${F} fps"
+            else fail "${SPEED}x changed the presented frame rate to $F"; fi
+        else fail "--speed $SPEED gave ${R}x, wanted $LO-$HI"; fi
+    done
+
+    # Unlimited: pacing is off, so the only claim is that it is much faster
+    # than real time. Deliberately loose - it measures the host, not the
+    # emulator.
+    SDL_VIDEODRIVER=dummy ./p2500-gui --disk "$DISK" --frames 40 \
+        --speed unlimited >"$TMP/speed-max.log" 2>&1
+    R=$(ratio "$TMP/speed-max.log")
+    if [ -n "$R" ] && awk "BEGIN{exit !($R > 3)}"; then
+        pass "unlimited runs flat out (${R}x real time here)"
+    else fail "unlimited only managed ${R:-no}x"; fi
+
+    # The status-bar cell is a control: click toggles, right-click opens the
+    # list. The list's rows come out of the front-end's own report, so adding
+    # a speed to it cannot silently stop this from testing anything.
+    L_SPEED=$(sed -n 's/.*lamps: .*speed \([0-9]*\).*/\1/p' "$TMP/gui.log" | head -1)
+    if [ -z "$L_SPEED" ]; then
+        fail "the front-end did not report the speed cell's column"
+    else
+        SDL_VIDEODRIVER=dummy ./p2500-gui --disk "$DISK" --frames 30 \
+            --mouse "$L_SPEED,11,left" >"$TMP/speed-click.log" 2>&1
+        if grep -q 'speed: unlimited' "$TMP/speed-click.log"; then
+            pass "clicking the speed cell toggles unlimited"
+        else fail "clicking the speed cell did nothing"; fi
+
+        SDL_VIDEODRIVER=dummy ./p2500-gui --disk "$DISK" --frames 20 \
+            --mouse "6:$L_SPEED,11,right" >"$TMP/speed-list.log" 2>&1
+        ROW=$(sed -n 's/.*speed menu:.* 0\.5x \([0-9]*\),\([0-9]*\).*/\1 \2/p' \
+              "$TMP/speed-list.log" | head -1)
+        if [ -z "$ROW" ]; then
+            fail "right-clicking the speed cell did not open the list"
+        else
+            # shellcheck disable=SC2086
+            set -- $ROW
+            SDL_VIDEODRIVER=dummy ./p2500-gui --disk "$DISK" --frames 40 \
+                --mouse "6:$L_SPEED,11,right" --mouse "14:$1,$2,left" \
+                >"$TMP/speed-pick.log" 2>&1
+            if grep -q 'speed: 0.5x' "$TMP/speed-pick.log"; then
+                pass "picking a speed from the list sets it"
+            else fail "picking 0.5x from the list did nothing"; fi
+        fi
+    fi
+else
+    echo "  (skipped: no p2500-gui or no disk image)"
+fi
+
+# The CLI's throttle. Default is unlimited - every other check in this file
+# depends on that - so the flag is what gets tested, not the default.
+if [ -f "$DISK" ]; then
+    $EMU --disk "$DISK" --max-steps 400000 --speed 1 >"$TMP/cli-speed.log" 2>&1
+    R=$(sed -n 's/^Host speed: \([0-9.]*\)x.*/\1/p' "$TMP/cli-speed.log")
+    if [ -n "$R" ] && awk "BEGIN{exit !($R >= 0.85 && $R <= 1.15)}"; then
+        pass "p2500-emu --speed 1 holds the run to real time (${R}x)"
+    else fail "p2500-emu --speed 1 gave ${R:-no}x"; fi
+    $EMU --disk "$DISK" --max-steps 400000 >"$TMP/cli-flat.log" 2>&1
+    R=$(sed -n 's/^Host speed: \([0-9.]*\)x.*/\1/p' "$TMP/cli-flat.log")
+    if [ -n "$R" ] && awk "BEGIN{exit !($R > 2)}"; then
+        pass "p2500-emu runs flat out by default (${R}x real time here)"
+    else fail "the default CLI run is throttled (${R:-no}x)"; fi
 fi
 
 echo

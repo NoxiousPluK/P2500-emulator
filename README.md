@@ -46,7 +46,7 @@ make test   # the regression suite
 
 `make` needs a C11 compiler; the GUI additionally needs SDL3 (`extra/sdl3`
 on Arch) and a C++17 compiler, and Dear ImGui is vendored. The core stays
-dependency-free so `make test` runs with no display at all: **71 checks**,
+dependency-free so `make test` runs with no display at all: **79 checks**,
 exit 1 on any failure. The GUI checks skip themselves if SDL3 is absent.
 
 ## Running it as a machine
@@ -58,9 +58,18 @@ exit 1 on any failure. The GUI checks skip themselves if SDL3 is absent.
 
 Boots to `A>` in a window, **at the speed of the real machine**: the guest is
 held to 50 fields a second against the wall clock, not against the display's
-refresh rate, so it runs the same on a 60 Hz panel and a 144 Hz one. The core
-manages about 950 fields a second unthrottled — nineteen times too fast — and
-for a while it was allowed to.
+refresh rate, so it runs the same on a 60 Hz panel and a 144 Hz one — and for
+a while it was not held to anything at all.
+
+**Speed** is a setting: 0.25x to 8x, or unlimited (*Machine > Speed*, or the
+status-bar cell — click it to toggle unlimited, right-click for the list).
+Only the amount of emulated time per iteration changes; the display keeps
+drawing 50 times a second at every speed, because the presented frame rate is
+capped by vsync and could not carry a 4x speed anyway. Unlimited emulates for
+a slice of wall time rather than a fixed number of fields, which saturates the
+host without anyone guessing a batch size: **about 95x real time** here, or
+~4,800 fields a second. (The 19x this used to manage was render-bound, not
+core-bound — one texture upload and one ImGui pass per emulated field.)
 
 Geometry, cursor position and cursor shape all
 come from the MC6845's registers, so the display follows whatever the guest
@@ -76,11 +85,11 @@ registers.
 | arrow keys | the WordStar diamond CBIOS's own table at `$E274` decodes |
 | Ctrl+letter | `^A`–`^Z`, so Ctrl-C warm-boots CP/M |
 | Ctrl+O / Ctrl+R / Ctrl+Q | load disk / reset / quit |
-| F10 / F11 / F12 | screenshot (BMP) / turbo / pause |
+| F10 / F11 / F12 | screenshot (BMP) / unlimited speed / pause |
 | F1 / F2 / F3 / F4 | device state / memory / disassembly / log |
 
 **File** menu: Load Disk A/B/C, Reset, Pause, Screenshot, Quit. **Machine**
-menu: capitals lock. **Debug** menu: the four panels below. All drawn by Dear
+menu: capitals lock, speed. **Debug** menu: the four panels below. All drawn by Dear
 ImGui and styled on the emulator's own phosphor palette rather than being a
 native menu bar — see `TODO.md` for why a native one is not viable on
 Wayland. "Load Disk" uses `SDL_ShowOpenFileDialog`, so on Linux it is the
@@ -97,13 +106,15 @@ lamp's own brightness, so the state stays readable under the pointer.
 | `A B C` | a disk is attached in that drive | load a disk; right-click ejects |
 | ▶ / ⏸ | running (dim) or paused (bright — it is the state you can forget you are in) | toggle |
 | ⊓⊔ | capitals lock, the P2219 manual's own keycap symbol, drawn rather than typed because no Unicode character matches it | toggle |
+| `1x` | the speed, lit when it is not the machine's own. Reads `~18.6x` under unlimited, and `4x (2.1)` when the host cannot keep up — the set value alone would be a claim, not a reading | toggle unlimited; right-click for the list |
 
 The machine boots with **capitals lock engaged**, which is how these disks
 are configured — unshifted keys produce capitals.
 
 `--scale N` sets the initial zoom; the window is resizable and letterboxes
 with integer scaling. `--frames N --screenshot f.ppm`, `--shot-window f.ppm`,
-`--push-at MS:STRING`, `--panels LIST`, `--verbose-io`, `--break ADDR` and
+`--push-at MS:STRING`, `--panels LIST`, `--verbose-io`, `--speed X|unlimited`,
+`--break ADDR` and
 `--watch ADDR` let the front-end and its panels be driven and captured with no
 display, which is how `make test` checks them. `--mouse [FRAME:]X,Y[,left|right]`
 scripts a synthetic pointer — repeat it to click one thing and then another —
@@ -157,6 +168,7 @@ project has used.
 | `--type STRING` / `--type-after MS` / `--type-at MS:STRING` | scripted keystrokes via the queue |
 | `--push-at MS:STRING` | keystrokes via the **live** ring — the path a GUI keypress takes |
 | `--max-steps N` | instruction budget, default 2,000,000 |
+| `--speed X` \| `unlimited` | hold the run to X times the real machine's rate. **Unlimited is the default here**, unlike the GUI — a batch run has nobody watching it |
 | `--dump-vram` / `--dump-vram-attr` / `--dump-ram` | video plane, attribute plane, all 64 KB |
 | `--dump-screen f.ppm` | render through the core's own renderer — the same call the GUI makes |
 | `--peek ADDR:LEN` / `--poke ADDR:HEX` | inspect / patch memory |
@@ -168,6 +180,12 @@ project has used.
 | `--no-stuck-detect` | disable the state-hash cycle detector |
 
 `P2500_TRACE_FROM` / `P2500_TRACE_TO` give a bounded per-step trace.
+
+Every run ends with a `Host speed:` line — the emulated-to-wall-clock ratio
+and the instruction rate this host managed. That is the number to put beside
+`BENCH`'s timings when comparing the emulator against real hardware, and it is
+how the per-step instrumentation's cost shows up: the harness runs at ~14x
+real time where the GUI's batched loop reaches ~95x.
 
 Disks can be changed mid-run, and CP/M handles it as on real hardware. A
 swapped-in disk is **readable immediately** — `DIR` straight after a swap
