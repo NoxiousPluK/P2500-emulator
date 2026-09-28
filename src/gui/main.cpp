@@ -286,12 +286,12 @@ static void apply_style()
  * default font only bakes U+0020-U+00FF, so even U+21EA would not render
  * without shipping a TTF. Five strokes is cheaper than a font.
  */
-static void draw_caps_glyph(ImDrawList *dl, ImVec2 p, float h, ImU32 col)
+static void draw_caps_glyph(ImDrawList *dl, ImVec2 centre, float h, ImU32 col)
 {
-    const float w = h * 0.62f;
-    const float t = h * 0.11f > 1.0f ? h * 0.11f : 1.0f;
-    const float y0 = p.y + h * 0.24f, y1 = p.y + h * 0.76f;
-    const float x0 = p.x, x1 = p.x + w * 0.5f, x2 = p.x + w;
+    const float w = h * 0.78f;
+    const float t = h * 0.13f > 1.4f ? h * 0.13f : 1.4f;
+    const float x0 = centre.x - w * 0.5f, x1 = centre.x, x2 = centre.x + w * 0.5f;
+    const float y0 = centre.y - h * 0.5f, y1 = centre.y + h * 0.5f;
     ImVec2 pts[6] = { ImVec2(x0, y0), ImVec2(x0, y1), ImVec2(x1, y1),
                       ImVec2(x1, y0), ImVec2(x2, y0), ImVec2(x2, y1) };
     dl->AddPolyline(pts, 6, col, 0, t);
@@ -330,26 +330,45 @@ static void draw_menu_bar(App *app)
         ImGui::EndMenu();
     }
 
-    /* Right-aligned: the capitals-lock indicator, then the last action.
-     * Keeps the bar useful rather than decorative, and makes the lock state
-     * visible without opening a menu - which is the whole reason it was
-     * confusing in the first place. */
+    /* Right-aligned, in a fixed order: the last action, a hairline, then the
+     * capitals-lock indicator pinned to the far right. The indicator is
+     * always drawn - bright when engaged, faint when not - so its position
+     * never moves and the state reads at a glance. */
     {
-        const float lh = ImGui::GetTextLineHeight();
+        ImDrawList *dl = ImGui::GetWindowDrawList();
+        const float bar_y = ImGui::GetWindowPos().y;
+        const float bar_h = ImGui::GetWindowSize().y;
+        const float bar_x = ImGui::GetWindowPos().x;
+        const float width = ImGui::GetWindowWidth();
+
+        /* Sized off the bar, not the font: it has to read as a keycap
+         * symbol at a glance, and three strokes merge into a blob if it is
+         * much under half the bar height. */
+        const float gh = bar_h * 0.56f;
+        const float gw = gh * 0.78f;
+        const float pad = 12.0f, gap = 9.0f;
         const float text_w = app->status[0] ? ImGui::CalcTextSize(app->status).x : 0.0f;
-        const float glyph_w = app->caps_lock ? lh * 0.62f + 10.0f : 0.0f;
-        const float total = text_w + glyph_w + 12.0f;
-        const float avail = ImGui::GetWindowWidth();
-        if (avail - total > ImGui::GetCursorPosX()) {
-            ImGui::SetCursorPosX(avail - total);
-            if (app->caps_lock) {
-                ImVec2 at = ImGui::GetCursorScreenPos();
-                draw_caps_glyph(ImGui::GetWindowDrawList(), at, lh,
-                                ImGui::GetColorU32(ImGuiCol_Text));
-                ImGui::Dummy(ImVec2(glyph_w - 10.0f, lh));
-                ImGui::SameLine();
+        const float block = text_w + gap + 1.0f + gap + gw + pad;
+
+        if (width - block > ImGui::GetCursorPosX()) {
+            if (app->status[0]) {
+                ImGui::SetCursorPosX(width - block);
+                ImGui::TextDisabled("%s", app->status);
             }
-            if (app->status[0]) ImGui::TextDisabled("%s", app->status);
+            const float sep_x = bar_x + width - pad - gw - gap + 0.5f;
+            dl->AddLine(ImVec2(sep_x, bar_y + 3.0f), ImVec2(sep_x, bar_y + bar_h - 3.0f),
+                        ImGui::GetColorU32(ImGuiCol_Separator), 1.0f);
+
+            ImU32 col;
+            if (app->caps_lock) {
+                col = ImGui::GetColorU32(ImGuiCol_Text);
+            } else {
+                ImVec4 off = ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled);
+                off.w = 0.45f;
+                col = ImGui::GetColorU32(off);
+            }
+            draw_caps_glyph(dl, ImVec2(bar_x + width - pad - gw * 0.5f,
+                                       bar_y + bar_h * 0.5f), gh, col);
         }
     }
     ImGui::EndMainMenuBar();
@@ -382,6 +401,7 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[])
     unsigned long frame_limit = 0;
     const char *shot_path = NULL;
     const char *win_shot_path = NULL;
+    bool caps_lock = true; /* as the disks ship */
     unsigned long push_at[MAX_PUSHES] = {0};
     const char *push_text[MAX_PUSHES] = {0};
     int npush = 0;
@@ -396,6 +416,7 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[])
         else if (!strcmp(argv[i], "--frames") && i + 1 < argc) frame_limit = strtoul(argv[++i], NULL, 0);
         else if (!strcmp(argv[i], "--screenshot") && i + 1 < argc) shot_path = argv[++i];
         else if (!strcmp(argv[i], "--shot-window") && i + 1 < argc) win_shot_path = argv[++i];
+        else if (!strcmp(argv[i], "--no-caps-lock")) caps_lock = false;
         else if (!strcmp(argv[i], "--push-at") && i + 1 < argc && npush < MAX_PUSHES) {
             char *arg = argv[++i], *colon = strchr(arg, ':');
             if (!colon) { SDL_Log("bad --push-at, want MS:STRING"); return SDL_APP_FAILURE; }
@@ -408,7 +429,7 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[])
             SDL_Log("usage: p2500-gui [--rom path] [--charrom path] [--scale N]\n"
                     "                 [--disk path] [--disk-b path] [--disk-c path]\n"
                     "                 [--frames N] [--screenshot out.ppm] [--shot-window out.ppm]\n"
-                    "                 [--push-at MS:STRING ...]");
+                    "                 [--push-at MS:STRING ...] [--no-caps-lock]");
             return SDL_APP_FAILURE;
         }
     }
@@ -421,7 +442,7 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[])
     app->frame_limit = frame_limit;
     app->shot_path = shot_path;
     app->win_shot_path = win_shot_path;
-    app->caps_lock = true; /* as the disks ship */
+    app->caps_lock = caps_lock;
     app->pushes = npush;
     for (int i = 0; i < npush; i++) {
         app->push[i].at_ms = push_at[i];

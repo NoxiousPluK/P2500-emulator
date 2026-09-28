@@ -244,6 +244,10 @@ def check(cond, why):
         print("    menu check failed: " + why); ok = False
 bar = sum(1 for y in range(0, 18) for x in range(w) if lit(x, y))
 check(bar > 20, "no lit pixels in the menu bar band - the UI did not draw")
+# The capitals-lock indicator is pinned to the far right of the bar and is
+# always drawn, so there must be ink in the last 24 px of the band.
+check(any(lit(x, y) for x in range(w - 24, w) for y in range(2, 18)),
+      "no capitals-lock indicator at the right of the menu bar")
 # The emulated screen must start below the bar. Probe a strip that is empty
 # in the menu bar - to the right of the menu labels, left of the
 # right-aligned status and lock indicator - but which the "Philips P2500"
