@@ -37,6 +37,11 @@ Verification, printed per file:
   flags four false positives on STARTREK.BAS alone.
 
 usage: tools/cpm_extract.py IMAGE.raw OUTDIR [--keep-padding] [--quiet]
+                                   [--double-step]
+
+--double-step salvages a dump that captured only every second track (see
+tools/imd_tool.py verify). Logical track t then lives at index t/2 and odd
+t is a hole, zero-filled; each file reports how much of it survived.
 """
 
 import sys
@@ -62,13 +67,32 @@ BLS_CANDIDATES = [(2048, 1), (1024, 0), (4096, 3), (16384, 15)]
 
 
 class Image:
-    def __init__(self, data: bytes):
+    def __init__(self, data: bytes, double_step: bool = False):
         self.data = data
         self.tracks = len(data) // (SECTOR_SIZE * SECTORS_PER_TRACK)
+        # A double-stepped dump holds only the EVEN logical tracks, stored
+        # consecutively. CP/M logical track t is read as FDC cylinder t + 1
+        # (the Philips +1 convention), and these images carry ID cylinders
+        # 1,3,5,...,79 - so t is present exactly when t is even, at index
+        # t/2. Everything else is a hole.
+        self.double_step = double_step
+
+    def raw_track(self, logical: int):
+        """Index of a logical track in this image, or None if never captured."""
+        if not self.double_step:
+            return logical if 0 <= logical < self.tracks else None
+        if logical % 2:
+            return None
+        idx = logical // 2
+        return idx if idx < self.tracks else None
 
     def logical_sector(self, track: int, lsec: int) -> bytes:
+        """Sector by LOGICAL track; b"" when that track was never captured."""
+        idx = self.raw_track(track)
+        if idx is None:
+            return b""
         phys = SKEW[lsec]
-        off = (track * SECTORS_PER_TRACK + phys) * SECTOR_SIZE
+        off = (idx * SECTORS_PER_TRACK + phys) * SECTOR_SIZE
         return self.data[off:off + SECTOR_SIZE]
 
 
@@ -89,9 +113,11 @@ def safe_name(name: str) -> str:
 
 
 def find_directory_track(img: Image) -> int:
-    """First track whose logical sector 0 parses cleanly as a directory."""
-    for track in range(min(6, img.tracks)):
+    """First LOGICAL track whose sector 0 parses cleanly as a directory."""
+    for track in range(min(6, img.tracks * (2 if img.double_step else 1))):
         sec = img.logical_sector(track, 0)
+        if not sec:
+            continue
         entries = [sec[i:i + DIR_ENTRY_SIZE] for i in range(0, SECTOR_SIZE, DIR_ENTRY_SIZE)]
         if all(entry_is_plausible(e) for e in entries) and not all(
                 all(b == 0xE5 for b in e) for e in entries):
@@ -177,6 +203,7 @@ def extract(img: Image, outdir: Path, keep_padding: bool, quiet: bool) -> int:
         parts.sort(key=lambda p: p[0])
         blob = bytearray()
         blocks_used = []
+        missing = [0]  # bytes that fell on tracks this dump never captured
         for full_ext, e in parts:
             base_rec = (full_ext & ~exm) * 128
             records = (e[12] & exm) * 128 + e[15]
@@ -199,17 +226,30 @@ def extract(img: Image, outdir: Path, keep_padding: bool, quiet: bool) -> int:
                 blocks_used.append(b)
                 first_sec = b * secs_per_block
                 chunk = b""
+                holes = []
                 for s in range(secs_per_block):
                     ls = first_sec + s
-                    chunk += img.logical_sector(
+                    part = img.logical_sector(
                         dir_track + ls // SECTORS_PER_TRACK, ls % SECTORS_PER_TRACK)
+                    if not part:
+                        part = b"\x00" * SECTOR_SIZE
+                        holes.append(s * SECTOR_SIZE)
+                    chunk += part
                 take = min(need, recs_per_block) * RECORD_SIZE
+                # Only count a hole if it lies inside the part of the block
+                # this file actually uses.
+                for off in holes:
+                    if off < take:
+                        missing[0] += min(SECTOR_SIZE, take - off)
                 blob.extend(chunk[:take])
                 need -= min(need, recs_per_block)
 
         # CP/M records no exact byte length: a text file ends at the first
         # ^Z and the rest of its last block is whatever was there before.
         dropped = 0
+        # Trailing holes are not content; drop them before trimming padding.
+        while blob and missing[0] and blob[-1] == 0 and len(blob) > 1:
+            break
         if not keep_padding:
             if ext.upper() in TEXT_EXTS:
                 cut = blob.find(b"\x1a", max(0, len(blob) - bls))
@@ -230,6 +270,11 @@ def extract(img: Image, outdir: Path, keep_padding: bool, quiet: bool) -> int:
             problems += 1
         if not quiet:
             tail = f"  (+{dropped} B of padding/stale tail dropped)" if dropped > 1 else ""
+            if missing[0]:
+                total = len(blob) + missing[0]
+                pct = 100.0 * len(blob) / total if total else 0.0
+                tail = (f"  **{pct:.0f}% of {total} B recovered** "
+                        f"({missing[0]} B never captured)")
             print(f"  {fname:<16} {len(blob):>7} bytes  {len(blocks_used):>3} blocks"
                   f"  {complaint or info}{tail}")
 
@@ -284,7 +329,7 @@ def main() -> None:
     if len(args) < 2:
         print(__doc__.strip().splitlines()[-1])
         raise SystemExit(1)
-    img = Image(Path(args[0]).read_bytes())
+    img = Image(Path(args[0]).read_bytes(), "--double-step" in sys.argv)
     rc = extract(img, Path(args[1]),
                  "--keep-padding" in sys.argv, "--quiet" in sys.argv)
     raise SystemExit(1 if rc else 0)

@@ -724,18 +724,72 @@ the `.IMD` originals with `cpmtools` if research needs them.
     what T27 wants: an attribute-capable build would show whether the
     `ESC 0` handler does more on a different profile.
 
-  **Neither copy is extractable.** `tools/imd_tool.py verify` on
-  `P2k5_CPM.IMD` reports 39 of 79 cylinders absent, and the arithmetic is
-  unforgiving: an allocation block `b` lives at logical track `OFF + b/2`,
-  and only *even* logical tracks were captured, so consecutive blocks
-  alternate between present and absent. `CONFIG.COM` on `P2k5_CPM` occupies
-  blocks 45/46/47 and extracts as pure `$E5`. `p25k_prg` is worse — its
-  directory references blocks up to 146, needing ~74 tracks of the 40 that
-  exist.
+  **About 60% of each file is recoverable — `tools/cpm_extract.py
+  --double-step`.** The first attempt extracted `CONFIG.COM` as pure `$E5`
+  and I read that as "unrecoverable". That was the extractor's fault, not
+  the disk's: it treated the `.raw` index as the logical track. The real
+  mapping falls straight out of the geometry — CP/M logical track `t` is
+  read as FDC cylinder `t + 1` (the Philips +1 convention) and these images
+  carry ID cylinders 1,3,5,…,79, so **`t` is present exactly when `t` is
+  even, at `.raw` index `t/2`**. It also shows these disks have `OFF = 2`
+  like every other, not the `OFF = 1` the naive read inferred.
+
+  With that, a block `b` lives at logical track `2 + b/2`, so blocks come in
+  a two-on/two-off pattern and files land between 40% and 100% intact. Small
+  files that fall in an "on" phase come out **whole** — on `P2k5_CPM`:
+  `ADMIN.COM`, `CPYDSK.COM`, `DUMP.COM`, `PAKKET`; on `p25k_prg`:
+  `CONFIG.HLP`. Holes are zero-filled and every file reports its own
+  recovery percentage, so a partial file can never be mistaken for a whole
+  one.
+
+  (My earlier claim that `p25k_prg` is "worse, needing ~74 tracks of the 40
+  that exist" was an artifact of the same wrong mapping. Both disks lose the
+  same alternating half.)
+
+  **What the salvaged fragments already gave up:**
+
+  - **`CONFIG.COM` (42% of `P2k5_CPM`'s copy) names the files it swaps**:
+    `SYSCPM.PHI`/`CPM55.PHI`/`CPM58.PHI`, `SYSCBI.PHI`/`CBI55`/`CBI58`,
+    `SYSPBI.PHI`/`PBI55`/`PBI58`. That decodes the manual's "economy of
+    memory": the profile is a **55K or 58K** build of each system file, and
+    `CONFIG` copies the chosen one over the live `SYS*.PHI`.
+  - **`CONFIG.HLP` (100%)** is the list of files `CONFIG` needs present:
+    `CFTABLES.PHI`, `MBASIC.COM`, `CONFIG.BAS/.COM/.HLP`, `VOLORG.BAS`,
+    `VA.COM`.
+  - **The `SYSxx.PHI` profiles carry drive-type tables**, and they differ:
+    `SYSTEM` and `SYS09` list only `5s`/`5d` entries, while **`SYS12` and
+    `SYS13` contain `hd` entries**. If `hd` means what it looks like, these
+    are Winchester-configured profiles — which is precisely the condition
+    `ROADMAP.md` set for taking the FXD/SASI card out of "out of scope".
+    Hedge appropriately: these are strings lifted from files that are only
+    61–67% recovered, and the tables are not decoded.
 
   The directories themselves read perfectly (same sector skew as the
-  healthy disks), which is why the file *names* are trustworthy while the
-  contents are not. Re-imaging with single-stepping recovers all of it.
+  healthy disks), which is why the file *names* were trustworthy all along.
+  Re-imaging with single-stepping still recovers everything.
+
+- [x] **T46. OCR the P2219 manual. — DONE (2026-09-28).** It is a scan with
+  no text layer, so `pdftotext` returns nothing and the whole document was
+  invisible to grep — every finding taken from it so far came from reading
+  page images by eye. `tools/ocr_manual.py` renders each page at 300 dpi and
+  OCRs it at 0/90/270 degrees, keeping whichever orientation yields the most
+  real words, then prints a per-page word count so a page that OCR'd badly
+  is visible rather than silently empty.
+
+  Output is checked in beside the PDF at
+  `../Information from the internet/P2219-manual-OCR/`, with a README
+  marking which pages are trustworthy prose, which are sparse (tables,
+  diagrams, screens) and which are blank — page 20 verified blank at 0.01%
+  dark pixels rather than assumed.
+
+  **Page 27 is printed sideways and the tool found it** (rotated 270°), but
+  it is a dense character-code grid and OCR of that is not usable. Dense
+  tables have to be read from the page image; that works well and is how the
+  attribute bits and the capitals-lock keycap were read.
+
+  Still unmined, and all present in the prose: the screen and graphics
+  control codes, the high-resolution mode, the supported disk formats, what
+  each supplied utility does, and SESAM key usage.
 
 - [ ] **T32b. UCSD p-System boot.** `P2k5_LOGIC` and `P2k5_TKS` use a
   genuinely different bootstrap, so they are the best independent check on

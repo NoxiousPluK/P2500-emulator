@@ -203,10 +203,13 @@ Not on the critical path; listed so it is not forgotten.
   T36 uses SDL3's callback app model from the start. A browser-playable P2500
   is a disproportionately good outcome for a machine with this little
   surviving software.
-- **The FXD/SASI card.** No driver has been found on any disk image and the
-  card has no confirmed provenance to this unit. Out of scope until either a
-  Winchester-configured `PBIx.PHI` turns up or the card is traced with a
-  logic analyzer.
+- **The FXD/SASI card.** Was out of scope "until a Winchester-configured
+  `PBIx.PHI` turns up" — and something that looks like one now has
+  (`TODO.md` T45). Salvaged fragments of `p25k_prg`'s alternate BIOS
+  profiles show drive-type tables where `SYSTEM` and `SYS09` list only
+  `5s`/`5d` while **`SYS12` and `SYS13` list `hd`**. Not proof: those files
+  are 61–67% recovered and the tables are undecoded. Re-imaging that disk
+  is the cheap way to settle it.
 - **The `$18`–`$1E` port cluster**, which appears in `SYS09.PHI` and is most
   likely the optional 8" drive interface. Ignore it unless a disk image needs
   it.
