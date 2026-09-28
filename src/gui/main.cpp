@@ -14,9 +14,14 @@
  * written without a single lock.
  *
  * Pacing (T35): one video field is P2500_TSTATES_PER_FRAME T-states, which
- * is the same event as the machine's own 50 Hz clock strobe. The frame loop
- * and the guest's real-time clock are therefore the same clock by
- * construction, not by tuning.
+ * is the same event as the machine's own 50 Hz clock strobe. That makes one
+ * field per iteration the right unit of work - but it says nothing about
+ * how often an iteration happens, and SDL_AppIterate is called as fast as
+ * the host allows. Without a throttle the guest ran at whatever rate that
+ * was, tens of times too fast; the comment that used to sit here claimed
+ * the two clocks matched "by construction" and was simply wrong. They match
+ * because pace_field() makes them, against the wall clock - so the speed
+ * does not depend on the monitor's refresh rate either.
  *
  * The menu bar is drawn by ImGui rather than being a native one. See
  * TODO.md T39 for why: the native options cover Windows and macOS, and on
@@ -102,6 +107,9 @@ struct App {
     struct { unsigned long at_frame; const char *text; } ui_type[MAX_PUSHES];
     int ui_types = 0;
     int watches_was = 0;
+    Uint64 next_field_ns;        /* when the next 50 Hz field is due */
+    Uint64 start_ns;
+    bool force_pacing;           /* --paced: pace even a scripted run */
     SDL_AtomicInt disk_pending;  /* set by the file-dialog callback */
     char disk_path[1024];
     unsigned pending_unit;       /* which drive the dialog was opened for */
@@ -685,6 +693,34 @@ static void step_instructions(App *app, unsigned long n)
     }
 }
 
+/*
+ * Hold the guest to 50 fields a second against the wall clock.
+ *
+ * Not to the display's refresh: a 144 Hz monitor would otherwise run the
+ * machine at 2.9x. Vsync is enabled as well, but only so the picture does
+ * not tear - the timing comes from here. A scripted run (--frames) is
+ * deliberately not paced, because a test has no reason to wait.
+ */
+static void pace_field(App *app)
+{
+    if ((app->frame_limit && !app->force_pacing) || app->turbo) {
+        app->next_field_ns = 0;
+        return;
+    }
+    const Uint64 period = 1000000000ull / P2500_CLOCK_TICK_HZ;   /* 20 ms */
+    const Uint64 now = SDL_GetTicksNS();
+    if (app->next_field_ns == 0) app->next_field_ns = now;
+    app->next_field_ns += period;
+    if (app->next_field_ns > now) {
+        SDL_DelayNS(app->next_field_ns - now);
+    } else if (now - app->next_field_ns > period * 10) {
+        /* Far enough behind that catching up would be a sprint rather than a
+         * correction - a dragged window, a slow host. Start again from now
+         * rather than running fast to reclaim time that is already gone. */
+        app->next_field_ns = now;
+    }
+}
+
 static bool make_screen_texture(App *app)
 {
     p2500_video_info(&app->m, &app->info);
@@ -713,6 +749,7 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[])
     const char *shot_path = NULL;
     const char *win_shot_path = NULL;
     bool caps_lock = true; /* as the disks ship */
+    bool force_pacing = false;
     unsigned long push_at[MAX_PUSHES] = {0};
     const char *push_text[MAX_PUSHES] = {0};
     int npush = 0;
@@ -740,6 +777,9 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[])
         else if (!strcmp(argv[i], "--screenshot") && i + 1 < argc) shot_path = argv[++i];
         else if (!strcmp(argv[i], "--shot-window") && i + 1 < argc) win_shot_path = argv[++i];
         else if (!strcmp(argv[i], "--no-caps-lock")) caps_lock = false;
+        /* --frames runs flat out so tests do not wait; --paced puts the 50 Hz
+         * throttle back, which is how the throttle itself gets tested. */
+        else if (!strcmp(argv[i], "--paced")) force_pacing = true;
         /* The debug flags exist so the panels can be driven - and captured -
          * with no display, the same way --frames/--shot-window already let
          * the screen be checked headlessly. */
@@ -789,6 +829,7 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[])
                     "                 [--frames N] [--screenshot out.ppm] [--shot-window out.ppm]\n"
                     "                 [--push-at MS:STRING ...] [--no-caps-lock]\n"
                     "                 [--panels devices,memory,disasm,log] [--verbose-io]\n"
+                    "                 [--paced]\n"
                     "                 [--mouse [FRAME:]X,Y[,left|right] ...]\n"
                     "                 [--ui-type FRAME:TEXT ...]\n"
                     "                 [--break ADDR ...] [--watch ADDR ...]\n"
@@ -807,6 +848,8 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[])
     app->shot_path = shot_path;
     app->win_shot_path = win_shot_path;
     app->caps_lock = caps_lock;
+    app->force_pacing = force_pacing;
+    app->start_ns = SDL_GetTicksNS();
     app->pushes = npush;
     for (int i = 0; i < npush; i++) {
         app->push[i].at_ms = push_at[i];
@@ -848,6 +891,9 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[])
         SDL_Log("SDL_CreateWindowAndRenderer: %s", SDL_GetError());
         return SDL_APP_FAILURE;
     }
+    /* Tear-free presentation; the actual speed is pace_field's business. */
+    if (!SDL_SetRenderVSync(app->renderer, 1))
+        SDL_Log("vsync unavailable (%s) - pacing still holds 50 Hz", SDL_GetError());
     if (!make_screen_texture(app)) return SDL_APP_FAILURE;
 
     /* ImGui runs even under the dummy video driver, so the UI itself can be
@@ -1132,6 +1178,8 @@ SDL_AppResult SDL_AppIterate(void *appstate)
         ImGui_ImplSDLRenderer3_RenderDrawData(ImGui::GetDrawData(), app->renderer);
     SDL_RenderPresent(app->renderer);
 
+    pace_field(app);
+
     if (app->quit) return SDL_APP_SUCCESS;
 
     /* Headless self-check: run a fixed number of fields, save what is on
@@ -1149,6 +1197,13 @@ void SDL_AppQuit(void *appstate, SDL_AppResult)
 {
     App *app = (App *)appstate;
     if (!app) return;
+    if (app->frames && app->start_ns) {
+        const double secs = (double)(SDL_GetTicksNS() - app->start_ns) / 1e9;
+        if (secs > 0.0)
+            SDL_Log("ran %lu fields in %.2f s (%.1f fields/s; the machine's own "
+                    "rate is %u)", app->frames, secs, (double)app->frames / secs,
+                    P2500_CLOCK_TICK_HZ);
+    }
     if (app->has_ui) {
         ImGui_ImplSDLRenderer3_Shutdown();
         ImGui_ImplSDL3_Shutdown();

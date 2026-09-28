@@ -63,8 +63,21 @@ def parse_num(tok, syms, where):
     t = re.sub(r'\$([0-9A-Fa-f]+)', lambda m: str(int(m.group(1), 16)), t)
     t = re.sub(r'\b0[xX]([0-9A-Fa-f]+)', lambda m: str(int(m.group(1), 16)), t)
     t = re.sub(r'%([01]+)', lambda m: str(int(m.group(1), 2)), t)
-    t = re.sub(r'[A-Za-z_.][A-Za-z0-9_.]*',
-               lambda m: str(syms.get(m.group(0).lower(), 0)), t)
+    def look(m):
+        name = m.group(0).lower()
+        if name in syms:
+            return str(syms[name])
+        # Pass one has no forward labels yet, so unknown reads as 0 there.
+        # On the final pass an unknown name is a mistake, and letting it be
+        # 0 is the worst possible way to report it: `call mul_signed` becomes
+        # `call $0000`, which on CP/M is a warm boot, so the program simply
+        # returns to the prompt with nothing to show for it. Ask me how I
+        # know.
+        if getattr(syms, 'strict', False):
+            raise AsmError(f"{where}: undefined symbol '{m.group(0)}'")
+        return '0'
+
+    t = re.sub(r'[A-Za-z_.][A-Za-z0-9_.]*', look, t)
     if not re.fullmatch(r'[-+*/()&|<>\s0-9]*', t):
         raise AsmError(f"{where}: cannot evaluate '{tok}'")
     try:
@@ -331,11 +344,15 @@ def gather(text, base_dir: Path, name='source', depth=0):
 def assemble(text, base_dir: Path):
     lines = gather(text, base_dir)
 
-    syms, org = {}, 0x0100
+    class Syms(dict):
+        strict = False
+
+    syms, org = Syms(), 0x0100
     out = bytearray()
 
     for final in (False, True):
-        syms_pass = syms if final else dict(syms)
+        syms_pass = syms if final else Syms(syms)
+        syms_pass.strict = final
         # Names are case-insensitive, so a constant and a routine can collide
         # - and a silent collision is a whole afternoon. Catch it.
         defined = {}
@@ -413,7 +430,7 @@ def assemble(text, base_dir: Path):
             listing.append((pc, bytes(code), body))
             pc += len(code)
         if not final:
-            syms = syms_pass
+            syms = Syms(syms_pass)
     return bytes(out), org, syms, listing
 
 
@@ -431,7 +448,12 @@ def verify(binary: bytes, org: int, listing, syms, emu='./p2500-emu'):
     rom[0x100:0x100 + len(body)] = body
     tmp = Path('/tmp/.z80asm-verify.bin')
     tmp.write_bytes(bytes(rom))
-    n = len(listing)
+    # Ask for as many instructions as there are BYTES of code, not as many as
+    # there are instructions: a `db` sitting between two routines decodes as
+    # an instruction of its own, so the decoded stream is longer than the
+    # listing and asking for len(listing) stops short of the last one.
+    span = (listing[-1][0] + len(listing[-1][1]) - org) if listing else 0
+    n = min(span, 4096 - org)
     res = subprocess.run([emu, '--rom', str(tmp), '--max-steps', '0',
                           '--disasm', f'100:{n}'],
                          capture_output=True, text=True)

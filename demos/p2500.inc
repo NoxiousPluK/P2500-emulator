@@ -142,23 +142,6 @@ kbhit:
   or a
   ret
 
-; Roughly one 50 Hz video field: 4 MHz / 50 = 80000 T-states. There is no
-; vertical-blank line to poll - the MC6845's status register is not wired
-; where software can see it - so a demo paces itself by counting. The inner
-; loop is 256 djnz at 13 T-states each, 3328; eighteen of those leaves room
-; for the drawing that follows.
-wait_frame:
-  push bc
-  ld c,18
-wf_outer:
-  ld b,0
-wf_inner:
-  djnz wf_inner
-  dec c
-  jr nz,wf_outer
-  pop bc
-  ret
-
 ; Address and bit mask of one pixel.
 ;   in : bc = x (0-511), a = y (0-255)
 ;   out: hl = address, e = bit mask, c = y & 3
@@ -247,3 +230,44 @@ mul_go:
   ret
 
 mul_neg: db 0
+
+; Wait for the next 50 Hz video field.
+;
+; There is no vertical-blank line software can poll - the MC6845's status
+; register is not wired anywhere the CPU can see it. But CBIOS keeps a 16-bit
+; counter at $F436 that its CTC channel-2 interrupt advances once per field,
+; and measuring it against the emulator's own clock gives 50.00 Hz exactly.
+; Watching its low byte change is therefore a true field sync, and a better
+; one than counting T-states: a demo that takes longer than a field to draw
+; simply lands on the next boundary instead of drifting.
+;
+; Interrupts must be on, so call this after vid_out. The counter lives above
+; $C000, outside the video window, so the bank setting does not matter.
+;
+; $F436 belongs to this CP/M build. A disk built from a different donor may
+; put CBIOS elsewhere - hence the bail-out, which degrades to a slow demo
+; rather than a hung one if the address is wrong.
+TICKS equ $F436
+
+wait_field:
+  push af
+  push bc
+  push de
+  push hl
+  ld hl,TICKS
+  ld b,(hl)
+  ld de,8000               ; about three fields, then give up
+wf_spin:
+  ld a,(hl)
+  cp b
+  jr nz,wf_done
+  dec de
+  ld a,d
+  or e
+  jr nz,wf_spin
+wf_done:
+  pop hl
+  pop de
+  pop bc
+  pop af
+  ret

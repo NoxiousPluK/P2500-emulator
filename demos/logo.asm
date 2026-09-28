@@ -11,6 +11,13 @@
 
 org $0100
 
+; How many fields between one-pixel steps. At 160 x 51 the erase and blit
+; take a little over one field, so the field sync settles on two fields per
+; redraw and MOVE_EVERY 1 already gives 25 px/s - a logo that drifts across
+; the screen in fifteen seconds rather than four. Raise it to slow down
+; further; the redraw guard below then earns its keep.
+MOVE_EVERY equ 1
+
 MAXX  equ 512 - logo_pix - 1
 MAXY  equ 256 - logo_h - 1
 
@@ -28,7 +35,20 @@ start:
   ld (posy),a
   ld (oldy),a
 
+; Redraw only on the fields where the logo actually moved. Erasing and
+; blitting 51 rows twice over costs more than a field, so doing it when
+; nothing has changed would both waste the time and leave a half-drawn
+; sprite on screen for longer than it needs to be. With MOVE_EVERY at 1 it
+; moves every pass anyway; the guard is what makes raising it cheap.
 frame:
+  ld a,(movetick)
+  dec a
+  ld (movetick),a
+  jr nz,frame_wait
+  ld a,MOVE_EVERY
+  ld (movetick),a
+  call move
+
   call split_x             ; posx -> xbyte, shift, sprite pointer
   call vid_in
   call erase               ; old position first - they usually overlap
@@ -40,8 +60,8 @@ frame:
   ld a,(posy)
   ld (oldy),a
 
-  call move
-  call wait_frame
+frame_wait:
+  call wait_field
   call kbhit
   jr z,frame
 
@@ -76,7 +96,7 @@ move:
 hit_left:
   ld hl,0
   ld (posx),hl
-  ld a,2
+  ld a,1
   ld (dx),a
   jr move_y
 hit_right:
@@ -205,8 +225,9 @@ posx:   dw 0
 posy:   db 0
 oldx:   dw 0
 oldy:   db 0
-dx:     db 2
+dx:     db 1
 dy:     db 1
+movetick: db 1
 xbyte:  db 0
 shift:  db 0
 sprptr: dw 0

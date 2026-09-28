@@ -19,7 +19,7 @@ SuperCalc2 (an OEM build whose splash reads `PHILIPS P2000`) loads from
 `P25K_S` and opens files; MBASIC-80 runs from `P25TEST`; `VALLEY.BAS` runs
 off drive B with working screen attributes. Three of nine disk images boot.
 
-`make test` is the proof and the guard: 69 checks, exit 1 on any failure.
+`make test` is the proof and the guard: 70 checks, exit 1 on any failure.
 
 ```
 make                 # libp2500.a, p2500-emu, and p2500-gui if SDL3 is present
@@ -82,6 +82,14 @@ vector at `$E1AD`** (the pair `$E1AF` is the login vector; the BDOS reset at
 `$E086` clears both, and `$E117` is the function that reads `$E1AD` back).
 That costs write access, not visibility. It has no observable consequence
 until T30 lands.
+
+**The tick counter at `$F436` is the only vertical sync software has.** The
+MC6845's status register is not wired anywhere the CPU can read, but CBIOS's
+CTC channel-2 ISR advances that counter once per field (see the CP/M-era
+address table), and measured against the emulator's own clock it runs at
+**50.00 Hz exactly**. Watching its low byte change is therefore a real field
+sync, which is what `demos/p2500.inc`'s `wait_field` does. The address
+belongs to this build; a different `SYSCBI.PHI` may move it.
 
 **Largest loadable `.COM`: 405 records (51,840 bytes)**, on the 58K CP/M
 these disks carry. 406 records gets `BAD LOAD` from the CCP. The limit is
@@ -592,7 +600,7 @@ debugging artifact this emulator produces.
 | `$ED2A` → `$ED2D` | **CTC channel 3 ISR** — one `IN A,($06)`, push to the ring at `$ED8F` |
 | `$ED02` | Keyboard ring init; **runs late**, so anything strobed in earlier is discarded |
 | `$F170` | Escape command table (see above); `$F199` is the alternate set armed by `ESC 3` |
-| `$F37F` → `$F382` | **CTC channel 2 ISR** — increments the 24-bit tick counter at `$F436` |
+| `$F37F` → `$F382` | **CTC channel 2 ISR** — increments the 24-bit tick counter at `$F436`, once per 50 Hz field. Measured at 50.00 Hz, and the closest thing to a vertical sync this machine offers |
 | `$F43B` | Current attribute byte; its low nibble reaches port `$0A` |
 | `$F454` | `3E 00 D3 0A` — the `LD A,<nibble> / OUT ($0A),A` template |
 | `$F46C` | `3E 0A D3 08 3E 00 D3 09` — the CRTC R10 write template used by `ESC C`/`ESC c` |

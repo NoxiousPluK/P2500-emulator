@@ -15,9 +15,9 @@ the CP/M system files from; it defaults to `P25K_B` and takes
 
 | | |
 |---|---|
-| **LOGO** | The P2000 wordmark, bouncing. Eight pre-shifted copies of the sprite give single-pixel horizontal motion — video memory is byte-addressed, so a sprite drawn from one bitmap could only move eight pixels at a time. |
-| **STARS** | 48 stars flying outward from the centre. Each has a fixed direction and a distance that grows every field; position is `centre + direction × z / 32`, so the apparent speed grows with the distance, which is what sells the forward motion. |
-| **SPIRO** | Lissajous figures, one point at a time. Two phase accumulators step by co-prime amounts, so the only multiply left is amplitude × sine. The figure changes every 45 fields. |
+| **LOGO** | The P2000 wordmark, bouncing — 160 × 51 pixels, the striped version of the logo. Eight pre-shifted copies of the sprite give single-pixel horizontal motion: video memory is byte-addressed, so a sprite drawn from one bitmap could only move eight pixels at a time. It drifts at 25 px/s, which is a screen width every fifteen seconds. |
+| **STARS** | 48 stars flying outward from the centre. Each has a fixed direction and a distance that grows every field; position is `centre + direction × z / 32`, so the apparent speed grows with the distance, which is what sells the forward motion. The distance is 8.8 fixed point so the step can be a fraction of a unit — the only way to slow it without dropping to half the frame rate. |
+| **SPIRO** | Lissajous figures, one point at a time. Two phase accumulators step by co-prime amounts, so the only multiply left is amplitude × sine. 60 points a field, and the figure changes every 110. |
 
 ## How they draw
 
@@ -54,10 +54,24 @@ addr = $8000 + (y & 3) * 4096 + (y >> 2) * 64 + x / 8     bit = 7 - (x & 7)
 which is why stepping down one pixel row is `+$1000` three times and then
 `-12224`. See `TODO.md` T47 for how that was established.
 
-There is no vertical-blank line software can poll, so `wait_frame` counts
-T-states instead — 18 × 256 `djnz` ≈ 60,000 of the 80,000 in a field, leaving
-room for the drawing. Without it a demo redraws continuously and is never
-seen anywhere but mid-blit.
+## Keeping time
+
+There is no vertical-blank line software can poll — the MC6845's status
+register is not wired anywhere the CPU can see it. But **CBIOS keeps a 16-bit
+counter at `$F436`** that its CTC channel-2 interrupt advances once per field,
+and measured against the emulator's own clock it runs at 50.00 Hz exactly. So
+`wait_field` watches its low byte change, which is a true field sync.
+
+That matters more than it sounds. Counting T-states in a delay loop — the
+first attempt here — only works if you know how long the drawing took, and
+LOGO's erase-and-blit of 51 rows takes most of a field on its own. A demo
+whose work overruns simply lands on the next boundary instead of drifting,
+and the speed constants mean what they say.
+
+Interrupts have to be on for it, so `wait_field` is called after `vid_out`.
+The address belongs to this CP/M build; a disk built from a different donor
+may put CBIOS elsewhere, so the routine gives up after about three fields
+rather than spinning for ever.
 
 ## Building
 

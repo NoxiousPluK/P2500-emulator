@@ -17,11 +17,17 @@ NSTARS  equ 48
 REC     equ 8                ; bytes per star, a power of two so indexing shifts
 CX      equ 256
 CY      equ 128
+; Distance gained per field, 8.8. 160/256 is about five eighths of a unit,
+; which is roughly a third slower than the whole unit it used to be - and
+; being fractional it still moves something every field rather than
+; stepping at half the frame rate.
+ZSTEP   equ 160
 
 ; record layout
 F_DX    equ 0
 F_DY    equ 1
-F_Z     equ 2
+F_Z     equ 2                ; distance, 8.8 fixed point
+F_ZH    equ 7
 F_OXL   equ 3
 F_OXH   equ 4
 F_OY    equ 5
@@ -48,7 +54,7 @@ star_loop:
   jr nz,star_loop
   call vid_out
 
-  call wait_frame
+  call wait_field
   call kbhit
   jr z,frame
 
@@ -71,17 +77,20 @@ one_star:
   call unplot
 
 os_move:
-  ; z += 1, restart when it runs out
+  ; z += ZSTEP/256, restart when the whole part runs past 255
   ld a,(ix+F_Z)
-  inc a
+  add a,ZSTEP
   ld (ix+F_Z),a
+  ld a,(ix+F_ZH)
+  adc a,0
+  ld (ix+F_ZH),a
   jr nz,os_pos
   call restart
   ret
 
 os_pos:
   ; x = CX + dx * z / 32
-  ld c,(ix+F_Z)
+  ld c,(ix+F_ZH)
   ld a,(ix+F_DX)
   call mul_signed
   call div32
@@ -96,7 +105,7 @@ os_pos:
   push hl                  ; keep x
 
   ; y = CY + dy * z / 32
-  ld c,(ix+F_Z)
+  ld c,(ix+F_ZH)
   ld a,(ix+F_DY)
   call mul_signed
   call div32
@@ -135,6 +144,8 @@ restart:
   ld (seed),a
   and 31
   add a,12
+  ld (ix+F_ZH),a
+  xor a
   ld (ix+F_Z),a
   ld (ix+F_VIS),0
   ret

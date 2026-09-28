@@ -393,6 +393,26 @@ sys.exit(0)
 PY
 
     # --- the lamps are controls (clickable, inverted on hover) -------------
+    # The guest must run at the machine's own speed, not the host's. SDL calls
+    # SDL_AppIterate as fast as it can, and the core manages about 950 fields
+    # a second unthrottled - nineteen times too fast, which is what made the
+    # demos unwatchable. --frames runs deliberately unpaced so tests do not
+    # wait; --paced puts the throttle back, which is the only way to check it.
+    SDL_VIDEODRIVER=dummy ./p2500-gui --disk "$DISK" --frames 60 --paced \
+        >"$TMP/paced.log" 2>&1
+    python3 - "$TMP/paced.log" <<'PY' && pass "the guest is paced to 50 fields a second" || fail "pacing is wrong"
+import re, sys
+t = open(sys.argv[1]).read()
+m = re.search(r'ran (\d+) fields in ([0-9.]+) s \(([0-9.]+) fields/s', t)
+if not m:
+    print("    no pacing report in the log"); sys.exit(1)
+rate = float(m.group(3))
+# Generous, because a loaded host can only ever be slower: what this has to
+# catch is the unthrottled case, which was twenty times faster.
+if not 40.0 <= rate <= 56.0:
+    print("    %s fields/s, wanted about 50" % m.group(3)); sys.exit(1)
+sys.exit(0)
+PY
     # The lamp columns come out of the front-end's own report rather than
     # being hardcoded: a test that pins these pixel columns stops testing
     # anything the moment a menu is added or the font changes.
@@ -790,11 +810,18 @@ PY
 
     # LOGO is the only demo that walks down the screen a row at a time, so it
     # is the only one that exercises next_row - the raster-bank wrap that
-    # makes row y+1 sometimes +$1000 and sometimes -12224. A fixed step count
-    # is deterministic here, and lands between blits rather than during one.
-    $EMU --disk "$TMP/demo.raw" --max-steps 40000000 --type-at '4000:logo\r' \
-         --no-stuck-detect --dump-screen "$TMP/logo.ppm" >/dev/null 2>&1
-    python3 - "$TMP/logo.ppm" <<'PY' && pass "LOGO blits the sprite whole, row stepping included" || fail "LOGO did not blit correctly"
+    # makes row y+1 sometimes +$1000 and sometimes -12224.
+    #
+    # Sampled at three instants rather than one: the erase-and-blit of 51
+    # rows fills much of the time between moves, so a single instant can
+    # catch it mid-draw. The runs are deterministic, so this is a fixed set
+    # of samples rather than a retry loop - and at least one must show the
+    # sprite whole.
+    logo_seen=no
+    for steps in 41000000 41200000 41500000; do
+        $EMU --disk "$TMP/demo.raw" --max-steps $steps --type-at '4000:logo\r' \
+             --no-stuck-detect --dump-screen "$TMP/logo.ppm" >/dev/null 2>&1
+        if python3 - "$TMP/logo.ppm" <<'PY'
 import sys
 d = open(sys.argv[1], 'rb').read()
 hdr = d.split(b'\n', 3)
@@ -804,17 +831,18 @@ def lit(x, y):
     return px[((y * w) + x) * 3 + 1] > 0x80
 rows = [y for y in range(h) if any(lit(x, y) for x in range(w))]
 cols = [x for x in range(w) if any(lit(x, y) for y in range(h))]
-ok = True
-if len(rows) != 36:
-    print("    %d lit rows, the sprite is 36" % len(rows)); ok = False
-elif rows[-1] - rows[0] != 35:
-    print("    rows %d..%d are not contiguous - row stepping is wrong"
-          % (rows[0], rows[-1])); ok = False
-if not cols or cols[-1] - cols[0] + 1 != 106:
-    print("    column span %s, the sprite is 106 wide"
-          % (cols[-1] - cols[0] + 1 if cols else 0)); ok = False
+# The sprite is 160 x 51. A wrong next_row lands rows on top of each other,
+# which shows up as too few of them; the column span stays right either way,
+# so it is the row count that does the work here.
+ok = (len(rows) == 51 and rows[-1] - rows[0] == 50
+      and cols and cols[-1] - cols[0] + 1 == 160)
 sys.exit(0 if ok else 1)
 PY
+        then logo_seen=yes; break; fi
+    done
+    if [ "$logo_seen" = yes ]; then
+        pass "LOGO blits the sprite whole, row stepping included"
+    else fail "LOGO never showed a complete 160x51 sprite"; fi
 fi
 
 echo

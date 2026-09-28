@@ -16,8 +16,8 @@ org $0100
 
 AMPX    equ 232
 AMPY    equ 116
-PERPASS equ 90               ; points per video field
-PASSLEN equ 45               ; fields before the figure changes
+PERPASS equ 60               ; points per video field
+PASSLEN equ 110              ; fields before the figure changes
 
 start:
   call gfx_on
@@ -47,7 +47,7 @@ point_loop:
   jr nz,point_loop
   call vid_out
 
-  call wait_frame
+  call wait_field
   call kbhit
   jr nz,done
 

@@ -31,8 +31,8 @@ both.
   from another machine to this one. The binary runs unmodified; the screen
   control codes are what differ.
 - **`demos/`** — three graphics demos for the 512 × 256 mode, with their own
-  README on how the screen is actually laid out. `make demos` builds a
-  bootable disk.
+  README on how the screen is laid out and how a demo finds the field
+  boundary. `make demos` builds a bootable disk.
 
 ## Building
 
@@ -43,7 +43,7 @@ make test   # the regression suite
 
 `make` needs a C11 compiler; the GUI additionally needs SDL3 (`extra/sdl3`
 on Arch) and a C++17 compiler, and Dear ImGui is vendored. The core stays
-dependency-free so `make test` runs with no display at all: **69 checks**,
+dependency-free so `make test` runs with no display at all: **70 checks**,
 exit 1 on any failure. The GUI checks skip themselves if SDL3 is absent.
 
 ## Running it as a machine
@@ -53,7 +53,13 @@ exit 1 on any failure. The GUI checks skip themselves if SDL3 is absent.
             --disk-b "../Disk Images/extracted/P2500GAM/P2500GAM.raw"
 ```
 
-Boots to `A>` in a window. Geometry, cursor position and cursor shape all
+Boots to `A>` in a window, **at the speed of the real machine**: the guest is
+held to 50 fields a second against the wall clock, not against the display's
+refresh rate, so it runs the same on a 60 Hz panel and a 144 Hz one. The core
+manages about 950 fields a second unthrottled — nineteen times too fast — and
+for a while it was allowed to.
+
+Geometry, cursor position and cursor shape all
 come from the MC6845's registers, so the display follows whatever the guest
 programs — including the switch to **512 × 256 high-resolution graphics**,
 which CBIOS makes by reprogramming the CRTC to 64 × 64 cells of 4 scanlines.
