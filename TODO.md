@@ -237,6 +237,21 @@ contexts where a GUI dependency would make it unrunnable.
   front-end sends, cancelling CBIOS's XOR so the letter typed is the letter
   that appears. Nothing in the guest is patched.
 
+  **The keycap symbol, and why it is drawn rather than typed.** The manual
+  prints it on a keycap: a `U` joined to an inverted `U` — one period of a
+  square-cornered wave, an `S` laid on its side. The shifted function of the
+  same key is form feed, which is how we know it is an ordinary keycap.
+
+  There is no Unicode character for it. The nearest by shape, `∿` U+223F
+  SINE WAVE, means something else, and `⇪` U+21EA is the modern caps-lock
+  symbol rather than this one. It would not render either way: **ImGui's
+  default font bakes only U+0020–U+00FF** (`GetGlyphRangesDefault`), so
+  anything above Latin-1 needs a bundled TTF, with the weight and licence
+  that implies. The symbol is five straight strokes, so `draw_caps_glyph()`
+  draws it into the menu bar with `AddPolyline` — the real symbol, crisp at
+  any size, no font. It doubles as the lock-state indicator, which is the
+  part that was actually confusing.
+
   What is already known about the encoding, checked rather than assumed:
   - **Alphanumerics are plain ASCII** — raw ASCII on port `$06` drives CP/M
     end to end, which is what `--type 'dir\r'` does.

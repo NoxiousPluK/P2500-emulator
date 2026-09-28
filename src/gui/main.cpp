@@ -276,6 +276,27 @@ static void apply_style()
     c[ImGuiCol_CheckMark]      = green;
 }
 
+/*
+ * The P2500's own capitals-lock keycap symbol, traced off the P2219
+ * manual's KEYBOARD page: a U joined to an inverted U - one period of a
+ * square-cornered wave, i.e. an S laid on its side.
+ *
+ * Drawn rather than typed because there is no Unicode character for it (the
+ * nearest, U+223F SINE WAVE, means something else), and because ImGui's
+ * default font only bakes U+0020-U+00FF, so even U+21EA would not render
+ * without shipping a TTF. Five strokes is cheaper than a font.
+ */
+static void draw_caps_glyph(ImDrawList *dl, ImVec2 p, float h, ImU32 col)
+{
+    const float w = h * 0.62f;
+    const float t = h * 0.11f > 1.0f ? h * 0.11f : 1.0f;
+    const float y0 = p.y + h * 0.24f, y1 = p.y + h * 0.76f;
+    const float x0 = p.x, x1 = p.x + w * 0.5f, x2 = p.x + w;
+    ImVec2 pts[6] = { ImVec2(x0, y0), ImVec2(x0, y1), ImVec2(x1, y1),
+                      ImVec2(x1, y0), ImVec2(x2, y0), ImVec2(x2, y1) };
+    dl->AddPolyline(pts, 6, col, 0, t);
+}
+
 static void draw_menu_bar(App *app)
 {
     if (!ImGui::BeginMainMenuBar()) return;
@@ -309,13 +330,26 @@ static void draw_menu_bar(App *app)
         ImGui::EndMenu();
     }
 
-    /* Status, right-aligned. Keeps the bar useful rather than decorative. */
-    if (app->status[0]) {
-        float w = ImGui::CalcTextSize(app->status).x;
-        float avail = ImGui::GetWindowWidth();
-        if (avail - w - 12.0f > ImGui::GetCursorPosX()) {
-            ImGui::SetCursorPosX(avail - w - 12.0f);
-            ImGui::TextDisabled("%s", app->status);
+    /* Right-aligned: the capitals-lock indicator, then the last action.
+     * Keeps the bar useful rather than decorative, and makes the lock state
+     * visible without opening a menu - which is the whole reason it was
+     * confusing in the first place. */
+    {
+        const float lh = ImGui::GetTextLineHeight();
+        const float text_w = app->status[0] ? ImGui::CalcTextSize(app->status).x : 0.0f;
+        const float glyph_w = app->caps_lock ? lh * 0.62f + 10.0f : 0.0f;
+        const float total = text_w + glyph_w + 12.0f;
+        const float avail = ImGui::GetWindowWidth();
+        if (avail - total > ImGui::GetCursorPosX()) {
+            ImGui::SetCursorPosX(avail - total);
+            if (app->caps_lock) {
+                ImVec2 at = ImGui::GetCursorScreenPos();
+                draw_caps_glyph(ImGui::GetWindowDrawList(), at, lh,
+                                ImGui::GetColorU32(ImGuiCol_Text));
+                ImGui::Dummy(ImVec2(glyph_w - 10.0f, lh));
+                ImGui::SameLine();
+            }
+            if (app->status[0]) ImGui::TextDisabled("%s", app->status);
         }
     }
     ImGui::EndMainMenuBar();
