@@ -15,7 +15,7 @@ the CP/M system files from; it defaults to `P25K_B` and takes
 
 | | |
 |---|---|
-| **LOGO** | The P2000 wordmark, bouncing — 144 × 45 pixels, drawn from `p2000logo.bmp` at 1:1 so nothing is resampled. Eight pre-shifted copies of the sprite give single-pixel horizontal motion: video memory is byte-addressed, so a sprite drawn from one bitmap could only move eight pixels at a time. It drifts at 25 px/s, a screen width every fifteen seconds. |
+| **LOGO** | The P2000 wordmark, bouncing — 144 × 45 pixels, drawn from `p2000logo.bmp` at 1:1 so nothing is resampled. Eight pre-shifted copies of the sprite give single-pixel horizontal motion: video memory is byte-addressed, so a sprite drawn from one bitmap could only move eight pixels at a time. Direction and starting position come from the tick counter, so the angle differs every run. |
 | **STARS** | 48 stars flying outward from the centre. Each has a fixed direction and a distance that grows every field; position is `centre + direction × z / 32`, so the apparent speed grows with the distance, which is what sells the forward motion. The distance is 8.8 fixed point so the step can be a fraction of a unit — the only way to slow it without dropping to half the frame rate. |
 | **SPIRO** | Lissajous figures, one point at a time. Two phase accumulators step by co-prime amounts, so the only multiply left is amplitude × sine. 60 points a field, and the figure changes every 110. |
 
@@ -30,19 +30,25 @@ with one byte of blank margin left and right and one blank row top and
 bottom. A plain store then covers wherever the sprite just was, so there is no
 erase pass, nothing is briefly blank, and the work halves.
 
-The catch is that the step has to stay inside that margin — eight pixels
-horizontally, but only **one row** vertically. Two bugs fell straight out of
-removing the erase, both of which the erase had been hiding:
+The catch is that the step has to stay inside that margin, and that is what
+bounds the movement: eight pixels horizontally, and `--halo-rows` vertically
+(two here, which is why `|dy|` is 1 or 2). Go further and the sprite leaves a
+trail, because nothing else clears the screen.
 
-- a leftover `dx = -2` on the right-hand bounce, twice what the margin covers;
-- `jr c` where `jr nc` was meant, on the vertical bounce. `add a,dy` with a
-  two's-complement `dy` is a subtract in disguise, and carry *set* means no
-  borrow — so the test fired on every upward step and clamped the logo from
-  the bottom of the screen to the top in one jump.
+Three bugs came out of removing the erase, all of which it had been hiding:
 
-Neither was visible while something was clearing the screen behind the
-sprite. `make test` now checks for exactly one clean 144 × 45 logo at three
-points several seconds apart, which is a trail check as much as a blit check.
+- a leftover `dx = -2` on the right-hand bounce, twice what the margin
+  covered at the time;
+- `jr c` where `jr nc` was meant on the vertical bounce — and then `jr nc`
+  where neither works. `add a,dy` with a two's-complement `dy` is a subtract
+  in disguise, so carry *set* means no borrow; with a positive `dy` the carry
+  is simply never set at these magnitudes. One test cannot serve both, so
+  `move_y` branches on the sign of `dy` first;
+- the second of those pinned the logo to `y = 0`, where it travelled purely
+  horizontally. Every assertion in `make test` passed while it did, because
+  45 contiguous rows at the top of the screen look exactly like 45 contiguous
+  rows anywhere else. The check now also requires the vertical position to
+  differ between samples.
 
 ## How they draw
 
@@ -112,4 +118,6 @@ constant silently overwritten by a same-named routine label.
 `tools/mk_sprite.py` turns an image into the eight pre-shifted copies LOGO
 uses. `--invert` picks which of light and dark is ink — for this wordmark the
 inverted reading is much the clearer, because the stripes then break up the
-background rather than the letters. `--halo` adds the margin described above.
+background rather than the letters. `--halo` adds the margin described above, with `--halo-rows` setting how many
+blank rows above and below — i.e. the largest vertical step the sprite can
+cover on its own.

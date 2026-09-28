@@ -812,20 +812,21 @@ PY
     # is the only one that exercises next_row - the raster-bank wrap that
     # makes row y+1 sometimes +$1000 and sometimes -12224.
     #
-    # Sampled at three instants rather than one: the blit still takes a third
-    # of the field, so a single instant can catch it mid-draw. The runs are
-    # deterministic, so this is a fixed set of samples rather than a retry
-    # loop - and at least one must show the sprite whole.
+    # Three instants, several seconds apart and deterministic. Each one that
+    # catches the sprite between blits must show exactly one clean 144 x 45
+    # logo - which is a trail check as much as a blit check, since with no
+    # erase pass a mis-stepped bounce leaves a second copy behind.
     #
-    # The later samples are also a trail check. With no erase pass the sprite
-    # relies on its own blank margin to cover where it was, and the step has
-    # to stay inside that margin; a bug there shows up as a second copy on
-    # screen, which the exact row count below rejects.
-    logo_seen=no
-    for steps in 15000000 60000000 120000000; do
+    # And the positions must differ vertically. That is not fussiness: a
+    # sign-test bug once pinned the logo to y=0 so it only ever travelled
+    # horizontally, and every position-independent assertion here passed
+    # while it did, because 45 contiguous rows at the top of the screen look
+    # exactly like 45 contiguous rows anywhere else.
+    : >"$TMP/logo.rows"
+    for steps in 8000000 16000000 30000000; do
         $EMU --disk "$TMP/demo.raw" --max-steps $steps --type-at '4000:logo\r' \
              --no-stuck-detect --dump-screen "$TMP/logo.ppm" >/dev/null 2>&1
-        if python3 - "$TMP/logo.ppm" <<'PY'
+        python3 - "$TMP/logo.ppm" >>"$TMP/logo.rows" <<'PY'
 import sys
 d = open(sys.argv[1], 'rb').read()
 hdr = d.split(b'\n', 3)
@@ -835,21 +836,30 @@ def lit(x, y):
     return px[((y * w) + x) * 3 + 1] > 0x80
 rows = [y for y in range(h) if any(lit(x, y) for x in range(w))]
 cols = [x for x in range(w) if any(lit(x, y) for y in range(h))]
-# The logo's ink spans 144 x 45 - the sprite is 160 x 47 with a blank byte
-# each side and a blank row top and bottom, which is what lets it be drawn
-# with no erase pass. A wrong next_row lands rows on top of each other, so
-# the row count is what does the work here; the column span stays right
-# either way. Exact equality also catches a trail: anything left behind
-# widens the span or adds rows.
-ok = (len(rows) == 45 and rows[-1] - rows[0] == 44
-      and cols and 144 <= cols[-1] - cols[0] + 1 <= 145)
-sys.exit(0 if ok else 1)
+span = (cols[-1] - cols[0] + 1) if cols else 0
+print("%d %d %d" % (len(rows), span, rows[0] if rows else -1))
 PY
-        then logo_seen=yes; break; fi
     done
-    if [ "$logo_seen" = yes ]; then
-        pass "LOGO blits the sprite whole, row stepping included"
-    else fail "LOGO never showed one clean 144x45 logo (trail, or mis-stepped rows)"; fi
+    python3 - "$TMP/logo.rows" <<'PY' && pass "LOGO blits one clean sprite and bounces in both axes" || fail "LOGO blit or movement is wrong"
+import sys
+samples = [tuple(int(v) for v in l.split()) for l in open(sys.argv[1]) if l.strip()]
+if len(samples) != 3:
+    print("    expected three samples, got %d" % len(samples)); sys.exit(1)
+# At least one instant must land between blits and show the sprite whole.
+clean = [s for s in samples if s[0] == 45 and 144 <= s[1] <= 145]
+if not clean:
+    print("    never showed one clean 144x45 logo: %s" % (samples,)); sys.exit(1)
+# Nothing may ever show MORE than the sprite: that is a trail, not a
+# part-drawn frame. 49 is the blit height, so a mid-blit union can reach it.
+if any(s[0] > 49 or s[1] > 145 for s in samples):
+    print("    a sample is larger than the sprite - trail left behind: %s"
+          % (samples,)); sys.exit(1)
+tops = {s[2] for s in samples}
+if len(tops) < 2:
+    print("    the logo never moved vertically (top row always %s) - it is "
+          "travelling horizontally" % tops); sys.exit(1)
+sys.exit(0)
+PY
 fi
 
 echo

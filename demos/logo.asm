@@ -31,10 +31,57 @@ start:
   call cls
   call vid_out
 
-  ; Start somewhere off-centre so the first bounce is not symmetric.
-  ld hl,37
+  ; A random-ish start, seeded from the 50 Hz tick counter - how long the
+  ; machine has been up plus however long you took to type the command, which
+  ; is the only entropy this machine offers and is plenty for choosing an
+  ; angle. A fixed diagonal makes every bounce land in the same places.
+  ld a,(TICKS)
+  ld c,a
+
+  ; |dx| 1..4, |dy| 1..2, signs from two more bits. dy is capped by the
+  ; sprite's blank margin: it has HALO_ROWS rows to cover a vertical step
+  ; with, and going further would leave a trail.
+  ld a,c
+  and 3
+  inc a
+  ld b,a
+  bit 4,c
+  jr z,sd_xpos
+  ld a,b
+  neg
+  ld b,a
+sd_xpos:
+  ld a,b
+  ld (dx),a
+
+  ld a,c
+  rrca
+  rrca
+  and 1
+  inc a
+  ld b,a
+  bit 5,c
+  jr z,sd_ypos
+  ld a,b
+  neg
+  ld b,a
+sd_ypos:
+  ld a,b
+  ld (dy),a
+
+  ; and somewhere in the middle third of the screen to start from
+  ld a,c
+  and 63
+  add a,140
+  ld l,a
+  ld h,0
   ld (posx),hl
-  ld a,23
+  ld a,c
+  rrca
+  rrca
+  rrca
+  and 31
+  add a,60
   ld (posy),a
 
 ; One pass, one write per byte. Because the sprite carries its own margin
@@ -96,39 +143,53 @@ move:
 hit_left:
   ld hl,0
   ld (posx),hl
-  ld a,1
+  ld a,(dx)
+  neg
   ld (dx),a
   jr move_y
 hit_right:
   ld hl,MAXX
   ld (posx),hl
-  ld a,-1
+  ld a,(dx)
+  neg
   ld (dx),a
 
+; Which end can be overrun depends on the sign of dy, so branch on that
+; first. Testing the carry alone cannot work for both: `add a,dy` with a
+; negative dy is a subtract in disguise, where carry SET means no borrow,
+; while with a positive dy the carry is simply never set at these
+; magnitudes. A single `jr nc` therefore reads as "always overran" going
+; down - which pinned the logo to the top of the screen and made it travel
+; horizontally, and passed the tests because 45 contiguous rows at y=0 look
+; exactly like 45 contiguous rows anywhere else.
 move_y:
-  ld a,(posy)
-  ld b,a
   ld a,(dy)
+  ld b,a
+  ld a,(posy)
+  bit 7,b
+  jr nz,my_up
   add a,b
-  ; dy is two's complement, so this is a subtract in disguise: carry SET
-  ; means no borrow. Underflow is carry CLEAR - the other way round from how
-  ; it reads. With an erase pass this bug was invisible, because the clamp to
-  ; 0 was drawn over cleanly; without one it leaves the old sprite behind.
-  jr nc,hit_top
   cp MAXY+1
   jr nc,hit_bottom
+  ld (posy),a
+  ret
+my_up:
+  add a,b
+  jr nc,hit_top            ; carry clear = borrowed = past the top
   ld (posy),a
   ret
 hit_top:
   xor a
   ld (posy),a
-  ld a,1
+  ld a,(dy)
+  neg
   ld (dy),a
   ret
 hit_bottom:
   ld a,MAXY
   ld (posy),a
-  ld a,-1
+  ld a,(dy)
+  neg
   ld (dy),a
   ret
 
@@ -195,7 +256,7 @@ include "p2500.inc"
 
 posx:   dw 0
 posy:   db 0
-dx:     db 1
+dx:     db 1              ; replaced at startup from the tick counter
 dy:     db 1
 movetick: db 1
 xbyte:  db 0
