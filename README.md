@@ -184,7 +184,9 @@ not exist yet. **Nothing in `core/` may depend on either front-end.**
   chain position, release on `RETI`
 - `video.{c,h}` — the text renderer, driven by the MC6845 registers. 8x12
   cells read from the character ROM's 16-byte stride, cursor from R14/R15
-  with its shape from R10/R11, and the card's 4-bit attribute plane
+  with its shape from R10/R11, and the card's 4-bit attribute plane — which
+  the CPU fills by latching a nibble in port `$0A` rather than by addressing
+  it (`TODO.md` T27)
 - `ctc.{c,h}` — Z80A-CTC at `$00`–`$03`, T-state driven with a real 16/256
   prescaler and per-channel CLK/TRG sources decoded from CBIOS's own ISRs
 - `pio.{c,h}` — Z80A-PIO at `$10`–`$13` (the FDD card)

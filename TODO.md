@@ -49,7 +49,7 @@ constant. Where something is still assumed, it says so.
 | `$05` | Bank latch (W) / status (R) | Write: bit 3 = EPROM out of `$0000`–`$0FFF`; bits 0–2 all clear = video DRAM window at `$8000`–`$BFFF`, all set = main DRAM. **The other six combinations are undecoded and now trip a diagnostic (T27).** Read: bit 7 = RXD, bit 6 = TX handshake; bits 0–5 unknown, read back 1 |
 | `$06` | Keyboard data | Byte-wide, one `IN` per ch3 interrupt |
 | `$08`/`$09` | **MC6845 CRTC** | All 18 registers stored and printed at exit; **nothing renders from them yet (T37)**. 80×24, 12 scanlines/row, 311 scanlines/frame. Only R14–R17 read back, per the datasheet |
-| `$0A` | Diagnostic / POST latch | Write-only, logged not modelled (T15) |
+| `$0A` | **Video attribute latch** | Write-only. The low nibble is the 4-bit attribute every subsequent write into the video window stores alongside the character (T27). Bit 6 is set by `ESC 3`. Not a POST latch, which is what it had been mistaken for |
 | `$0F` | SESAM dongle / bootable cartridge | Access is counted; the IPL-only baseline is 32 reads / 6 writes |
 | `$10`–`$13` | **Z80A-PIO** (Z8420), FDD card | Mode 3 bit control. PA0 = µPD765 `INT` (**assumed, not traced**; if it ever misbehaves, try PA1 before concluding the model is wrong) |
 | `$14`/`$15` | **µPD765 FDC** | Idle status is exactly `$80`. Read path complete; write/format decoded but not implemented (T30) |
@@ -219,130 +219,99 @@ contexts where a GUI dependency would make it unrunnable.
 
 ## P2 — Video attributes (gates T37)
 
-- [~] **T27. Model the video card's real memory organisation. — LAYOUT
-  ANSWERED (2026-09-28), WRITE PATH NOT DERIVABLE.**
+- [x] **T27. Model the video card's real memory organisation. — SOLVED
+  (2026-09-28).** The layout was settled earlier; this entry now records the
+  write path, which was the part nothing could derive until the screen
+  driver was disassembled.
 
-  **The organisation is settled**, and four independent facts agree on it:
+  **The CPU does not address the attribute nibble through memory at all. It
+  writes it to PORT `$0A`, and the card latches it**: the next byte written
+  into the `$8000`-`$BFFF` window is stored as one 12-bit word, eight bits
+  from the data bus and four from the latch.
 
-  | Evidence | Says |
+  That is why every earlier search failed. There was no memory window to
+  find, so port `$05`'s six spare bits-0-2 combinations were never going to
+  be it, and the CGA-style char/attribute interleave the traces had already
+  ruled out was ruled out for the right reason: a 12-bit word cannot be
+  split into two CPU-addressable bytes, so this board latches instead.
+
+  **Port `$0A` was hiding in plain sight** — it had been written off as a
+  write-only "diagnostic/POST latch" because the IPL pokes it twice during
+  init. Those pokes are the attribute latch being cleared before anything is
+  printed. This also closes the port-`$0A` half of T15.
+
+  ### How it was found
+
+  The chain from a character to the hardware, each step read out of a live
+  `--dump-ram` image:
+
+  | | |
   |---|---|
-  | 12× MB8116E (16 Kbit × 1) on the card | 12 one-bit planes, 16K deep |
-  | The `$8000`–`$BFFF` window is 16 KB | 16K addresses — one per word. 8 planes are the byte the CPU sees |
-  | The P2219 CP/M manual documents exactly **four** screen attributes: underline, reverse, flash, low intensity | four planes, four attributes |
-  | The same manual's graphics mode is 512×256 addressable dots | 131,072 bits = exactly the 16 KB the eight character-code planes hold |
+  | `$E4C3` | CONOUT. Posts the byte as a request; `$E354` is `JP $EAC0` |
+  | `$EAC0` | generic request poster. Reads the device id from request byte +1 (`$31`), finds it in a stride-3 table at `$EB56`, and calls through a double indirection |
+  | `$EDD5` | **the screen driver**. Dispatches the request's function code through a table at `$EDFC` |
+  | `$EDFC` | function table: `$00` prepare → `$EE0D`, `$01` reset → `$EE3B`, `$02` → `$EE7D`, `$03` status → `$EE57`, **`$05` write → `$EE91`**. Exactly the function codes the P2219 manual documents |
+  | `$EE91` | the write loop. A two-bit state machine: bit 4 of the driver flags → `$F141`, bit 5 → `$F0C6`, otherwise normal output at `$EEDE` |
+  | `$F141` | escape handler. Dispatches on `$F439` through `$F151`; entry `$00` → `$F15F`, which matches the byte against the **escape command table at `$F170`** |
+  | `$F1D1` | **`ESC 0`**. Sets sub-state 3 and returns with **carry set**, which keeps the state armed for one more byte |
+  | `$F252` | the parameter byte. Validates it against a 16-entry table, scatters its bits into a nibble, merges into `$F43B`, calls `$F2CF` |
+  | `$F2CF` → `$F35A` | appends a 4-byte record to a queue that is later **executed as code**. The template at `$F454` is literally `3E 00 D3 0A` = `LD A,<nibble> / OUT ($0A),A` |
 
-  So each cell is an **8-bit character code + a 4-bit attribute nibble**,
-  and the flat byte bank `machine.c` used to model was the eight
-  character-code planes only. `machine.h` now carries `vram_attr[]`
-  alongside `vram[]`, and the four attributes are rendered by
-  `tools/render_vram.py`. **Which nibble bit is which is not established** —
-  the constants in that file are a placeholder and are the single place to
-  correct.
+  **The driver compiles screen updates into Z80 code and calls them** (at
+  `$FD23`, terminated with a `RET` it writes itself). That incidentally
+  explains the unrolled `LD A,imm / LD (nnnn),A` blocks at `$FD20`-`$FDAF`
+  that an earlier session found executing and could not account for.
 
-  **The CPU's write path to the nibble plane is not derivable from anything
-  this project holds**, because no software this project holds ever sets an
-  attribute. This was checked exhaustively rather than assumed:
+  ### The escape command set, decoded from `$F170`
 
-  - Every `OUT ($05)` with an immediate operand across **all 11 disk
-    images** loads `$00`, `$07` or `$0F`. There is no fourth value anywhere
-    in the corpus.
-  - The live CP/M system has exactly **four** `OUT ($05)` sites, at `$FF2F`
-    / `$FF49` / `$FF65` / `$FF80`. They form a push/pop **bank stack**:
-    `$EB14` is the current-bank shadow and `$EB15` a stack pointer into a
-    save area. The only values pushed are `$08` (video in) and `$0F` (video
-    out).
-  - CBIOS's CONOUT (`$E4C3`) is thin — an ESC state machine at `$E34D`, a
-    translation table at `$E257`, then the byte is posted as a request. It
-    never touches an attribute.
+  | ESC | handler | | ESC | handler |
+  |---|---|---|---|---|
+  | `Y` | `$F1A1` cursor address | | `S` | `$F098` |
+  | `K` | `$F1A9` erase | | `T` | `$F0A5` |
+  | `k` | `$F1BF` erase | | `U` | `$F0AD` |
+  | **`0`** | **`$F1D1` attribute** | | `V` | `$F0B5` |
+  | `C` | `$F207` cursor on | | `1` | `$F1D9` (sets flag bit 6) |
+  | `c` | `$F203` cursor off | | `2` | `$F1DE` (clears bit 6) |
+  | | | | `3` | `$F1E3` (arms an alternate table; also `OUT ($0A),$40`) |
 
-  Port `$05`'s **six unused bits-0-2 combinations** remain the obvious
-  candidate for the selector, but that is a guess and this emulator does not
-  make it. **What it does instead is make the unknown loud**: any `OUT
-  ($05)` whose bits 0-2 are neither all-set nor all-clear is counted,
-  logged, and reported at exit (`p2500_bank_is_unknown()`). Such a write
-  used to be routed silently into main DRAM. If it ever fires, it is the
-  single best lead this question has.
+  An alternate table at `$F199` applies once `ESC 3` has set flag bit 5:
+  `0` → `$F1D1`, `4` → `$F1FB` (which clears bit 5 again). `ESC C`/`ESC c`
+  landing on cursor on/off independently confirms the decode — that is
+  exactly what `VALLEY.BAS` declares them as.
 
-  **Settled alongside, and worth not re-deriving:**
-  - **Attributes cannot select an alternate character set.** 256 codes × 16
-    bytes = 4096 = the entire character ROM. There is no second glyph bank.
-  - **Graphics mode is 512×256, one bit per dot, and cannot be mixed with
-    text** — switching modes reinitialises the CRTC. It reuses the same
-    16 KB. That is a separate mode, not an attribute, and it is out of scope
-    until something needs it.
+  ### The parameter encoding
 
-  **Software that sets an attribute has since been found, and it narrowed
-  the question rather than answering it (2026-09-28).** `VALLEY.BAS` on
-  `P2500GAM` — an adventure dated `83-08-26`, extracted with
-  `tools/cpm_extract.py` — is the only program in this project that uses
-  P2500 screen attributes, and it names the machine in a comment:
+  `$F252` scatters the parameter byte's bits into the nibble:
 
-  ```basic
-  12 COFF$=CHR$(27)+"c"                                  ' cursor off
-  13 CON$=CHR$(27)+"C"                                   ' cursor on
-  14 O1$=CHR$(27)+"0Q"                                   ' attribute on
-  15 O2$=CHR$(27)+"0@"                                   ' attribute off
-  20 DEF FNPRI$(X,Y)=CHR$(13)+CHR$(27)+"Y"+CHR$(31+X)+CHR$(31+Y)  'P2500
+  | parameter bit | → attribute bit |
+  |---|---|
+  | 0 | 1 |
+  | 1 | 3 |
+  | 4 | 2 |
+  | 5 | 0 |
+
+  The 16 legal parameters are therefore `@` `` ` `` `P` `p` `B` `b` `R` `r`
+  `A` `a` `Q` `q` `C` `c` `S` `s`, reaching all 16 nibble values (`Z` is a
+  17th, an alias for `$C`). **Verified by execution, not just by reading**:
+  driving all 16 through MBASIC-80 and dumping the attribute plane
+  reproduces the table exactly.
+
+  ```
+  ./p2500-emu --disk ".../P25TEST.raw" --max-steps 260000000 \
+    --push-at '4000:mbasic\r' \
+    --push-at '100000:FOR N=0 TO 15:P=64+(N AND 3)+16*INT(N/4):' \
+    --push-at '104000:PRINT CHR$(27);"0";CHR$(P);CHR$(65+N);:NEXT\r' \
+    --dump-vram-attr /tmp/t.attr
   ```
 
-  `ESC Y row col` is the documented ADDS Regent 100 cursor address. `O1$`
-  and `O2$` bracket every character the game draws for borders and terrain
-  (`O1$;SCEN$;O2$`), which is exactly an attribute set/reset pair.
+  ### What is still open
 
-  **Tested against the real CBIOS.** Two programs, two disks, same answer:
-  `PRINT CHR$(27);"0Q";"HELLO";CHR$(27);"0@";"WORLD"` driven into MBASIC-80
-  on `P25TEST`, and **SuperCalc2 (`SC2.COM`) on `P25K_S`** — an OEM build
-  whose own splash reads `PHILIPS P2000`, so it is software written for this
-  exact machine. SuperCalc2 boots to its full spreadsheet grid and drives
-  the cursor correctly (R14/R15 tracks it to the input line at row 23), and
-  in neither case does anything reach the attribute plane. Measured:
-  - no write to port `$05` selecting an undecoded window (tripwire silent)
-  - nothing anywhere in the 16 KB video window outside the text area
-  - **no access to any unmodelled port at all**
-
-  **Correction to the 2026-09-28 first reading.** That entry said CBIOS
-  "parses `ESC 0 <c>` and discards it". The parsing is real; the discarding
-  is not. Re-reading CONOUT (`$E4C3`) shows **every path falls through to
-  `$E4EF`**, which stores the byte and posts it to the screen driver at
-  `$E354`. The escape bytes reach the driver like any other.
-
-  What the counter at `$E34D` actually gates is `call nz,$E4F8`, the
-  national-character **translation** lookup — it suppresses translation
-  *inside* an escape sequence so that parameter bytes are not mangled by the
-  accented-character table. And the counter is a length table: `ESC` sets it
-  to `$FF`, the following byte takes it to `$00`, then `'0'` adds one
-  (`$E4E3`) and `'Y'` adds two (`$E4E2`/`$E4E3`), after which each byte
-  decrements it.
-
-  **That is itself evidence.** CBIOS knows `ESC 0` carries exactly one
-  parameter byte and `ESC Y` exactly two. It would not need that knowledge
-  if it did not handle the sequence — and `ESC Y` demonstrably works, since
-  SuperCalc2 positions its cursor correctly. So the `ESC 0` handler is in
-  the driver reached through `$E354`, not in CONOUT, and that is where to
-  look next.
-
-  **The escape alphabet, counted across all 11 disk images.** Three values
-  dominate and everything else is noise (`1B 30` occurring incidentally in
-  Z80 code, 1-5 hits each):
-
-  | sequence | byte | bits | count | seen in |
-  |---|---|---|---|---|
-  | `ESC 0 @` | `$40` | `0100 0000` | 160 | 7 images |
-  | `ESC 0 P` | `$50` | `0101 0000` | 122 | 8 images |
-  | `ESC 0 Q` | `$51` | `0101 0001` | 41 | 6 images |
-
-  `VALLEY.BAS` uses `Q` as "on" and `@` as "off"; SuperCalc2 uses `@` and
-  `P`. Bit 6 is set on all three, which is what makes the byte printable.
-  Bit 4 separates `@` from `P`/`Q`, and bit 0 separates `P` from `Q`. **Do
-  not read a nibble assignment out of that yet** — three values is not
-  enough to pin four attribute bits, and guessing one is exactly the failure
-  mode this project's guiding principle warns about.
-
-  What is left: **disassemble the screen driver reached through `$E354` and
-  find its `ESC 0` handler** — that is now a bounded, concrete task rather
-  than a search. Failing that, try an alternate `SYSxx.PHI` BIOS profile
-  (blocked — `p25k_prg` is a double-stepped dump), or trace which line
-  selects the nibble plane on real hardware.
+  **Which attribute each nibble bit means.** The P2219 manual names four —
+  underline, reverse, flash, low intensity — but nothing seen so far pins a
+  bit to a name, and `src/core/video.h`'s assignment remains a placeholder.
+  The two programs that use attributes are the evidence to mine: `VALLEY.BAS`
+  draws terrain and borders with nibble `$6`, SuperCalc2 uses `$4`. Reading
+  `$F30C` and the `ESC S/T/U/V` handlers may name them outright.
 
 - [x] **T27a. The character cell is 8×12, not 8×8. — DONE (2026-09-28).**
   Fell out of T27 and fixes a visible bug, so it landed immediately rather
@@ -512,9 +481,12 @@ Small, independent, none of them blocking.
 - [ ] **T14. Read `$0422` handlers 2, 3, 6, 7** (`$04F9`, `$0539`, `$056B`,
   `$057D`) — the only IPL dispatch IDs still unidentified.
 
-- [ ] **T15. Model port `$0A`** (the diagnostic/POST latch, written at
-  `$013C` and `$01C3`, never read). Currently logged and discarded. Its
-  value is a real error code and would be worth surfacing.
+- [x] **T15. Port `$0A` identified and modelled. — DONE (2026-09-28).** It
+  is not a diagnostic/POST latch: it is the **video attribute latch** (T27).
+  The IPL's two writes at `$013C` and `$01C3` are clearing the attribute
+  before it prints anything, not posting an error code. Modelled in
+  `machine.c`; the exit report prints how many video writes carried a
+  non-zero attribute.
 
 - [ ] **T40. An Emscripten build.** Optional once T36 lands; SDL3's callback
   model makes it mostly a Makefile target. A browser-playable P2500 is a
@@ -607,6 +579,7 @@ on-disk `.phi` files are sector-interleaved, so the `org 0` listings in
 |---|---|
 | `$E200` | CP/M 2.2 CBIOS jump table (BOOT/WBOOT/CONST/CONIN/CONOUT/LIST/…) |
 | `$E274` | Special-key translation table (cursor diamond + dead-key diacritics; see T38) |
+| `$E34C` | **Shift-lock mask.** CONIN XORs alphabetic input with it (`$E4B7`-`$E4BB`); it holds `$20`, so an unshifted key produces uppercase. Authentic - see T38 |
 | `$E46C` | **CONST** — returns 0 unless `($E551)` != `$FF` and `($E553)` != `($0020)` |
 | `$E48C` | **CONIN** — `CALL $E46C` / `JR Z` until CONST reports a character |
 | `$E4C3` | **CONOUT** — ESC state machine at `$E34D`, translation table at `$E257`, then posts the byte as a request. Never touches an attribute (T27) |
@@ -635,6 +608,12 @@ on-disk `.phi` files are sector-interleaved, so the `org 0` listings in
 | `$F731`/`$F732` | Live copy of the selected baud table entry |
 | `$F733` | Serial flags; bit 6 = "check the port `$05` bit 6 handshake" |
 | `$F73D` | Serial receive shift register |
+| `$EDD5` | **The screen driver** (device id `$31`), function table at `$EDFC`; function `$05` (write) is `$EE91` |
+| `$F170` | **Escape command table**, 13 entries. `$F199` is the alternate set armed by `ESC 3` |
+| `$F1D1` | **`ESC 0`** - arms a one-parameter state; `$F252` decodes the parameter into the attribute nibble |
+| `$F43B` | Current attribute byte; its low nibble is what reaches port `$0A` |
+| `$F454` | `3E 00 D3 0A` - the `LD A,<nibble> / OUT ($0A),A` template the driver copies into its code queue |
+| `$F475` | Write pointer into the driver's generated-code queue at `$FD23`, which it terminates with `$C9` and then calls |
 | `$FF90` | CBIOS IM2 table at `I=$FF`: `$FF0C`/`$FF15`/`$FF03`/`$FEFA` for vectors `$90`/`$92`/`$94`/`$96` |
 | `$FF0C`/`$FF15`/`$FF03`/`$FEFA` | Bank-switching stubs that self-patch the `JP` at `$FF51` with the real handler |
 

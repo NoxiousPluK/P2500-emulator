@@ -136,6 +136,13 @@ check(all(lit(2 * 8 + x, 6 * 12 + y) for x in range(8) for y in range(12)),
       "no solid cursor block at row 6 col 2 (R14/R15 = $01E2)")
 sys.exit(0 if ok else 1)
 PY
+
+    # The attribute latch (port $0A, T27) must stay silent on a normal boot:
+    # CP/M prints its banner and DIR with no attributes, so any cell carrying
+    # one means the latch is painting when it should not be.
+    if grep -q 'carrying an attribute' "$TMP/screen.log"; then
+        fail "attributes appeared during a plain CP/M boot"
+    else pass "attribute latch silent on a plain boot"; fi
 fi
 
 if [ -x ./p2500-gui ]; then

@@ -48,6 +48,14 @@ Five corollaries, each paid for:
   so for the whole of Phase 1. Every model that can refuse to act should say
   so when it does — which is why the exit report now asserts 1:1
   request/acknowledge counts.
+- **"Not derivable" needs an exhausted search, not a failed one.** The
+  video attribute write path was twice declared underivable from firmware -
+  once on the grounds that no surviving software sets an attribute, once on
+  the grounds that every `OUT ($05)` in the corpus was accounted for. Both
+  searches were real and both were in the wrong place: the answer was port
+  `$0A` and it was sitting in a screen driver that had never been
+  disassembled. Before calling something hardware-only, name the code you
+  have *not* read.
 - **Suspect the input before the emulator, but prove it.** Four disk images
   failed to boot for reasons that were not in this code at all: they are
   double-stepped dumps missing every other track. The proof was not a hunch
@@ -244,13 +252,18 @@ more valuable than confirming it.** Full checklist in
 3. **What pulses CTC channel 2's CLK/TRG** — the 50 Hz real-time clock tick.
    Mains-derived or the video card's frame rate; both are 50 Hz so the
    emulator is right either way. See the item above for the cheaper route.
-4. **Which line selects the video card's attribute plane.** The 16 K × 12
-   organisation is settled (`TODO.md` T27) but the CPU's path to the nibble
-   is not, and unlike every other open question in this project it is
-   *provably* not answerable from firmware: no software that survives ever
-   sets an attribute. Port `$05`'s six unused bits-0-2 combinations are the
-   obvious candidate. This is now the best example of a question only
-   hardware can settle.
+4. **Which nibble bit is which attribute.** The attribute *path* is solved
+   (`TODO.md` T27): the CPU latches a 4-bit nibble in port `$0A` and the card
+   stores it beside the next character. What is not pinned is which bit means
+   underline, reverse, flash or low intensity. Firmware may still settle it -
+   the `ESC S/T/U/V` handlers and `$F30C` are unread - so this is a
+   *measurement of last resort*, not a first resort.
+
+   Worth recording how the previous version of this item read: "unlike every
+   other open question in this project it is *provably* not answerable from
+   firmware". That was wrong, and wrong in the project's characteristic way -
+   it concluded "not derivable" from a failed search rather than from an
+   exhausted one. The answer was in a driver nobody had disassembled yet.
 5. **FDD card: which µPD765 signals reach PIO port A bits 0 and 1.** The
    emulator has to guess this. A 10-minute continuity check settles it.
 6. **FDD card: PIO port B direction** (`$A1` mask → PB0/PB5/PB7 inputs). One

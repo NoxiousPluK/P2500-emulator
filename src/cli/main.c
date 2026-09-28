@@ -574,6 +574,9 @@ int main(int argc, char **argv) {
             printf("\n");
         }
     }
+    if (m.attr_writes)
+        printf("Video: %lu write(s) carrying an attribute; latch (port $0A) now $%02X\n",
+               m.attr_writes, m.port0a_latch);
     if (m.unknown_bank_writes)
         printf("Port $05: %lu write(s) selected an undecoded $8000-$BFFF window "
                "- see TODO.md T27\n", m.unknown_bank_writes);

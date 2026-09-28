@@ -38,6 +38,9 @@ static void mem_write(void *userdata, uint16_t addr, uint8_t value) {
     if (addr >= P2500_VRAM_BASE && addr < P2500_VRAM_BASE + P2500_VRAM_SIZE &&
         p2500_video_window_selected(m)) {
         m->vram[addr - P2500_VRAM_BASE] = value;
+        /* One 12-bit word: the byte from the CPU, the nibble from the latch. */
+        m->vram_attr[addr - P2500_VRAM_BASE] = m->attr_latch;
+        if (m->attr_latch) m->attr_writes++;
         return;
     }
     m->ram[addr] = value;
@@ -303,9 +306,17 @@ static void port_out(z80 *cpu, uint8_t port, uint8_t value) {
         p2500_dma_write(&m->dma, value);
         break;
     case 0x0A:
-        /* diagnostic/POST latch, logged only (TODO.md T15) */
+        /* The video card's attribute latch (TODO.md T27). The low nibble is
+         * the 4-bit attribute every subsequent write into the video window
+         * stores alongside the character code. CBIOS's ESC 0 handler reaches
+         * this port through generated code: the template at $F454 is
+         * "LD A,<nibble> / OUT ($0A),A". Bit 6 is set by ESC 3 and is not
+         * an attribute - keep the whole byte so it can be studied. */
+        m->port0a_latch = value;
+        m->attr_latch = value & P2500_VRAM_ATTR_MASK;
         if (m->verbose_unknown_ports)
-            fprintf(stderr, "[io] OUT ($%02X) <- $%02X (not modeled)\n", port, value);
+            fprintf(stderr, "[video] OUT ($0A) <- $%02X: attribute nibble now $%X\n",
+                    value, m->attr_latch);
         break;
     default:
         m->unhandled_out[port]++;

@@ -85,14 +85,20 @@
  *     131,072 bits = exactly the 16 KB the eight character-code planes hold.
  *
  * So each cell is an 8-bit character code plus a 4-bit attribute nibble.
- * The nibble plane is modelled here, but NOTHING WRITES IT: how the CPU
- * reaches it is not derivable from anything this project holds, because no
- * software this project holds ever sets an attribute. Every OUT ($05) in
- * the whole disk corpus writes $00, $07, $08 or $0F and nothing else, and
- * the live CP/M system's bank shadow at $EB14 only ever takes $08 (video
- * in) and $0F (video out). The selector is out-of-band and port $05's six
- * unused bits-0-2 combinations are the obvious candidate, but that is a
- * guess and this emulator does not make it. See p2500_bank_is_unknown(). */
+ *
+ * The CPU does NOT address that nibble through memory. It writes it to
+ * PORT $0A and the card latches it: a subsequent byte written into the
+ * $8000-$BFFF window is stored as one 12-bit word, eight bits from the data
+ * bus and four from the latch. Decoded from CBIOS's screen driver, which
+ * builds the write as executable code and runs it - the 4-byte template at
+ * $F454 is literally "LD A,<nibble> / OUT ($0A),A" (TODO.md T27).
+ *
+ * That resolves several things at once: why port $05's six spare bits-0-2
+ * combinations are never used, why a CGA-style char/attribute interleave
+ * was ruled out by the traces, and what port $0A is. It had been written
+ * off as a write-only "diagnostic/POST latch" because the IPL pokes it
+ * twice during init - which is really the attribute latch being cleared
+ * before anything is printed. */
 #define P2500_VRAM_ATTR_MASK 0x0F
 
 /* Z8400A (Z80A) at 4 MHz - confirmed from the real CPU card's silicon, see
@@ -141,6 +147,9 @@ typedef struct {
     uint8_t charrom[0x1000]; /* video card's character generator, see video.h */
     uint8_t vram[P2500_VRAM_SIZE]; /* the video card's own DRAM, see above */
     uint8_t vram_attr[P2500_VRAM_SIZE]; /* 4-bit attribute plane; see above */
+    uint8_t attr_latch;   /* port $0A: the nibble the next video write stores */
+    uint8_t port0a_latch; /* the whole byte, bit 6 is used by ESC 3 */
+    unsigned long attr_writes; /* video writes made with a non-zero nibble */
     uint8_t bank; /* last value written to port $05 */
     unsigned long unknown_bank_writes; /* OUT ($05) values we cannot decode */
     /* Ports this emulator has no model for. Counted unconditionally, not
