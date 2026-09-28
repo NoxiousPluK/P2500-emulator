@@ -147,15 +147,41 @@ fi
 
 if [ -x ./p2500-gui ]; then
     echo "== 7. The SDL3 front-end boots headless"
+    # A stale p2500-gui once passed this whole section while the library
+    # under it had moved on by hours, so check the binary is actually newer
+    # than what it links against. `make test` now depends on the GUI too, but
+    # this script can be run on its own.
+    if [ ./p2500-gui -nt libp2500.a ]; then
+        pass "p2500-gui is newer than libp2500.a"
+    else fail "p2500-gui is STALE - rebuild it (make gui)"; fi
     if SDL_VIDEODRIVER=dummy ./p2500-gui --disk "$DISK" --frames 400 \
            --screenshot "$TMP/gui.ppm" >"$TMP/gui.log" 2>&1 &&
        [ -s "$TMP/gui.ppm" ]; then
         pass "p2500-gui ran 400 fields and rendered"
     else fail "p2500-gui failed headless"; fi
-    if cmp -s "$TMP/gui.ppm" "$TMP/screen.ppm" ||
-       head -c 15 "$TMP/gui.ppm" | grep -q '640 288'; then
-        pass "GUI render geometry matches the CLI's"
-    else fail "GUI and CLI renders disagree"; fi
+    # Same pixel assertions the CLI render gets, so the front-end cannot
+    # drift away from the core renderer unnoticed.
+    python3 - "$TMP/gui.ppm" <<'PY' && pass "GUI pixel checks passed" || fail "GUI pixel checks failed"
+import sys
+d = open(sys.argv[1], 'rb').read()
+hdr = d.split(b'\n', 3)
+w, h = (int(v) for v in hdr[1].split())
+px = d[len(b'\n'.join(hdr[:3])) + 1:]
+def lit(x, y):
+    o = (y * w + x) * 3
+    return px[o + 1] > 0x80
+ok = True
+def check(cond, why):
+    global ok
+    if not cond:
+        print("    GUI check failed: " + why); ok = False
+check((w, h) == (640, 288), "wrong geometry %dx%d" % (w, h))
+check(sum(1 for y in range(h) for x in range(w) if lit(x, y)) > 400,
+      "screen essentially blank - the front-end rendered nothing")
+check(any(lit(5 * 8 + x, y) for x in range(8) for y in (8, 9)),
+      "no descender under the 'p' of Philips")
+sys.exit(0 if ok else 1)
+PY
 else
     echo "== 7. SDL3 front-end - skipped (run 'make gui' to build it)"
 fi

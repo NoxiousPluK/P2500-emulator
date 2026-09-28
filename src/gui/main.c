@@ -28,6 +28,7 @@
 #include "core/video.h"
 
 #define SCALE_DEFAULT 2
+#define MAX_PUSHES 8
 
 typedef struct {
     P2500Machine m;
@@ -40,6 +41,12 @@ typedef struct {
     unsigned long frames;
     unsigned long frame_limit;   /* 0 = run until the user quits */
     const char *shot_path;       /* write a PPM and exit, for headless checks */
+    /* Scripted keystrokes, identical in effect to a real keypress - they go
+     * through p2500_keyboard_push like SDL_EVENT_TEXT_INPUT does. Present so
+     * the front-end can be driven to a real application with no display,
+     * which is what makes a GUI-vs-CLI render comparison possible. */
+    struct { unsigned long at_ms; const char *text; bool done; } push[MAX_PUSHES];
+    int pushes;
     bool paused;
     bool turbo;
 } App;
@@ -132,6 +139,9 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[]) {
     int scale = SCALE_DEFAULT;
     unsigned long frame_limit = 0;
     const char *shot_path = NULL;
+    unsigned long push_at[MAX_PUSHES] = {0};
+    const char *push_text[MAX_PUSHES] = {0};
+    int npush = 0;
 
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--rom") && i + 1 < argc) rom = argv[++i];
@@ -140,9 +150,18 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[]) {
         else if (!strcmp(argv[i], "--scale") && i + 1 < argc) scale = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--frames") && i + 1 < argc) frame_limit = strtoul(argv[++i], NULL, 0);
         else if (!strcmp(argv[i], "--screenshot") && i + 1 < argc) shot_path = argv[++i];
+        else if (!strcmp(argv[i], "--push-at") && i + 1 < argc && npush < MAX_PUSHES) {
+            char *arg = argv[++i], *colon = strchr(arg, ':');
+            if (!colon) { SDL_Log("bad --push-at, want MS:STRING"); return SDL_APP_FAILURE; }
+            *colon = '\0';
+            push_at[npush] = strtoul(arg, NULL, 0);
+            push_text[npush] = colon + 1;
+            npush++;
+        }
         else {
             SDL_Log("usage: p2500-gui [--rom path] [--charrom path] [--disk path] [--scale N]\n"
-                    "                 [--frames N] [--screenshot out.ppm]");
+                    "                 [--frames N] [--screenshot out.ppm]\n"
+                    "                 [--push-at MS:STRING ...]");
             return SDL_APP_FAILURE;
         }
     }
@@ -154,6 +173,11 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[]) {
 
     app->frame_limit = frame_limit;
     app->shot_path = shot_path;
+    app->pushes = npush;
+    for (int i = 0; i < npush; i++) {
+        app->push[i].at_ms = push_at[i];
+        app->push[i].text = push_text[i];
+    }
     p2500_init(&app->m);
     if (!p2500_load_rom(&app->m, rom)) {
         SDL_Log("failed to load boot ROM from %s", rom);
@@ -223,6 +247,20 @@ SDL_AppResult SDL_AppEvent(void *appstate, SDL_Event *event) {
 
 SDL_AppResult SDL_AppIterate(void *appstate) {
     App *app = appstate;
+
+    for (int i = 0; i < app->pushes; i++) {
+        if (app->push[i].done) continue;
+        if (app->m.cpu.cyc < app->push[i].at_ms * (P2500_CPU_HZ / 1000u)) continue;
+        for (const char *c = app->push[i].text; *c; c++) {
+            uint8_t b = (uint8_t)*c;
+            if (b == '\\' && c[1]) {
+                c++;
+                b = (*c == 'r') ? 0x0D : (*c == 'n') ? 0x0A : (*c == 't') ? 0x09 : (uint8_t)*c;
+            }
+            p2500_keyboard_push(&app->m.keyboard, b);
+        }
+        app->push[i].done = true;
+    }
 
     if (!app->paused) {
         unsigned long budget = P2500_TSTATES_PER_FRAME;

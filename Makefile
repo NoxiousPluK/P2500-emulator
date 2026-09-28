@@ -44,7 +44,14 @@ DEPS = $(CORE_OBJ:.o=.d) $(CLI_OBJ:.o=.d) $(GUI_OBJ:.o=.d)
 
 .PHONY: all clean run test gui
 
-all: $(BIN)
+# The GUI is part of the default build whenever SDL3 is present. It must be,
+# because tools/run_tests.sh tests ./p2500-gui if it exists: leaving it out of
+# `all` meant a stale binary from an earlier build was silently tested - and
+# passed - while the library under it had moved on. A headless machine with no
+# SDL3 still builds and still runs the suite; it just skips the GUI checks.
+GUI_IF_AVAILABLE = $(if $(HAVE_SDL3),$(GUI))
+
+all: $(BIN) $(GUI_IF_AVAILABLE)
 
 $(LIB): $(CORE_OBJ)
 	$(AR) rcs $@ $^
@@ -73,5 +80,5 @@ clean:
 run: $(BIN)
 	./$(BIN) --rom roms/ipl.bin
 
-test: $(BIN)
+test: $(BIN) $(GUI_IF_AVAILABLE)
 	@tools/run_tests.sh

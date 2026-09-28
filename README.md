@@ -32,8 +32,7 @@ P2000B and P2500 are the same hardware under different case colours
 ## Building
 
 ```
-make        # libp2500.a + p2500-emu, the headless harness
-make gui    # p2500-gui, needs SDL3
+make        # libp2500.a, p2500-emu, and p2500-gui if SDL3 is present
 make test   # the regression suite
 ```
 
@@ -68,8 +67,10 @@ being hardcoded, so the window follows whatever the guest programs.
 
 `--scale N` sets the initial zoom; the window is resizable and letterboxes
 with integer scaling rather than stretching. `--frames N --screenshot f.ppm`
-runs a fixed number of video fields and saves what is on screen, which is
-how the front-end is tested with no display.
+runs a fixed number of video fields and saves what is on screen, and
+`--push-at MS:STRING` scripts keystrokes — together they let the front-end
+be driven to a real application and compared against the CLI with no display
+involved. Driven to SuperCalc2, the two renders are byte-identical.
 
 ## Running
 
