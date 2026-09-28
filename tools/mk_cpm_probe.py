@@ -4,16 +4,28 @@ Build a tiny CP/M .COM that prints one string, for probing screen behaviour.
 
 The P2500's control codes can only be settled by making the machine execute
 them, and no surviving program exercises most of them. This emits the
-smallest thing that can: a nine-byte BDOS "print string" call followed by
-whatever bytes you asked for. Pair it with tools/cpm_build.py to get a
+smallest thing that can: a byte-at-a-time BDOS console-output loop followed
+by whatever bytes you asked for. Pair it with tools/cpm_build.py to get a
 bootable disk, run it, and read the result out of --dump-vram-attr.
 
+Function 2 one byte at a time rather than function 9's "print string",
+because function 9 stops at a '$' - and a graphics set-point command carries
+raw coordinates, one of which is $24. A probe that cannot say "x = 36" is
+not much of a probe.
+
     ORG $0100
-    ld de,msg
-    ld c,9          ; BDOS 9, print string
-    call $0005
-    ret             ; back to the CCP
-    msg: ...,'$'
+    ld hl,msg
+    ld bc,len
+    loop: ld e,(hl)
+          push hl / push bc
+          ld c,2          ; BDOS 2, console output
+          call $0005
+          pop bc / pop hl
+          inc hl / dec bc
+          ld a,b / or c
+          jr nz,loop
+    ret                   ; back to the CCP
+    msg: ...
 
 usage:
     tools/mk_cpm_probe.py OUT.COM 'text with \\e and \\xHH escapes'
@@ -53,17 +65,33 @@ def unescape(s: str) -> bytes:
     return bytes(out)
 
 
+PREFIX_LEN = 0x17   # msg starts here; see the listing above
+
+
 def build(message: bytes) -> bytes:
-    # BDOS 9 stops at '$', so the message may not contain one.
-    if b"$" in message:
-        raise SystemExit("BDOS function 9 terminates on '$' - the message cannot contain one")
-    msg_addr = ORG + 9
+    if not message:
+        raise SystemExit("nothing to print")
+    if len(message) > 0xFFFF:
+        raise SystemExit("message too long")
+    msg = ORG + PREFIX_LEN
+    n = len(message)
     return bytes([
-        0x11, msg_addr & 0xFF, msg_addr >> 8,   # ld de,msg
-        0x0E, 0x09,                             # ld c,9
+        0x21, msg & 0xFF, msg >> 8,             # ld hl,msg
+        0x01, n & 0xFF, n >> 8,                 # ld bc,len
+        0x5E,                                   # loop: ld e,(hl)
+        0xE5,                                   # push hl
+        0xC5,                                   # push bc
+        0x0E, 0x02,                             # ld c,2   (console output)
         0xCD, BDOS & 0xFF, BDOS >> 8,           # call $0005
+        0xC1,                                   # pop bc
+        0xE1,                                   # pop hl
+        0x23,                                   # inc hl
+        0x0B,                                   # dec bc
+        0x78,                                   # ld a,b
+        0xB1,                                   # or c
+        0x20, 0xF0,                             # jr nz,loop
         0xC9,                                   # ret
-    ]) + message + b"$"
+    ]) + message
 
 
 def main():

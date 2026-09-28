@@ -686,6 +686,54 @@ sys.exit(0)
 PY
 fi
 
+echo "== 11. High-resolution graphics mode (TODO.md T47)"
+# Driven through CBIOS's own set-point call, so what is being checked is the
+# whole path: ESC 3 reprograms the CRTC, the firmware computes an address and
+# a bit, and the renderer turns that back into the pixel the program asked
+# for. The pattern is an L plus one far dot - asymmetric in both axes, so a
+# transpose or a flip cannot pass it.
+python3 - >"$TMP/gfx.seq" <<'PY'
+seq = '\\e3'
+pts  = [(x, 0) for x in range(0, 9)] + [(x, 0) for x in range(10, 21)]
+pts += [(0, y) for y in range(1, 9)] + [(0, y) for y in range(10, 16)]
+pts += [(100, 100)]
+# $09 in a coordinate is eaten as a TAB by the console path - measured, and
+# the reason the runs above skip 9.
+for x, y in pts:
+    seq += '\\x01\\x%02x\\x%02x\\x%02x' % (x & 0xFF, x >> 8, y)
+print(seq)
+PY
+python3 tools/mk_cpm_probe.py "$TMP/GFX.COM" "$(cat "$TMP/gfx.seq")" >/dev/null
+python3 tools/cpm_build.py "$TMP/gfx.raw" "$TMP/GFX.COM:G.COM" --boot-from "$DISK" >/dev/null 2>&1
+$EMU --disk "$TMP/gfx.raw" --max-steps 25000000 --type-at '4000:g\r' \
+     --dump-screen "$TMP/gfx.ppm" --state >"$TMP/gfx.log" 2>&1
+if grep -q 'HIGH-RESOLUTION GRAPHICS' "$TMP/gfx.log"; then
+    pass "ESC 3 puts port \$0A in graphics mode"
+else fail "ESC 3 did not select graphics mode"; fi
+# The resolution is not asserted as a constant anywhere - it falls out of the
+# CRTC registers CBIOS programs on the way in.
+if grep -q '512 x 256 px' "$TMP/gfx.log"; then
+    pass "CBIOS reprograms the CRTC to 512 x 256"
+else fail "graphics geometry is not 512 x 256"; fi
+python3 - "$TMP/gfx.ppm" <<'PY' && pass "set points render where the program put them" || fail "graphics pixels are in the wrong place"
+import sys
+d = open(sys.argv[1], 'rb').read()
+hdr = d.split(b'\n', 3)
+w, h = (int(v) for v in hdr[1].split())
+px = d[len(b'\n'.join(hdr[:3])) + 1:]
+def lit(x, y):
+    return px[((y * w) + x) * 3 + 1] > 0x80
+ok = (w, h) == (512, 256)
+if not ok:
+    print("    wrong geometry %dx%d" % (w, h))
+for (x, y), want in [((4, 0), True), ((18, 0), True), ((0, 4), True), ((0, 14), True),
+                     ((100, 100), True),
+                     ((4, 4), False), ((50, 50), False), ((30, 0), False), ((0, 30), False)]:
+    if lit(x, y) != want:
+        print("    (%d,%d) is %s, wanted %s" % (x, y, lit(x, y), want)); ok = False
+sys.exit(0 if ok else 1)
+PY
+
 echo
 if [ "$fails" -eq 0 ]; then echo "All checks passed."; exit 0; fi
 echo "$fails check(s) failed."

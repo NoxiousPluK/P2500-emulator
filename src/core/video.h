@@ -48,10 +48,18 @@ extern "C" {
 #define P2500_ATTR_REVERSE   0x04 /* ESC 0 parameter bit 4 */
 #define P2500_ATTR_FLASH     0x08 /* ESC 0 parameter bit 1 */
 
+/* Port $0A bit 6 selects high-resolution graphics (TODO.md T47). */
+#define P2500_PORT0A_GRAPHICS 0x40
+
 typedef struct {
     int cols, rows;   /* character grid, from R1 and R6 */
     int cell_h;       /* scanlines per row, from R9 + 1 */
     int width, height;/* framebuffer size in pixels */
+    /* High-resolution graphics: one bit per pixel out of the same 16K, with
+     * no character ROM in the path. CBIOS reprograms the CRTC on the way in
+     * (64 x 64 cells of 4 scanlines), so the 512 x 256 the manual documents
+     * falls out of `width`/`height` rather than being asserted here. */
+    bool graphics;
 } P2500VideoInfo;
 
 /* Geometry the CRTC is currently programmed for. Falls back to 80x24x12 if

@@ -71,14 +71,48 @@ def demo_attribute_plane(vram: bytes) -> bytes:
     return bytes(plane)
 
 
+# High-resolution graphics: 512 x 256, one bit per pixel, out of the same
+# 16K (TODO.md T47). The layout is not a linear framebuffer - the CRTC's
+# raster address is wired to address bits 12-13, so it picks one of four 4K
+# banks and the memory address indexes within a bank:
+#
+#     addr = (y % 4) * 4096 + (y // 4) * 64 + x // 8,  bit = 7 - x % 8
+#
+# Matches p2500_video_render()'s graphics path; a dump has no mode flag in
+# it, so the caller says --graphics.
+GFX_W, GFX_H, GFX_COLS, GFX_CELL_H = 512, 256, 64, 4
+
+
+def render_graphics(vram: bytes, out_path: Path) -> None:
+    bank = 0x4000 // 4
+    img = Image.new("RGB", (GFX_W * PX, GFX_H * PX), BG)
+    px = img.load()
+    for y in range(GFX_H):
+        base = (y % GFX_CELL_H) * bank + (y // GFX_CELL_H) * GFX_COLS
+        for x in range(GFX_W):
+            addr = base + (x >> 3)
+            if addr >= len(vram):
+                continue
+            if vram[addr] & (0x80 >> (x & 7)):
+                for sy in range(PX):
+                    for sx in range(PX):
+                        px[x * PX + sx, y * PX + sy] = FG
+    img.save(out_path)
+    print(f"wrote {out_path} ({GFX_W}x{GFX_H} graphics mode)")
+
+
 def main() -> None:
     if len(sys.argv) < 2:
-        print(f"usage: {sys.argv[0]} <vram_dump.bin> [out.png]")
+        print(f"usage: {sys.argv[0]} <vram_dump.bin> [out.png] "
+              "[--graphics] [--attr FILE] [--demo-attrs]")
         raise SystemExit(1)
     args = sys.argv[1:]
     demo_attrs = "--demo-attrs" in args
     if demo_attrs:
         args.remove("--demo-attrs")
+    graphics = "--graphics" in args
+    if graphics:
+        args.remove("--graphics")
     attr_path = None
     if "--attr" in args:
         i = args.index("--attr")
@@ -87,8 +121,11 @@ def main() -> None:
     vram_path = Path(args[0])
     out_path = Path(args[1]) if len(args) > 1 else vram_path.with_suffix(".png")
 
-    rom = ROM_PATH.read_bytes()
     vram = vram_path.read_bytes()
+    if graphics:
+        render_graphics(vram, out_path)
+        return
+    rom = ROM_PATH.read_bytes()
     attrs = attr_path.read_bytes() if attr_path else b""
     if demo_attrs:
         attrs = demo_attribute_plane(vram)

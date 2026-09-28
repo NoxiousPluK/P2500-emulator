@@ -40,7 +40,7 @@ make test   # the regression suite
 
 `make` needs a C11 compiler; the GUI additionally needs SDL3 (`extra/sdl3`
 on Arch) and a C++17 compiler, and Dear ImGui is vendored. The core stays
-dependency-free so `make test` runs with no display at all: **62 checks**,
+dependency-free so `make test` runs with no display at all: **65 checks**,
 exit 1 on any failure. The GUI checks skip themselves if SDL3 is absent.
 
 ## Running it as a machine
@@ -52,7 +52,10 @@ exit 1 on any failure. The GUI checks skip themselves if SDL3 is absent.
 
 Boots to `A>` in a window. Geometry, cursor position and cursor shape all
 come from the MC6845's registers, so the display follows whatever the guest
-programs.
+programs — including the switch to **512 × 256 high-resolution graphics**,
+which CBIOS makes by reprogramming the CRTC to 64 × 64 cells of 4 scanlines.
+Nothing in the emulator asserts that resolution; it falls out of the
+registers.
 
 | Key | |
 |---|---|
@@ -287,7 +290,9 @@ window, pacing, input and menu bar; `panels.cpp` is the debugger)
 
 - `run_tests.sh` — the suite behind `make test`
 - `render_vram.py` — video-RAM-dump-to-PNG, 8×12 cells and attributes;
-  `--demo-attrs` synthesises an attribute plane
+  `--demo-attrs` synthesises an attribute plane, `--graphics` renders a
+  512×256 bitmap dump. Agrees with the core renderer on every one of the
+  131,072 pixels, which is the point of having two
 - `disasm_ram.sh` — disassembles a `--dump-ram` image at real addresses
 - `cpm_build.py` — builds a P2500 CP/M image from host files, bootable with
   `--boot-from`. Verifies every build by reading it back through the

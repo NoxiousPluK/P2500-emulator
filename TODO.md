@@ -19,7 +19,7 @@ SuperCalc2 (an OEM build whose splash reads `PHILIPS P2000`) loads from
 `P25K_S` and opens files; MBASIC-80 runs from `P25TEST`; `VALLEY.BAS` runs
 off drive B with working screen attributes. Three of nine disk images boot.
 
-`make test` is the proof and the guard: 62 checks, exit 1 on any failure.
+`make test` is the proof and the guard: 65 checks, exit 1 on any failure.
 
 ```
 make                 # libp2500.a, p2500-emu, and p2500-gui if SDL3 is present
@@ -190,36 +190,47 @@ What is left in this phase is T34, which is also the fourth panel.
 
 ---
 
-## P2 — The rest of the video hardware
+## P2 — The rest of the video hardware *(complete)*
 
-The character path is complete. The graphics path is documented and
-entirely unimplemented.
+Both paths are complete. The character path renders through the character
+ROM; the graphics path renders one bit per pixel out of the same 16 KB,
+with the layout derived from the firmware rather than guessed.
 
-- [ ] **T47. High-resolution graphics mode.** Fully specified by the P2219
-  manual and by CBIOS, so this is implementation rather than research:
-  - **512 × 256 dots**, one bit each, mapped dot-to-bit in video memory.
-    131,072 bits = exactly the 16 KB the eight character-code planes hold.
-  - **Port `$0A` bit 6 is the mode select.** `ESC 3` → `$F1E3` writes `$40`
-    there; `ESC 4` → `$F1FB` ends it. The manual: the modes cannot be mixed
-    "as the high resolution graphic mode causes a different initialization
-    of the video controller" — so expect the CRTC to be reprogrammed, and
-    `p2500_video_info()` must follow it.
-  - The character screen is 640 × 288, so the graphics screen is *smaller*.
-  - Dots are set and cleared through the video driver's write call as four
-    bytes `FC | xL | xH | y`, `FC` 0 = clear, 1 = set. CBIOS turns that into
-    `OR (HL)` / `AND (HL)` templates in its generated-code queue (`$F33E`).
+- [x] **T47. High-resolution graphics mode.** Done, and every part of it
+  measured rather than assumed. `ESC 3` already worked end to end before any
+  of this — CBIOS writes `$40` to port `$0A` *and reprograms the CRTC* to
+  64 × 64 cells of 4 scanlines, so `p2500_video_info()` reported
+  **512 × 256** on its own. The documented resolution was never asserted
+  anywhere; it falls out of the registers the firmware programs.
 
-  `p2500_video_render()` needs a second path keyed on the mode bit, and
-  `tools/render_vram.py` the same. Nothing exercises it yet: no surviving
-  program is known to enter graphics mode, so **write a probe** (an MBASIC
-  one-liner emitting `ESC 3`, some set-point sequences, `ESC 4`) the way the
-  attribute alphabet was verified.
+  **The layout, derived by driving CBIOS's own set-point call and reading
+  back where it wrote:**
 
-  Check while here whether the mosaic mode `ESC 1`/`ESC 2` selects needs
-  anything from the emulator. Current reading: it does not — mosaic is
-  CBIOS choosing block-graphic character codes, and the character ROM has no
-  second glyph bank to switch to (256 codes × 16 bytes fills it exactly).
-  Confirm rather than assume.
+  ```
+  addr = (y % 4) * 4096 + (y / 4) * 64 + x / 8      bit = 7 - (x % 8)
+  ```
+
+  Not a linear framebuffer. The MC6845's raster address is wired to address
+  bits 12–13, so it selects one of four 4 KB banks and the CRTC's own memory
+  address indexes within a bank. **That wiring is why CBIOS programs R9 to
+  3** — four scanlines per row is all two bits of raster address can reach,
+  and 4 × 4096 = the whole 16 KB = 512 × 256 bits exactly.
+
+  Verified at both ends of both axes (x = 0, 1, 8, 16, 504, 511; y = 0–8,
+  10–13, 32, 33, 255) and for all four raster addresses. Rendering is
+  cross-checked between `p2500_video_render()` and `tools/render_vram.py
+  --graphics`: **0 of 131,072 pixels disagree** on a full-screen diagonal.
+
+  **Mosaic (`ESC 1`/`ESC 2`) needs nothing**, now confirmed rather than
+  assumed: port `$0A` stays `$00` across both, and the character codes land
+  in video RAM untranslated. Whatever code CBIOS decides to store is
+  rendered through the same 256-glyph ROM, so the emulator is correct by
+  construction either way.
+
+  **One measured quirk of the interface**: a coordinate byte of `$09` is
+  eaten by the console path's tab handling and arrives as `$20`, so a dot
+  meant for row 9 lands on row 32. Every other value 0–255 passes through,
+  `$0D` and `$0A` included. This is CBIOS's, not the video card's.
 
 ---
 

@@ -22,6 +22,7 @@ void p2500_video_info(const P2500Machine *m, P2500VideoInfo *info) {
     info->cell_h = cell_h;
     info->width = cols * P2500_CELL_W;
     info->height = rows * cell_h;
+    info->graphics = (m->port0a_latch & P2500_PORT0A_GRAPHICS) != 0;
 }
 
 static int crtc_start_addr(const P2500Machine *m) {
@@ -52,6 +53,46 @@ void p2500_video_render(const P2500Machine *m, const P2500Palette *pal,
     p2500_video_info(m, &info);
 
     const int start = crtc_start_addr(m);
+
+    if (info.graphics) {
+        /*
+         * One bit per pixel, MSB leftmost, out of the same 16K the character
+         * codes normally occupy - 512 x 256 = 131072 bits = 16384 bytes,
+         * exactly.
+         *
+         * The arrangement is the MC6845's, not a linear framebuffer: the
+         * raster address (which scanline of the cell row is being drawn)
+         * is wired to address bits 12-13, so it selects one of four 4K
+         * banks, and the CRTC's own memory address indexes within a bank.
+         * That wiring is why CBIOS programs R9 to 3 on the way in - four
+         * scanlines per row is all two bits of raster address can reach.
+         *
+         *     addr = (y % cell_h) * 4096 + (y / cell_h) * cols + x / 8
+         *     bit  = 7 - (x % 8)
+         *
+         * Derived by driving CBIOS's own set-point call and reading back
+         * where it wrote (TODO.md T47), at both ends of both axes and for
+         * every raster address - not from the manual, which gives the
+         * resolution but not the layout.
+         */
+        const int bank = P2500_VRAM_SIZE / 4;
+        for (int y = 0; y < info.height; y++) {
+            const int ra = (y % info.cell_h) & 3;
+            const int cellrow = y / info.cell_h;
+            uint32_t *out = fb + (size_t)y * pitch_px;
+            for (int x = 0; x < info.width; x++) {
+                /* The start address offsets the CRTC's address only - the
+                 * bank select is a hardware line, not part of MA. Every
+                 * dump seen so far has start = 0, so the placement of
+                 * `start` here is reasoned, not observed. */
+                const int ma = (start + cellrow * info.cols + (x >> 3)) & (bank - 1);
+                const uint8_t bits = m->vram[ra * bank + ma];
+                out[x] = (bits & (0x80 >> (x & 7))) ? pal->fg : pal->bg;
+            }
+        }
+        return;
+    }
+
     const int cursor_cell = p2500_video_cursor_cell(m);
     const bool cursor_lit = cursor_visible(m, blink_on);
     const int cur_first = m->crtc_regs[10] & 0x1F;
