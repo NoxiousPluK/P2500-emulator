@@ -193,7 +193,7 @@ static void draw_memory(P2500Panels &p, const P2500Machine &m, P2500Debug &dbg)
     ImGui::EndChild();
 
     ImGui::Separator();
-    ImGui::TextDisabled("Watches - reported to the event log when they change");
+    ImGui::TextDisabled("Watches - reported to the log when they change");
     uint16_t addr = 0;
     if (addr_input("add watch", p.watch_entry, sizeof p.watch_entry, &addr)) {
         p2500_debug_add_watch(&dbg, addr, 1);
@@ -307,7 +307,7 @@ static void draw_disasm(P2500Panels &p, const P2500Machine &m, P2500Debug &dbg,
 }
 
 /* ------------------------------------------------------------------------ *
- *  Event log
+ *  Log
  * ------------------------------------------------------------------------ */
 static void draw_log(P2500Panels &p)
 {

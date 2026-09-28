@@ -59,7 +59,7 @@ programs.
 | Ctrl+letter | `^A`–`^Z`, so Ctrl-C warm-boots CP/M |
 | Ctrl+O / Ctrl+R / Ctrl+Q | load disk / reset / quit |
 | F10 / F11 / F12 | screenshot (BMP) / turbo / pause |
-| F1 / F2 / F3 / F4 | device state / memory / disassembly / event log |
+| F1 / F2 / F3 / F4 | device state / memory / disassembly / log |
 
 **File** menu: Load Disk A/B/C, Reset, Pause, Screenshot, Quit. **Machine**
 menu: capitals lock. **Debug** menu: the four panels below. All drawn by Dear
@@ -101,7 +101,7 @@ away from what the harness reports.
   latch. "Copy all" puts the same text `--state` prints on the clipboard.
 - **Memory** (F2) — bank-aware through `p2500_peek`, with the video
   character and attribute planes as separate views, and watches that report
-  to the event log when they change.
+  to the log when they change.
 - **Disassembly** (F3) — around PC, with a clickable breakpoint gutter and
   Step / Step 100 / Step field. Forwards from an anchor only: a Z80 stream
   cannot be decoded backwards, and guessing would show confident nonsense.
