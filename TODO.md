@@ -694,6 +694,46 @@ the `.IMD` originals with `cpmtools` if research needs them.
   repeatedly by `$ECD3`, while slot `$EC2A` (device id 4, `B=4`) is posted
   at step 1,019,307 and never signalled again.
 
+  **Progress 2026-09-28, from comparing the two builds statically.** This
+  became possible because **`.PHI` files extract to memory-mapped images** —
+  a 6-byte header `[load][end][third]` then the body, loading at `load`.
+  Verified: `P25K_B`'s `SYSCBI.PHI` offset 6 is byte-for-byte the `$E200`
+  block of a live RAM dump. That retires this project's standing claim that
+  the `.phi` files are "sector-interleaved, so the `org 0` listings have no
+  usable addresses" — they were only unusable because the old extractor
+  ignored the sector skew. Any disk's CBIOS/PBIOS can now be read without
+  booting it.
+
+  | | P25K_B | P25K_G |
+  |---|---|---|
+  | `SYSCBI.PHI` | `$E200`–`$EABE` | `$E200`–`$E833` (much smaller) |
+  | `SYSPBI.PHI` | loads at **`$EAC0`** | loads at **`$EB80`** |
+  | `SYSLOAD.PHI` | identical on both | |
+
+  The `$C0` shift explains the addresses: P25K_G's blocked loop at `$EBC2`
+  is P25K_B's `$EB02` — the *same routine*, and where the old ISSUE-5
+  deadlock sat.
+
+  **The blocked slot is the disk, not a keyboard or clock device.** The
+  device table (`$EB56` on B, `$EC16` on G) decodes to **8 entries on
+  P25K_B** — `$31` console-out, `$30`, `$00`–`$03` all sharing one disk
+  driver (`$F7A7`), `$40`, `$FF` — and **6 on P25K_G**, the same minus
+  `$02`/`$03`: two drive units rather than four, disk driver at `$F82A`.
+  T42's `$EC2A` is the record shared by ids `$00`/`$01`, i.e. the **disk
+  device**. The earlier "device id 4 / 5" reading was wrong.
+
+  **What the hang looks like now.** The last disk read succeeds (`READ DATA
+  C=47 R=13`, result all zeros, 82 DMA transfers), then the driver issues
+  `SPECIFY`, a `SENSE INTERRUPT STATUS` that correctly returns Invalid
+  Command, and a `SENSE DRIVE STATUS` returning ST3 `$20` (ready) — then
+  waits forever. **That is the same shape as T43's diskless hang**: SPECIFY
+  + SIS, then a wait only an FDC interrupt can release, with no unsolicited
+  interrupts left in the model. So T42 may be an instance of T43 rather than
+  its own bug. **Not established** — the obvious experiment (letting the
+  synthetic post-reset interrupt keep firing) is invalid, breaking the IPL
+  at `$0AC7` long before CP/M loads. Settling it needs T43's drive-ready
+  polling work.
+
   Ruled out: **not** the keyboard (`--type` delivers and CTC ch3
   acknowledges 4 of 4, with no effect), not SESAM, not the clock (ch2 fires
   3451 times). One traced hardware difference worth noting: this build
