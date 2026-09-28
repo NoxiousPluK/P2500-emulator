@@ -19,7 +19,7 @@ SuperCalc2 (an OEM build whose splash reads `PHILIPS P2000`) loads from
 `P25K_S` and opens files; MBASIC-80 runs from `P25TEST`; `VALLEY.BAS` runs
 off drive B with working screen attributes. Three of nine disk images boot.
 
-`make test` is the proof and the guard: 65 checks, exit 1 on any failure.
+`make test` is the proof and the guard: 69 checks, exit 1 on any failure.
 
 ```
 make                 # libp2500.a, p2500-emu, and p2500-gui if SDL3 is present
@@ -226,6 +226,13 @@ with the layout derived from the firmware rather than guessed.
   in video RAM untranslated. Whatever code CBIOS decides to store is
   rendered through the same 256-glyph ROM, so the emulator is correct by
   construction either way.
+
+  **Three demos exercise it** (`demos/`, `make demos`): a bouncing P2000
+  wordmark, a starfield, and a Lissajous plotter. They write video memory
+  directly through the port `$05` window rather than through CBIOS's
+  set-point call, which is about four hundred times too slow to animate —
+  so they are also an independent check on the layout above, arrived at from
+  the guest's side rather than the emulator's.
 
   **One measured quirk of the interface**: a coordinate byte of `$09` is
   eaten by the console path's tab handling and arrives as `$20`, so a dot

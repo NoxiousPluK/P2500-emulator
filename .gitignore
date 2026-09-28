@@ -7,3 +7,5 @@ libp2500.a
 p2500-gui
 tools/__pycache__/
 assets/
+demos/*.COM
+demos/*.raw

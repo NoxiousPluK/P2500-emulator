@@ -54,7 +54,7 @@ CLI_OBJ = $(CLI_SRC:.c=.o)
 GUI_OBJ = $(GUI_SRC:.cpp=.o)
 DEPS = $(CORE_OBJ:.o=.d) $(CLI_OBJ:.o=.d) $(GUI_OBJ:.o=.d) $(IMGUI_OBJ:.o=.d)
 
-.PHONY: all clean run test gui
+.PHONY: all clean run test gui demos
 
 # The GUI is part of the default build whenever SDL3 is present. It must be,
 # because tools/run_tests.sh tests ./p2500-gui if it exists: leaving it out of
@@ -87,8 +87,27 @@ $(IMGUI_DIR)/%.o: $(IMGUI_DIR)/%.cpp
 %.o: %.c
 	$(CC) $(CFLAGS) -c -o $@ $<
 
+# The graphics demos (TODO.md T47). Assembled by tools/z80asm.py, which
+# verifies its own output against the disassembler in libp2500, and packaged
+# by tools/cpm_build.py onto a bootable image. Not part of `all`: it needs a
+# donor disk for the CP/M system files, which lives outside the repo.
+DEMO_ASM = demos/logo.asm demos/stars.asm demos/spiro.asm
+DEMO_COM = $(DEMO_ASM:.asm=.COM)
+DEMO_DISK = demos/P2500DEMO.raw
+BOOT_DONOR ?= ../Disk Images/extracted/P25K_B/P25K_B.raw
+
+demos: $(DEMO_DISK)
+
+demos/%.COM: demos/%.asm demos/p2500.inc demos/logo_sprite.asm tools/z80asm.py $(BIN)
+	python3 tools/z80asm.py $< -o $@ --verify
+
+$(DEMO_DISK): $(DEMO_COM) tools/cpm_build.py
+	@test -f "$(BOOT_DONOR)" || { echo "need a bootable P2500 image: BOOT_DONOR=path make demos"; exit 1; }
+	python3 tools/cpm_build.py $@ $(DEMO_COM) --boot-from "$(BOOT_DONOR)"
+
 clean:
 	rm -f $(BIN) $(GUI) $(LIB) $(CORE_OBJ) $(CLI_OBJ) $(GUI_OBJ) $(IMGUI_OBJ) $(DEPS)
+	rm -f $(DEMO_COM) $(DEMO_DISK)
 
 -include $(DEPS)
 

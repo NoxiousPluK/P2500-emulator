@@ -734,6 +734,89 @@ for (x, y), want in [((4, 0), True), ((18, 0), True), ((0, 4), True), ((0, 14), 
 sys.exit(0 if ok else 1)
 PY
 
+echo "== 12. The graphics demos (demos/)"
+# The whole chain: assemble with tools/z80asm.py, which verifies its own
+# encodings against the disassembler; package onto a bootable image with
+# cpm_build.py; boot it and run one. A demo drawing the right thing is a
+# stronger statement about the graphics layout than any probe, because it
+# writes video memory directly rather than through CBIOS - so the emulator's
+# renderer and the layout in demos/p2500.inc have to agree independently.
+demo_ok=yes
+for src in demos/logo.asm demos/stars.asm demos/spiro.asm; do
+    if ! python3 tools/z80asm.py "$src" -o "$TMP/$(basename "$src" .asm).COM" --verify \
+            >"$TMP/asm.log" 2>&1; then
+        fail "$src did not assemble and verify"
+        sed 's/^/    /' "$TMP/asm.log" | head -6
+        demo_ok=no
+    fi
+done
+[ "$demo_ok" = yes ] && pass "all three demos assemble and round-trip through the disassembler"
+
+if [ "$demo_ok" = yes ]; then
+    python3 tools/cpm_build.py "$TMP/demo.raw" "$TMP/logo.COM:LOGO.COM" \
+        "$TMP/stars.COM:STARS.COM" "$TMP/spiro.COM:SPIRO.COM" \
+        --boot-from "$DISK" >"$TMP/demobuild.log" 2>&1
+    $EMU --disk "$TMP/demo.raw" --max-steps 8000000 --type-at '4000:dir\r' \
+         --dump-vram "$TMP/demodir.bin" >/dev/null 2>&1
+    screen "$TMP/demodir.bin" >"$TMP/demodir.screen"
+    if grep -q 'LOGO     COM' "$TMP/demodir.screen" &&
+       grep -q 'SPIRO    COM' "$TMP/demodir.screen"; then
+        pass "the demo disk boots and lists its programs"
+    else fail "the demo disk did not boot"; fi
+
+    # STARS draws exactly one pixel per star and erases the previous one, so
+    # a correct run shows close to 48 lit pixels - many fewer means it is not
+    # drawing, many more means the erase is missing and it is leaving trails.
+    $EMU --disk "$TMP/demo.raw" --max-steps 45000000 --type-at '4000:stars\r' \
+         --no-stuck-detect --dump-screen "$TMP/stars.ppm" >/dev/null 2>&1
+    python3 - "$TMP/stars.ppm" <<'PY' && pass "STARS draws a starfield and erases behind itself" || fail "STARS did not draw correctly"
+import sys
+d = open(sys.argv[1], 'rb').read()
+hdr = d.split(b'\n', 3)
+w, h = (int(v) for v in hdr[1].split())
+px = d[len(b'\n'.join(hdr[:3])) + 1:]
+lit = [(x, y) for y in range(h) for x in range(w)
+       if px[((y * w) + x) * 3 + 1] > 0x80]
+if (w, h) != (512, 256):
+    print("    wrong geometry %dx%d" % (w, h)); sys.exit(1)
+if not 30 <= len(lit) <= 60:
+    print("    %d lit pixels, wanted about 48 - trails or nothing drawn" % len(lit))
+    sys.exit(1)
+# They should be spread out, not clustered in one corner.
+if max(x for x, _ in lit) - min(x for x, _ in lit) < 200:
+    print("    stars are not spread across the screen"); sys.exit(1)
+sys.exit(0)
+PY
+
+    # LOGO is the only demo that walks down the screen a row at a time, so it
+    # is the only one that exercises next_row - the raster-bank wrap that
+    # makes row y+1 sometimes +$1000 and sometimes -12224. A fixed step count
+    # is deterministic here, and lands between blits rather than during one.
+    $EMU --disk "$TMP/demo.raw" --max-steps 40000000 --type-at '4000:logo\r' \
+         --no-stuck-detect --dump-screen "$TMP/logo.ppm" >/dev/null 2>&1
+    python3 - "$TMP/logo.ppm" <<'PY' && pass "LOGO blits the sprite whole, row stepping included" || fail "LOGO did not blit correctly"
+import sys
+d = open(sys.argv[1], 'rb').read()
+hdr = d.split(b'\n', 3)
+w, h = (int(v) for v in hdr[1].split())
+px = d[len(b'\n'.join(hdr[:3])) + 1:]
+def lit(x, y):
+    return px[((y * w) + x) * 3 + 1] > 0x80
+rows = [y for y in range(h) if any(lit(x, y) for x in range(w))]
+cols = [x for x in range(w) if any(lit(x, y) for y in range(h))]
+ok = True
+if len(rows) != 36:
+    print("    %d lit rows, the sprite is 36" % len(rows)); ok = False
+elif rows[-1] - rows[0] != 35:
+    print("    rows %d..%d are not contiguous - row stepping is wrong"
+          % (rows[0], rows[-1])); ok = False
+if not cols or cols[-1] - cols[0] + 1 != 106:
+    print("    column span %s, the sprite is 106 wide"
+          % (cols[-1] - cols[0] + 1 if cols else 0)); ok = False
+sys.exit(0 if ok else 1)
+PY
+fi
+
 echo
 if [ "$fails" -eq 0 ]; then echo "All checks passed."; exit 0; fi
 echo "$fails check(s) failed."

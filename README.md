@@ -30,6 +30,9 @@ both.
 - **`docs/porting-cpm-software.md`** — what it takes to move a CP/M program
   from another machine to this one. The binary runs unmodified; the screen
   control codes are what differ.
+- **`demos/`** — three graphics demos for the 512 × 256 mode, with their own
+  README on how the screen is actually laid out. `make demos` builds a
+  bootable disk.
 
 ## Building
 
@@ -40,7 +43,7 @@ make test   # the regression suite
 
 `make` needs a C11 compiler; the GUI additionally needs SDL3 (`extra/sdl3`
 on Arch) and a C++17 compiler, and Dear ImGui is vendored. The core stays
-dependency-free so `make test` runs with no display at all: **65 checks**,
+dependency-free so `make test` runs with no display at all: **69 checks**,
 exit 1 on any failure. The GUI checks skip themselves if SDL3 is absent.
 
 ## Running it as a machine
@@ -191,9 +194,16 @@ directory files (`SYSCPM.PHI`, `SYSCBI.PHI`, `SYSPBI.PHI`, `SYSLOAD.PHI`).
 A disk with the loader alone gets nowhere — `make test` asserts that in both
 directions.
 
-`tools/mk_cpm_probe.py` builds a nine-byte CP/M program that prints one
+`tools/mk_cpm_probe.py` builds a minimal CP/M program that prints one
 string, which is how the screen control codes get settled: put the sequence
 on a generated boot disk, run it, and read `--dump-vram-attr`.
+
+For anything larger there is `tools/z80asm.py`, a small assembler whose
+`--verify` disassembles its own output with `p2500-emu --disasm` and
+compares it against the source, instruction by instruction. The two were
+written from opposite directions, so an encoder bug has to survive a decoder
+with no reason to share it — which caught two real ones while the demos were
+being written.
 
 ## Validation
 
@@ -299,6 +309,10 @@ window, pacing, input and menu bar; `panels.cpp` is the debugger)
   extractor
 - `mk_cpm_probe.py` — builds a minimal CP/M `.COM` that prints one string,
   for probing screen behaviour no surviving program exercises
+- `z80asm.py` — a small Z80 assembler that checks its own encodings against
+  the disassembler in `libp2500.a`
+- `mk_sprite.py` — PNG to a pre-shifted 1-bit sprite, for smooth horizontal
+  motion in a byte-addressed framebuffer
 - `cpm_extract.py` — extracts files from a P2500 CP/M image. Necessary
   rather than convenient: the sector skew means a naive extractor reads half
   the disk from the wrong place. Derives the format from the image and then
