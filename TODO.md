@@ -83,6 +83,13 @@ vector at `$E1AD`** (the pair `$E1AF` is the login vector; the BDOS reset at
 That costs write access, not visibility. It has no observable consequence
 until T30 lands.
 
+**Largest loadable `.COM`: 405 records (51,840 bytes)**, on the 58K CP/M
+these disks carry. 406 records gets `BAD LOAD` from the CCP. The limit is
+the CCP's base at `$CC00`, not the BDOS base at `$D400` — CP/M refuses to
+overwrite the CCP while loading, though a running program may use that
+memory afterwards. Measured by bisection with
+`tools/mk_cpm_probe.py --pad-records N`.
+
 **Disk geometry.** The logical track number in each sector's ID field is
 **physical track + 1**. Sector skew within a track is `0,2,…,14,1,3,…,15`.
 `lba = (C - 1) * sectors + (R - 1)`. Up to four 5-inch drives (A:–D:);

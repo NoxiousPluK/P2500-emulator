@@ -91,6 +91,23 @@ nothing on screen — which is why a P2000M binary here loses its screen
 clears and its inverse video without complaining. The screen is 80×24 on
 both machines, so no layout changes are needed.
 
+## How big a program may be
+
+**405 records — 51,840 bytes.** A `.COM` of 406 records is rejected by
+CP/M's CCP with `BAD LOAD` before a single instruction of it runs.
+
+Measured, not computed: `tools/mk_cpm_probe.py --pad-records N` builds a
+program of an exact size, and a bisection over N on the 58K CP/M these disks
+carry puts the cutoff between 405 (runs) and 406 (`BAD LOAD`). The limit is
+the CCP's own base at `$CC00`, not the BDOS base at `$D400` — CP/M will not
+let a program overwrite the CCP *while loading*, even though a running
+program may use that memory afterwards. So the usable load region is
+`$0100`–`$CB7F`, about 3.5 KB less than the arithmetic on the BDOS entry
+vector suggests.
+
+The number belongs to this build. `CONFIG` can produce a 55K or a 58K
+system (`TODO.md` T45), and a different system size moves the CCP.
+
 ## Getting a program onto a disk
 
 The P2500 boots from 5¼-inch floppies as A:–D:.

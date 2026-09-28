@@ -17,6 +17,7 @@ bootable disk, run it, and read the result out of --dump-vram-attr.
 
 usage:
     tools/mk_cpm_probe.py OUT.COM 'text with \\e and \\xHH escapes'
+                          [--pad-records N]
 
 example (does ESC 0 P really mean reverse video?):
     tools/mk_cpm_probe.py /tmp/ATTR.COM '\\e0PREVERSED\\e0@ plain'
@@ -66,13 +67,21 @@ def build(message: bytes) -> bytes:
 
 
 def main():
-    if len(sys.argv) != 3:
+    if len(sys.argv) not in (3, 5):
         print(__doc__)
         return 2
     out, text = Path(sys.argv[1]), sys.argv[2]
     com = build(unescape(text))
+    if len(sys.argv) == 5 and sys.argv[3] == "--pad-records":
+        # Pad with $00 to an exact record count. The CCP decides whether a
+        # .COM fits from its record count alone, so this is how the TPA's
+        # real size gets measured rather than computed.
+        want = int(sys.argv[4]) * 128
+        if want < len(com):
+            raise SystemExit(f"--pad-records {sys.argv[4]} is smaller than the program")
+        com += b"\x00" * (want - len(com))
     out.write_bytes(com)
-    print(f"{out}: {len(com)} bytes, message {len(com) - 10} bytes")
+    print(f"{out}: {len(com)} bytes, {len(com) // 128} records")
     return 0
 
 
