@@ -25,13 +25,20 @@ static const CmdInfo *find_command(uint8_t opcode_byte) {
     return NULL;
 }
 
+void p2500_fdc_attach(P2500Fdc *fdc, unsigned unit,
+                      const uint8_t *data, size_t size) {
+    if (unit >= P2500_FDC_MAX_DRIVES) return;
+    fdc->disk[unit] = data;
+    fdc->disk_size[unit] = size;
+}
+
 void p2500_fdc_init(P2500Fdc *fdc, const uint8_t *disk, size_t disk_size) {
     memset(fdc, 0, sizeof(*fdc));
     fdc->phase = P2500_FDC_IDLE;
     fdc->cylinder = 0;
     fdc->last_seek_ok = true;
-    fdc->disk = disk;
-    fdc->disk_size = disk_size;
+    fdc->disk[0] = disk;
+    fdc->disk_size[0] = disk_size;
     fdc->startup_interrupts_remaining = 2; /* see fdc.h - pinned down by tracing, not a guess */
 }
 
@@ -94,7 +101,9 @@ static void do_read_data(P2500Fdc *fdc) {
     size_t lba = physical_track * P2500_FDC_SECTORS_PER_TRACK + (r - 1);
     size_t off = lba * P2500_FDC_SECTOR_SIZE;
 
-    if (!fdc->disk) {
+    const uint8_t *media = fdc->disk[fdc->unit];
+    const size_t media_size = fdc->disk_size[fdc->unit];
+    if (!media) {
         /* No media at all. A real uPD765 terminates a read or write to a
          * not-ready drive with IC=01 (abnormal) and the NR bit set - ST0
          * bit 3, per the datasheet's "this flag is set when the FDD is in
@@ -106,13 +115,14 @@ static void do_read_data(P2500Fdc *fdc) {
          * but it never got that far, so a diskless machine sat in the
          * $06C6 busy-wait forever with a blank screen. */
         if (fdc->verbose)
-            fprintf(stderr, "[fdc] READ DATA C=%u R=%u with no disk: drive not ready\n", c, r);
+            fprintf(stderr, "[fdc] READ DATA unit %u C=%u R=%u: drive not ready\n",
+                    fdc->unit, c, r);
         uint8_t res[7] = {0x48, 0x00, 0x00, c, fdc->command[3], r, fdc->command[5]};
         set_result(fdc, res, 7);
         fire_interrupt(fdc);
         return;
     }
-    if (off + P2500_FDC_SECTOR_SIZE > fdc->disk_size) {
+    if (off + P2500_FDC_SECTOR_SIZE > media_size) {
         if (fdc->verbose)
             fprintf(stderr, "[fdc] READ DATA C=%u R=%u out of range (off=0x%zx)\n",
                     c, r, off);
@@ -123,8 +133,8 @@ static void do_read_data(P2500Fdc *fdc) {
     }
 
     if (fdc->ram && fdc->dma) {
-        size_t avail = fdc->disk_size - off;
-        p2500_dma_deliver(fdc->dma, fdc->ram, fdc->disk + off, avail);
+        size_t avail = media_size - off;
+        p2500_dma_deliver(fdc->dma, fdc->ram, media + off, avail);
         if (fdc->verbose)
             fprintf(stderr, "[fdc] READ DATA C=%u R=%u -> disk offset 0x%zx, "
                             "handed to DMA\n", c, r, off);
@@ -141,6 +151,11 @@ static void do_read_data(P2500Fdc *fdc) {
 static void finish_command(P2500Fdc *fdc) {
     uint8_t opcode = fdc->command[0] & 0x1F;
     const CmdInfo *info = find_command(fdc->command[0]);
+    /* Every command that touches a drive carries US1/US0 in bits 0-1 of its
+     * second byte (bit 2 is the head). SENSE INTERRUPT STATUS has no second
+     * byte and reports on whatever was last selected, so leave it alone. */
+    if (fdc->command_len > 1 && opcode != 0x08)
+        fdc->unit = fdc->command[1] & 0x03;
     if (fdc->verbose) {
         fprintf(stderr, "[fdc] command %s (opcode $%02X) args=[",
                 info ? info->name : "UNKNOWN", opcode);

@@ -67,7 +67,8 @@ being hardcoded, so the window follows whatever the guest programs.
 | F10 | screenshot (BMP, timestamped, written to the working directory) |
 | Ctrl+O / Ctrl+R / Ctrl+Q | load disk / reset / quit |
 
-There is a **File** menu with Load Disk, Reset, Pause, Screenshot and Quit.
+There is a **File** menu with Load Disk A/B/C, Reset, Pause, Screenshot and
+Quit.
 It is drawn by Dear ImGui rather than being a native menu bar, styled on the
 same phosphor palette as the screen — see `TODO.md` T39 for why a native one
 is not viable on Wayland. "Load Disk" uses `SDL_ShowOpenFileDialog`, which
@@ -93,8 +94,9 @@ python3 tools/render_vram.py /tmp/vram.bin /tmp/screen.png
 | Flag | |
 |---|---|
 | `--rom PATH` | boot EPROM image, default `roms/ipl.bin` |
-| `--disk PATH` | attach a raw disk image |
-| `--swap-at MS:PATH` | change disks at an emulated-time offset |
+| `--disk PATH` | attach a raw disk image in drive A: |
+| `--disk-b PATH` / `--disk-c PATH` | drives B: and C: — CBIOS supports three floppies (`TODO.md` T44) |
+| `--swap-at MS:PATH` | change disks at an emulated-time offset; `MS:B:PATH` targets a drive |
 | `--sesam PATH` | attach a byte stream to the SESAM dongle port |
 | `--type STRING` | queue keystrokes; `\r` `\n` `\t` `\xHH` understood |
 | `--type-after MS` | hold the first keystroke until CBIOS has initialised its ring buffer (default 4000) |

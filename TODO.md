@@ -504,6 +504,51 @@ latch, prints `PHILIPS MICROCOMPUTER P2000/B` from `$0184`, and halts at
 142 were wrong. Only the `.raw` images remain; regenerate per-file sets from
 the `.IMD` originals with `cpmtools` if research needs them.
 
+- [x] **T44. Drives B: and C:. — DONE (2026-09-28).** The µPD765 addresses
+  four units and **CBIOS already supports three of them** — this was a gap
+  in the emulator, not in the firmware. Every drive command carries US1/US0
+  in bits 0-1 of its second byte, and `fdc.c` was ignoring them and reading
+  unit 0's media whatever was selected.
+
+  What the firmware says, read out of a live image rather than assumed:
+  - `SELDSK` (`$E620`) indexes a per-drive record table at `$E880` whose
+    first byte selects an availability byte from `$E87C`. Drives 0, 1 and 2
+    map to `$00` (available); 3 upwards map to `$01`, and SELDSK returns 0.
+  - All three records point at the **same** device record `$E8C1`, differing
+    only in the unit number in their fourth byte.
+  - Their DPHs at `$E81D` (stride 16) are identical apart from their CSV and
+    ALV scratch buffers: same XLT, same DIRBUF, **same DPB**.
+
+  **So C: is a third floppy, not the fixed disk.** A Winchester would need
+  its own DPB (a far larger DSM) and its own driver, and this BIOS has
+  neither — consistent with no Winchester driver having been found on any
+  disk image. The C:-is-the-hard-disk convention is later than this machine.
+
+  The shared DPB at `$E84D` is also a free cross-check on
+  `tools/cpm_extract.py`, which derived its format from the media alone:
+
+  | field | value | |
+  |---|---|---|
+  | SPT | 32 | 32 x 128 = 4096 bytes/track |
+  | BSH/BLM | 4/15 | block size **2048** |
+  | EXM | 1 | one directory entry covers two extents |
+  | DRM | 63 | **64** directory entries |
+  | AL0 | `$80` | one block of directory |
+  | OFF | 2 | **2** reserved tracks |
+
+  Every one of those matches what the extractor worked out from the
+  directory contents. Two independent derivations, same answer.
+
+  Usage: `--disk`, `--disk-b`, `--disk-c` on both front-ends; the GUI has
+  Load Disk A/B/C; `--swap-at MS:B:PATH` swaps into a named drive. Verified
+  end to end: `DIR B:` lists the games disk while A: still holds CP/M, and
+  `MBASIC B:VALLEY` loads and runs a game off drive B.
+
+  Note for anyone trying the games: several (`LEM.BAS` among them) have
+  **unnumbered** lines and are not MBASIC programs - MBASIC answers "Direct
+  statement in file". They are structured-BASIC sources for some other
+  interpreter. `VALLEY.BAS` and the other numbered ones do run.
+
 - [ ] **T43. With no disk attached, the machine hangs with a blank screen.**
   Asked 2026-09-28: shouldn't a diskless boot show the ROM banner? The
   banner is real but it is the **disk-present-but-unbootable** path, not the

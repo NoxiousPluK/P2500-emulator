@@ -93,7 +93,7 @@ static uint8_t *read_whole_file(const char *path, size_t *out_size) {
 
 int main(int argc, char **argv) {
     const char *rom_path = "roms/ipl.bin";
-    const char *disk_path = NULL;
+    const char *disk_paths[P2500_FDC_MAX_DRIVES] = {0};
     const char *sesam_path = NULL;
     const char *vram_dump_path = NULL;
     const char *vram_attr_dump_path = NULL;
@@ -150,8 +150,8 @@ int main(int argc, char **argv) {
      * warm boot and re-read. Times are emulated milliseconds, like
      * --type-after. */
     #define MAX_SWAPS 4
-    struct { unsigned long at_ms; const char *path; uint8_t *buf; size_t size; bool done; }
-        swaps[MAX_SWAPS];
+    struct { unsigned long at_ms; const char *path; uint8_t *buf; size_t size;
+             unsigned unit; bool done; } swaps[MAX_SWAPS];
     int num_swaps = 0;
     /* --push-at drives the LIVE keyboard ring - the same call a GUI keypress
      * makes (p2500_keyboard_push) - rather than the scripted queue. It exists
@@ -161,7 +161,9 @@ int main(int argc, char **argv) {
 
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--rom") && i + 1 < argc) rom_path = argv[++i];
-        else if (!strcmp(argv[i], "--disk") && i + 1 < argc) disk_path = argv[++i];
+        else if (!strcmp(argv[i], "--disk") && i + 1 < argc) disk_paths[0] = argv[++i];
+        else if (!strcmp(argv[i], "--disk-b") && i + 1 < argc) disk_paths[1] = argv[++i];
+        else if (!strcmp(argv[i], "--disk-c") && i + 1 < argc) disk_paths[2] = argv[++i];
         else if (!strcmp(argv[i], "--sesam") && i + 1 < argc) sesam_path = argv[++i];
         else if (!strcmp(argv[i], "--dump-vram") && i + 1 < argc) vram_dump_path = argv[++i];
         else if (!strcmp(argv[i], "--dump-vram-attr") && i + 1 < argc) vram_attr_dump_path = argv[++i];
@@ -224,6 +226,13 @@ int main(int argc, char **argv) {
             *colon = '\0';
             swaps[num_swaps].at_ms = strtoul(arg, NULL, 0);
             swaps[num_swaps].path = colon + 1;
+            swaps[num_swaps].unit = 0;
+            /* MS:B:PATH swaps into drive B rather than A. */
+            if (swaps[num_swaps].path[0] && swaps[num_swaps].path[1] == ':' &&
+                swaps[num_swaps].path[0] >= 'A' && swaps[num_swaps].path[0] < 'A' + P2500_FDC_MAX_DRIVES) {
+                swaps[num_swaps].unit = (unsigned)(swaps[num_swaps].path[0] - 'A');
+                swaps[num_swaps].path += 2;
+            }
             swaps[num_swaps].buf = NULL;
             swaps[num_swaps].size = 0;
             swaps[num_swaps].done = false;
@@ -280,7 +289,8 @@ int main(int argc, char **argv) {
             num_pokes++;
         } else {
             fprintf(stderr, "unknown or malformed argument: %s\n", argv[i]);
-            fprintf(stderr, "usage: %s [--rom path] [--disk path] [--sesam path]\n"
+            fprintf(stderr, "usage: %s [--rom path] [--disk path] [--disk-b path] [--disk-c path]\n"
+                            "  [--sesam path]\n"
                             "  [--dump-vram path] [--dump-vram-attr path] [--dump-screen file.ppm]\n"
                             "  [--dump-ram path]\n"
                             "  [--max-steps N] [--verbose-io]\n"
@@ -310,14 +320,17 @@ int main(int argc, char **argv) {
         fprintf(stderr, "warning: no character ROM at %s; --dump-screen will be blank\n",
                 charrom_path);
 
-    uint8_t *disk_buf = NULL;
-    size_t disk_size = 0;
-    if (disk_path) {
-        disk_buf = read_whole_file(disk_path, &disk_size);
-        if (!disk_buf) { fprintf(stderr, "failed to load disk image %s\n", disk_path); return 1; }
-        m.fdc.disk = disk_buf;
-        m.fdc.disk_size = disk_size;
-        printf("Loaded disk image from %s (%zu bytes)\n", disk_path, disk_size);
+    uint8_t *disk_buf[P2500_FDC_MAX_DRIVES] = {0};
+    for (unsigned u = 0; u < P2500_FDC_MAX_DRIVES; u++) {
+        if (!disk_paths[u]) continue;
+        size_t n = 0;
+        disk_buf[u] = read_whole_file(disk_paths[u], &n);
+        if (!disk_buf[u]) {
+            fprintf(stderr, "failed to load disk image %s\n", disk_paths[u]);
+            return 1;
+        }
+        p2500_fdc_attach(&m.fdc, u, disk_buf[u], n);
+        printf("Loaded %c: from %s (%zu bytes)\n", 'A' + (int)u, disk_paths[u], n);
     }
     if (type_len > 0) {
         p2500_keyboard_init(&m.keyboard, type_buf, type_len);
@@ -450,8 +463,7 @@ int main(int argc, char **argv) {
         for (int sw = 0; sw < num_swaps; sw++) {
             if (swaps[sw].done) continue;
             if (m.cpu.cyc < swaps[sw].at_ms * (P2500_CPU_HZ / 1000u)) continue;
-            m.fdc.disk = swaps[sw].buf;
-            m.fdc.disk_size = swaps[sw].size;
+            p2500_fdc_attach(&m.fdc, swaps[sw].unit, swaps[sw].buf, swaps[sw].size);
             swaps[sw].done = true;
             fprintf(stderr, "[step %lu] disk swapped: now %s (%zu bytes). CP/M caches "
                             "directory state - send Ctrl-C at the prompt to re-read.\n",
@@ -716,9 +728,10 @@ int main(int argc, char **argv) {
     }
 
     for (int sw = 0; sw < num_swaps; sw++) free(swaps[sw].buf);
+    for (unsigned u = 0; u < P2500_FDC_MAX_DRIVES; u++) free(disk_buf[u]);
     free(ring);
     free(state_ring);
-    free(disk_buf);
+
     free(sesam_buf);
     return 0;
 }

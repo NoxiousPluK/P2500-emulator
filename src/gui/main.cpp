@@ -50,7 +50,7 @@ typedef struct {
     SDL_Texture *screen;
     P2500VideoInfo info;
     uint32_t *fb;
-    uint8_t *disk;
+    uint8_t *disk[P2500_FDC_MAX_DRIVES];
     unsigned long frames;
     unsigned long frame_limit;   /* 0 = run until the user quits */
     const char *shot_path;       /* emulated screen only, for the CLI comparison */
@@ -68,6 +68,7 @@ typedef struct {
     float menu_h;                /* measured each frame, offsets the screen */
     SDL_AtomicInt disk_pending;  /* set by the file-dialog callback */
     char disk_path[1024];
+    unsigned pending_unit;       /* which drive the dialog was opened for */
     char status[160];            /* last action, shown at the right of the bar */
 } App;
 
@@ -203,18 +204,31 @@ static void SDLCALL disk_chosen(void *userdata, const char *const *filelist, int
     SDL_SetAtomicInt(&app->disk_pending, 1);
 }
 
-static void mount_disk(App *app, const char *path)
+static void mount_disk(App *app, unsigned unit, const char *path)
 {
+    if (unit >= P2500_FDC_MAX_DRIVES) return;
     size_t n = 0;
     uint8_t *buf = read_whole_file(path, &n);
     if (!buf) { set_status(app, "could not read %s", path); return; }
-    free(app->disk);
-    app->disk = buf;
-    app->m.fdc.disk = buf;
-    app->m.fdc.disk_size = n;
+    free(app->disk[unit]);
+    app->disk[unit] = buf;
+    p2500_fdc_attach(&app->m.fdc, unit, buf, n);
     const char *base = SDL_strrchr(path, '/');
-    set_status(app, "mounted %s - Ctrl-C at the prompt, or Reset",
-               base ? base + 1 : path);
+    set_status(app, "%c: %s - Ctrl-C at the prompt to log it in",
+               'A' + (int)unit, base ? base + 1 : path);
+}
+
+/* CBIOS supports A:, B: and C: (TODO.md T44), so the dialog is opened per
+ * drive and the chosen unit travels with the pending path. */
+static void open_disk_dialog(App *app, unsigned unit)
+{
+    static const SDL_DialogFileFilter filters[] = {
+        { "Disk images", "raw;img;dsk;imd" },
+        { "All files", "*" },
+    };
+    app->pending_unit = unit;
+    SDL_ShowOpenFileDialog(disk_chosen, app, app->window,
+                           filters, SDL_arraysize(filters), NULL, false);
 }
 
 /* Deliberately not the default ImGui look: square, dark, and on the same
@@ -260,14 +274,9 @@ static void draw_menu_bar(App *app)
     app->menu_h = ImGui::GetWindowSize().y;
 
     if (ImGui::BeginMenu("File")) {
-        if (ImGui::MenuItem("Load Disk...", "Ctrl+O")) {
-            static const SDL_DialogFileFilter filters[] = {
-                { "Disk images", "raw;img;dsk;imd" },
-                { "All files", "*" },
-            };
-            SDL_ShowOpenFileDialog(disk_chosen, app, app->window,
-                                   filters, SDL_arraysize(filters), NULL, false);
-        }
+        if (ImGui::MenuItem("Load Disk A...", "Ctrl+O")) open_disk_dialog(app, 0);
+        if (ImGui::MenuItem("Load Disk B...")) open_disk_dialog(app, 1);
+        if (ImGui::MenuItem("Load Disk C...")) open_disk_dialog(app, 2);
         ImGui::Separator();
         if (ImGui::MenuItem("Reset", "Ctrl+R")) {
             p2500_reset(&app->m);
@@ -318,7 +327,7 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[])
 {
     const char *rom = "roms/ipl.bin";
     const char *charrom = "roms/charrom.bin";
-    const char *disk = NULL;
+    const char *disks[P2500_FDC_MAX_DRIVES] = {0};
     int scale = SCALE_DEFAULT;
     unsigned long frame_limit = 0;
     const char *shot_path = NULL;
@@ -330,7 +339,9 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[])
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--rom") && i + 1 < argc) rom = argv[++i];
         else if (!strcmp(argv[i], "--charrom") && i + 1 < argc) charrom = argv[++i];
-        else if (!strcmp(argv[i], "--disk") && i + 1 < argc) disk = argv[++i];
+        else if (!strcmp(argv[i], "--disk") && i + 1 < argc) disks[0] = argv[++i];
+        else if (!strcmp(argv[i], "--disk-b") && i + 1 < argc) disks[1] = argv[++i];
+        else if (!strcmp(argv[i], "--disk-c") && i + 1 < argc) disks[2] = argv[++i];
         else if (!strcmp(argv[i], "--scale") && i + 1 < argc) scale = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--frames") && i + 1 < argc) frame_limit = strtoul(argv[++i], NULL, 0);
         else if (!strcmp(argv[i], "--screenshot") && i + 1 < argc) shot_path = argv[++i];
@@ -344,7 +355,8 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[])
             npush++;
         }
         else {
-            SDL_Log("usage: p2500-gui [--rom path] [--charrom path] [--disk path] [--scale N]\n"
+            SDL_Log("usage: p2500-gui [--rom path] [--charrom path] [--scale N]\n"
+                    "                 [--disk path] [--disk-b path] [--disk-c path]\n"
                     "                 [--frames N] [--screenshot out.ppm] [--shot-window out.ppm]\n"
                     "                 [--push-at MS:STRING ...]");
             return SDL_APP_FAILURE;
@@ -374,16 +386,16 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[])
         SDL_Log("failed to load character ROM from %s", charrom);
         return SDL_APP_FAILURE;
     }
-    if (disk) {
+    for (unsigned u = 0; u < P2500_FDC_MAX_DRIVES; u++) {
+        if (!disks[u]) continue;
         size_t n = 0;
-        app->disk = read_whole_file(disk, &n);
-        if (!app->disk) {
-            SDL_Log("failed to load disk image %s", disk);
+        app->disk[u] = read_whole_file(disks[u], &n);
+        if (!app->disk[u]) {
+            SDL_Log("failed to load disk image %s", disks[u]);
             return SDL_APP_FAILURE;
         }
-        app->m.fdc.disk = app->disk;
-        app->m.fdc.disk_size = n;
-        SDL_Log("attached %s (%zu bytes)", disk, n);
+        p2500_fdc_attach(&app->m.fdc, u, app->disk[u], n);
+        SDL_Log("attached %c: %s (%zu bytes)", 'A' + (int)u, disks[u], n);
     }
 
     if (!SDL_Init(SDL_INIT_VIDEO)) {
@@ -411,7 +423,7 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[])
     if (!app->has_ui) SDL_Log("ImGui backend init failed; running without a UI");
 
     SDL_StartTextInput(app->window);
-    set_status(app, disk ? "ready" : "no disk - File > Load Disk...");
+    set_status(app, disks[0] ? "ready" : "no disk - File > Load Disk A...");
     return SDL_APP_CONTINUE;
 }
 
@@ -438,14 +450,7 @@ SDL_AppResult SDL_AppEvent(void *appstate, SDL_Event *event)
         const bool ctrl = (event->key.mod & SDL_KMOD_CTRL) != 0;
         /* Menu accelerators win over the guest, which is why Ctrl-C still
          * reaches CP/M: it is deliberately not one of them. */
-        if (ctrl && k == SDLK_O) { /* handled via the menu's dialog call */
-            static const SDL_DialogFileFilter filters[] = {
-                { "Disk images", "raw;img;dsk;imd" }, { "All files", "*" },
-            };
-            SDL_ShowOpenFileDialog(disk_chosen, app, app->window,
-                                   filters, SDL_arraysize(filters), NULL, false);
-            return SDL_APP_CONTINUE;
-        }
+        if (ctrl && k == SDLK_O) { open_disk_dialog(app, 0); return SDL_APP_CONTINUE; }
         if (ctrl && k == SDLK_R) { p2500_reset(&app->m); set_status(app, "reset - media still attached"); return SDL_APP_CONTINUE; }
         if (ctrl && k == SDLK_Q) return SDL_APP_SUCCESS;
         if (k == SDLK_F10) { save_screenshot(app); return SDL_APP_CONTINUE; }
@@ -467,7 +472,7 @@ SDL_AppResult SDL_AppIterate(void *appstate)
 
     if (SDL_GetAtomicInt(&app->disk_pending)) {
         SDL_SetAtomicInt(&app->disk_pending, 0);
-        mount_disk(app, app->disk_path);
+        mount_disk(app, app->pending_unit, app->disk_path);
     }
 
     for (int i = 0; i < app->pushes; i++) {
@@ -567,6 +572,6 @@ void SDL_AppQuit(void *appstate, SDL_AppResult)
     if (app->renderer) SDL_DestroyRenderer(app->renderer);
     if (app->window) SDL_DestroyWindow(app->window);
     free(app->fb);
-    free(app->disk);
+    for (unsigned u = 0; u < P2500_FDC_MAX_DRIVES; u++) free(app->disk[u]);
     free(app);
 }

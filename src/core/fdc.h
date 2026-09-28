@@ -60,6 +60,8 @@ typedef enum {
  * (see above), sampled by machine.c on every step. */
 typedef void (*P2500FdcInterruptCallback)(void *userdata);
 
+#define P2500_FDC_MAX_DRIVES 4
+
 typedef struct {
     P2500FdcPhase phase;
     uint8_t command[16];
@@ -104,8 +106,16 @@ typedef struct {
      * it held, not just edge-triggered PIO delivery. */
     bool int_line;
 
-    const uint8_t *disk;
-    size_t disk_size;
+    /* Up to four units, as the uPD765 addresses. CBIOS supports three of
+     * them: SELDSK ($E620) indexes a per-drive record table at $E880 whose
+     * first byte selects an availability byte from $E87C - drives 0, 1 and
+     * 2 map to $00 (available) and 3 upwards to $01 (rejected, SELDSK
+     * returns 0). Each has its own DPH with its own CSV/ALV buffers at
+     * $E81D, so A:, B: and C: are real as far as the firmware is concerned.
+     * The unit comes from the command's second byte, bits 0-1. */
+    const uint8_t *disk[P2500_FDC_MAX_DRIVES];
+    size_t disk_size[P2500_FDC_MAX_DRIVES];
+    uint8_t unit; /* unit selected by the command being executed */
 
     /* set once by machine.c at init: the flat 64K RAM image (destination
      * for DMA-delivered READ DATA bytes) and the DMA model that owns the
@@ -120,6 +130,10 @@ typedef struct {
 } P2500Fdc;
 
 void p2500_fdc_init(P2500Fdc *fdc, const uint8_t *disk, size_t disk_size);
+
+/* Attach (or with NULL, eject) the image in a drive. Unit 0 is A:. */
+void p2500_fdc_attach(P2500Fdc *fdc, unsigned unit,
+                      const uint8_t *data, size_t size);
 /* Fires one of the uPD765's real, well-documented post-reset unsolicited
  * interrupts (TODO.md ISSUE-1 fix 2) - a real chip generates one per
  * configured drive shortly after coming out of reset, before any

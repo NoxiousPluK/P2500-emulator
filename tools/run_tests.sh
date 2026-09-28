@@ -104,6 +104,24 @@ else
     else fail "IPL did not reach its halt at \$014D"; fi
 fi
 
+echo "== 4c. Drive B: (T44)"
+GAMES="../Disk Images/extracted/P2500GAM/P2500GAM.raw"
+if [ ! -f "$GAMES" ]; then
+    echo "  SKIP  $GAMES not present"
+else
+    $EMU --disk "$DISK" --disk-b "$GAMES" --max-steps 60000000 \
+         --push-at '4000:dir b:\r' --dump-vram "$TMP/b.bin" >"$TMP/b.log" 2>&1
+    screen "$TMP/b.bin" >"$TMP/b.screen"
+    # The unit-select bits must actually route the read: B: has to list the
+    # games disk, and A: must still hold the CP/M system disk.
+    if grep -q 'B: BLACKJAK BAS' "$TMP/b.screen"; then
+        pass "DIR B: lists the disk in drive B"
+    else fail "DIR B: did not read drive B"; fi
+    if grep -q 'PIP' "$TMP/b.screen"; then
+        fail "drive B's listing leaked drive A's files"
+    else pass "drive B's listing is not drive A's"; fi
+fi
+
 echo "== 5. The undecoded-video-bank tripwire still fires (T27)"
 # roms/sesam_bank_probe.bin is a SESAM cartridge whose payload is
 # LD A,$01 / OUT ($05),A / HALT - i.e. it selects one of port $05's six

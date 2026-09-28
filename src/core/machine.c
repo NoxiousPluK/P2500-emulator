@@ -385,8 +385,12 @@ void p2500_reset(P2500Machine *m) {
     memcpy(eprom, m->eprom, sizeof eprom);
     memcpy(charrom, m->charrom, sizeof charrom);
 
-    const uint8_t *disk = m->fdc.disk;
-    size_t disk_size = m->fdc.disk_size;
+    const uint8_t *disk[P2500_FDC_MAX_DRIVES];
+    size_t disk_size[P2500_FDC_MAX_DRIVES];
+    for (int d = 0; d < P2500_FDC_MAX_DRIVES; d++) {
+        disk[d] = m->fdc.disk[d];
+        disk_size[d] = m->fdc.disk_size[d];
+    }
     const uint8_t *sesam = m->sesam.stream;
     size_t sesam_len = m->sesam.stream_len;
     const uint8_t *keys = m->keyboard.queue;
@@ -400,8 +404,10 @@ void p2500_reset(P2500Machine *m) {
 
     memcpy(m->eprom, eprom, sizeof eprom);
     memcpy(m->charrom, charrom, sizeof charrom);
-    m->fdc.disk = disk;
-    m->fdc.disk_size = disk_size;
+    for (int d = 0; d < P2500_FDC_MAX_DRIVES; d++) {
+        m->fdc.disk[d] = disk[d];
+        m->fdc.disk_size[d] = disk_size[d];
+    }
     m->sesam.stream = sesam;
     m->sesam.stream_len = sesam_len;
     m->keyboard.queue = keys;
