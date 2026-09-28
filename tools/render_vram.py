@@ -43,14 +43,14 @@ FG = (0, 255, 70)   # green phosphor - period-plausible for this class of termin
 BG = (8, 12, 8)
 FG_DIM = (0, 140, 40)
 
-# The four documented attributes (P2219 CP/M manual, via ../Information from
-# the internet/findings.md): underline, reverse, flash, low intensity. Which
-# nibble bit carries which is NOT established - see TODO.md T27. These
-# assignments are a placeholder and are the single place to correct.
+# Established, not guessed: the P2219 CP/M manual defines the ESC 0 parameter
+# bits (0 low intensity, 1 flash, 4 reverse, 5 underline) and CBIOS's handler
+# at $F252 scatters them into the latched nibble (0->1, 1->3, 4->2, 5->0).
+# See TODO.md T27. Keep in step with src/core/video.h.
 ATTR_UNDERLINE = 0x01
-ATTR_REVERSE   = 0x02
-ATTR_FLASH     = 0x04
-ATTR_DIM       = 0x08
+ATTR_DIM       = 0x02
+ATTR_REVERSE   = 0x04
+ATTR_FLASH     = 0x08
 
 
 def glyph_bitmap(rom: bytes, code: int) -> bytes:

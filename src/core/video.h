@@ -18,21 +18,31 @@
  * until 2026-09-28 - the only printable codes with ink in rows 8-11 are
  * "$ , ; @ f g j p q y", exactly the descender set.
  *
- * Attributes come from the card's separate 4-bit plane. Which nibble bit
- * carries which attribute is NOT established - the four the P2219 manual
- * documents are underline, reverse, flash and low intensity, and the
- * assignment below is a placeholder. It must stay in step with
- * tools/render_vram.py, which has the same four constants.
+ * Attributes come from the card's separate 4-bit plane, and the assignment
+ * below is now established rather than guessed. The P2219 CP/M manual's
+ * "CONTROL CODES (ESCAPE SEQUENCES)" section defines the ESC 0 parameter
+ * byte:
+ *
+ *     bit 0 = 1  display character at low intensity
+ *     bit 1 = 1  flash character
+ *     bit 4 = 1  display character in reverse video
+ *     bit 5 = 1  display character underlined
+ *
+ * CBIOS's handler at $F252 then scatters those into the nibble it latches
+ * in port $0A - parameter bit 0 -> attribute bit 1, 1 -> 3, 4 -> 2, 5 -> 0
+ * (verified by driving all 16 values through MBASIC and dumping the plane).
+ * Composing the two gives the constants below. Keep them in step with
+ * tools/render_vram.py, which carries the same four.
  */
 
 #define P2500_CELL_W 8
 #define P2500_CHARROM_SIZE 0x1000
 #define P2500_CHARROM_STRIDE 16 /* bytes per code; only the first R9+1 used */
 
-#define P2500_ATTR_UNDERLINE 0x01
-#define P2500_ATTR_REVERSE   0x02
-#define P2500_ATTR_FLASH     0x04
-#define P2500_ATTR_DIM       0x08
+#define P2500_ATTR_UNDERLINE 0x01 /* ESC 0 parameter bit 5 */
+#define P2500_ATTR_DIM       0x02 /* ESC 0 parameter bit 0, "low intensity" */
+#define P2500_ATTR_REVERSE   0x04 /* ESC 0 parameter bit 4 */
+#define P2500_ATTR_FLASH     0x08 /* ESC 0 parameter bit 1 */
 
 typedef struct {
     int cols, rows;   /* character grid, from R1 and R6 */

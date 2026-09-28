@@ -167,6 +167,18 @@ contexts where a GUI dependency would make it unrunnable.
   how the real chip composites it, and it lands where CP/M puts it with no
   heuristic: row 6 column 2 after `DIR`.
 
+  **How the cursor is hidden, and why SuperCalc2 appeared to have none.**
+  `ESC C` / `ESC c` (cursor on/off) do not touch the blink bits: they write
+  CRTC **R10** through the driver's generated-code template at `$F46C`
+  (`LD A,$0A / OUT ($08),A / LD A,<v> / OUT ($09),A`). "Off" writes `$10` —
+  cursor start scanline 16, past the end of a 12-scanline cell, so the chip
+  never composites it. Nothing to special-case; a renderer that honours
+  R10/R11 as scanline bounds gets this right for free.
+
+  SuperCalc2 hides the hardware cursor that way and marks the current cell
+  with a **reverse-video attribute** instead, which is why it looked like it
+  had no cursor until T27's attribute latch was modelled.
+
   Guarded by `make test`, which asserts on the rendered pixels: a 640x288
   frame, ink below the `p` of "Philips" (the T27a descender, verified to
   fail if the glyph is truncated back to 8 rows), and a solid cursor block
@@ -304,14 +316,50 @@ contexts where a GUI dependency would make it unrunnable.
     --dump-vram-attr /tmp/t.attr
   ```
 
-  ### What is still open
+  ### The bit names, from the manual
 
-  **Which attribute each nibble bit means.** The P2219 manual names four —
-  underline, reverse, flash, low intensity — but nothing seen so far pins a
-  bit to a name, and `src/core/video.h`'s assignment remains a placeholder.
-  The two programs that use attributes are the evidence to mine: `VALLEY.BAS`
-  draws terrain and borders with nibble `$6`, SuperCalc2 uses `$4`. Reading
-  `$F30C` and the `ESC S/T/U/V` handlers may name them outright.
+  Not derivable from the driver — it only passes the nibble to the hardware,
+  so the names live in the card's discrete logic, not in firmware. `$F30C`
+  turned out to be the screen-clear code generator and `ESC S/T/U/V` are
+  cursor movement (`+80`, `-80`, `+1920`, `-1920` on the cursor address at
+  `$F447`), so neither names anything.
+
+  The answer is in `../Information from the internet/(P2000C) P2219 CPM
+  Manuals.pdf`, which is a **scanned** PDF with no text layer — it had to be
+  OCR'd (`pdftoppm` + `tesseract`) before it could be searched. Its "CONTROL
+  CODES (ESCAPE SEQUENCES)" section defines the parameter byte:
+
+  ```
+  bit 0 = 1  display character at low intensity
+  bit 1 = 1  flash character
+  bit 4 = 1  display character in reverse video
+  bit 5 = 1  display character underlined
+  ```
+
+  and tabulates all 16 sequences — **the same 16 values already recovered
+  from the firmware's validation table and confirmed by execution**, which
+  is as good a cross-check as this project gets. Composing the manual's
+  parameter bits with `$F252`'s scatter gives the plane:
+
+  | attribute bit | meaning | from parameter bit |
+  |---|---|---|
+  | 0 (`$1`) | underline | 5 |
+  | 1 (`$2`) | low intensity | 0 |
+  | 2 (`$4`) | reverse video | 4 |
+  | 3 (`$8`) | flash | 1 |
+
+  `src/core/video.h` and `tools/render_vram.py` now carry that instead of a
+  placeholder. Only *underline* had been guessed correctly.
+
+  Confirmed against real software: SuperCalc2's grid puts nibble `$4`
+  (reverse) on the current-cell pointer and `$6` (reverse + low intensity)
+  on the column headers — see `shots/sc2_grid.png`. `VALLEY.BAS` draws
+  terrain with `$6` too.
+
+  The manual also notes what the driver's behaviour already implied: an
+  attribute "takes effect from the current attribute position to the next
+  position where an attribute is set", i.e. it is latched and applies to
+  everything written after it. Exactly the port `$0A` model.
 
 - [x] **T27a. The character cell is 8×12, not 8×8. — DONE (2026-09-28).**
   Fell out of T27 and fixes a visible bug, so it landed immediately rather
