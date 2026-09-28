@@ -317,7 +317,6 @@ int main(int argc, char **argv) {
         if (!disk_buf) { fprintf(stderr, "failed to load disk image %s\n", disk_path); return 1; }
         m.fdc.disk = disk_buf;
         m.fdc.disk_size = disk_size;
-        m.fdc.verbose = verbose_io;
         printf("Loaded disk image from %s (%zu bytes)\n", disk_path, disk_size);
     }
     if (type_len > 0) {
@@ -329,6 +328,7 @@ int main(int argc, char **argv) {
         printf("Queued %zu bytes to type on port $06 (untimed segments start at %lu ms)\n",
                type_len, type_after_ms);
     }
+    m.fdc.verbose = verbose_io; /* also wanted with no disk attached */
     m.pio.verbose = verbose_io;
     m.dma.verbose = verbose_io;
     m.ctc.verbose = verbose_io;

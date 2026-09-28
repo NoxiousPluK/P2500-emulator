@@ -504,6 +504,52 @@ latch, prints `PHILIPS MICROCOMPUTER P2000/B` from `$0184`, and halts at
 142 were wrong. Only the `.raw` images remain; regenerate per-file sets from
 the `.IMD` originals with `cpmtools` if research needs them.
 
+- [ ] **T43. With no disk attached, the machine hangs with a blank screen.**
+  Asked 2026-09-28: shouldn't a diskless boot show the ROM banner? The
+  banner is real but it is the **disk-present-but-unbootable** path, not the
+  no-disk one — demonstrated by `P2k5_LOGIC_deinterleaved.raw`, which
+  reaches `$013C`, prints `PHILIPS / MICROCOMPUTER / P2000/B` and halts at
+  `$014D` (now asserted by `make test`, and `shots/ipl_banner.png`).
+
+  With **no** disk the IPL never gets there. It blocks in `$06C6`, which is
+  an unbounded spin with **no timeout at all**:
+
+  ```
+  $06C6: ld a,($FED5) / cp $01 / jr nz,$06C6 / ret
+  ```
+
+  `$FED5` is set only by the vector-0 ISR at `$0883`, i.e. only by a real
+  FDC interrupt. Traced: the IPL gets four PIO-A interrupts (the two
+  synthetic post-reset ones, RECALIBRATE, and the failed READ DATA), reads
+  the result phase, streams a SPECIFY and a SENSE INTERRUPT STATUS — neither
+  of which can interrupt — and then waits forever. The request status at
+  `$FE47` is left at `$FF` (pending), so `sub_0333h` cannot return and the
+  banner is never reached.
+
+  **The gap is that drive-ready is not modelled as a line.** A real µPD765
+  polls each drive's READY and raises an unsolicited interrupt when it
+  *changes*; this emulator stands in for that with exactly two synthetic
+  post-reset interrupts, permanently disabled once a real command is issued
+  (ISSUE-1 fix 2, narrowed by ISSUE-3). That is fine with media present and
+  is exactly what leaves the diskless case with nothing to wake it.
+
+  **Genuinely open: whether real hardware hangs here too.** With an empty
+  drive READY is low and stays low, so polling would produce no further
+  changes and no further interrupts — a real P2500 may well also sit with a
+  blank screen until a disk is inserted, which for a machine that was always
+  used with a disk in the drive is unremarkable. Settling it needs either
+  the drive's READY wiring traced or someone powering a real unit with an
+  empty drive. Until then, do not invent an interrupt to make the banner
+  appear: that would be tuning a mechanism until something moved.
+
+  Done along the way: READ DATA with no media now reports **NR** (ST0 bit 3,
+  `$48`) rather than a bare `$40`, per the datasheet's "this flag is set
+  when the FDD is in the not-ready state and a Read or Write command is
+  issued". That is an accuracy fix and **does not** resolve the hang. Also
+  fixed: `fdc.verbose` was only being set when a disk was attached, so a
+  diskless run logged no FDC activity at all — which is what hid all of the
+  above.
+
 - [ ] **T42. `P25K_G` blocks on an event that never signals.** The one
   complete, clean image that does not reach a prompt — so unlike the
   double-stepped disks, this one is ours. Its CBIOS is a different build

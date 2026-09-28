@@ -83,6 +83,27 @@ else
     done
 fi
 
+echo "== 4b. The IPL's own give-up path still works"
+# A disk that is readable but not bootable must make sub_0333h return, so the
+# IPL prints its own banner and halts - rather than blocking in the $06C6
+# busy-wait. This is the only test of the failure path.
+PSYS="../Disk Images/extracted/P2k5_LOGIC/P2k5_LOGIC_deinterleaved.raw"
+if [ ! -f "$PSYS" ]; then
+    echo "  SKIP  $PSYS not present"
+else
+    $EMU --disk "$PSYS" --max-steps 30000000 --dump-vram "$TMP/ipl.bin" \
+         >"$TMP/ipl.log" 2>&1
+    screen "$TMP/ipl.bin" >"$TMP/ipl.screen"
+    if grep -q 'P H I L I P S' "$TMP/ipl.screen" &&
+       grep -q 'MICROCOMPUTER' "$TMP/ipl.screen" &&
+       grep -q 'P2000/B' "$TMP/ipl.screen"; then
+        pass "unbootable disk prints the IPL banner"
+    else fail "IPL banner not shown for an unbootable disk"; fi
+    if grep -q 'Final: PC=\$014D' "$TMP/ipl.log"; then
+        pass "IPL halted at \$014D as designed"
+    else fail "IPL did not reach its halt at \$014D"; fi
+fi
+
 echo "== 5. The undecoded-video-bank tripwire still fires (T27)"
 # roms/sesam_bank_probe.bin is a SESAM cartridge whose payload is
 # LD A,$01 / OUT ($05),A / HALT - i.e. it selects one of port $05's six

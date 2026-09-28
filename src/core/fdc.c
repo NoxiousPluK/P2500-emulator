@@ -94,7 +94,25 @@ static void do_read_data(P2500Fdc *fdc) {
     size_t lba = physical_track * P2500_FDC_SECTORS_PER_TRACK + (r - 1);
     size_t off = lba * P2500_FDC_SECTOR_SIZE;
 
-    if (!fdc->disk || off + P2500_FDC_SECTOR_SIZE > fdc->disk_size) {
+    if (!fdc->disk) {
+        /* No media at all. A real uPD765 terminates a read or write to a
+         * not-ready drive with IC=01 (abnormal) and the NR bit set - ST0
+         * bit 3, per the datasheet's "this flag is set when the FDD is in
+         * the not-ready state and a Read or Write command is issued".
+         *
+         * Reporting a plain $40 here instead made the machine unbootable in
+         * a way real hardware is not: the IPL's boot-attempt chain at $0333
+         * gives up on a nonzero request status and prints its own banner,
+         * but it never got that far, so a diskless machine sat in the
+         * $06C6 busy-wait forever with a blank screen. */
+        if (fdc->verbose)
+            fprintf(stderr, "[fdc] READ DATA C=%u R=%u with no disk: drive not ready\n", c, r);
+        uint8_t res[7] = {0x48, 0x00, 0x00, c, fdc->command[3], r, fdc->command[5]};
+        set_result(fdc, res, 7);
+        fire_interrupt(fdc);
+        return;
+    }
+    if (off + P2500_FDC_SECTOR_SIZE > fdc->disk_size) {
         if (fdc->verbose)
             fprintf(stderr, "[fdc] READ DATA C=%u R=%u out of range (off=0x%zx)\n",
                     c, r, off);
