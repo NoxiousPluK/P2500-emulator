@@ -240,8 +240,7 @@ static void mount_disk(App *app, unsigned unit, const char *path)
     p2500_fdc_attach(&app->m.fdc, unit, buf, n);
     const char *base = SDL_strrchr(path, '/');
     SDL_strlcpy(app->disk_name[unit], base ? base + 1 : path, sizeof app->disk_name[unit]);
-    set_status(app, "%c: %s - Ctrl-C at the prompt to log it in",
-               'A' + (int)unit, app->disk_name[unit]);
+    set_status(app, "%c: %s", 'A' + (int)unit, app->disk_name[unit]);
 }
 
 static void eject_disk(App *app, unsigned unit)
@@ -595,8 +594,8 @@ static void draw_menu_bar(App *app)
                 if (d.alt_clicked) eject_disk(app, u);
                 if (loaded)
                     ImGui::SetItemTooltip("%c: %s\nClick to change, right-click to eject.\n"
-                                          "CP/M caches the directory - Ctrl-C at the prompt"
-                                          " after a swap.",
+                                          "A swapped-in disk is readable at once; CP/M marks"
+                                          " the drive read-only until a warm boot (Ctrl-C).",
                                           'A' + (int)u, app->disk_name[u]);
                 else
                     ImGui::SetItemTooltip("%c: empty\nClick to load a disk.", 'A' + (int)u);

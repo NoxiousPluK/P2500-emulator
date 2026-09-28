@@ -122,6 +122,40 @@ else
     else pass "drive B's listing is not drive A's"; fi
 fi
 
+echo "== 4d. Swapping a disk mid-run"
+# What a swap does and does not cost, both asserted, because the front-end
+# used to tell people the wrong one.
+#
+# Reads refresh by themselves: CP/M re-reads the directory on every search,
+# so a DIR straight after a swap lists the new disk with no warm boot. What
+# the swap does cost is WRITE access - these drives carry CKS=16 in their
+# DPB, i.e. removable media, so BDOS compares the directory checksum, finds
+# it changed, and sets the drive's bit in its read-only vector at $E1AD.
+# Ctrl-C clears it through the BDOS reset at $E086. That flag has no visible
+# consequence until writing exists (T30), which is exactly why the claim
+# needs a test rather than a sentence in a tooltip.
+SYSDISK="../Disk Images/extracted/P25K_S/P25K_S.raw"
+if [ ! -f "$SYSDISK" ]; then
+    echo "  SKIP  $SYSDISK not present"
+else
+    $EMU --disk "$DISK" --max-steps 6000000 --swap-at "6000:$SYSDISK" \
+         --type-at '4000:dir\r' --type-at '8000:dir\r' --type-at '11000:\x03' \
+         --watch E1AD:2 --dump-vram "$TMP/swap.bin" \
+         >"$TMP/swap.log" 2>"$TMP/swap.err"
+    screen "$TMP/swap.bin" >"$TMP/swap.screen"
+    # PIP is only on the first disk, SC2 only on the second, and no warm
+    # boot happened between the two listings.
+    if grep -q 'PIP' "$TMP/swap.screen" && grep -q 'SC2      COM' "$TMP/swap.screen"; then
+        pass "DIR after a swap lists the new disk with no warm boot"
+    else fail "the swapped-in disk was not listed"; fi
+    if grep -q 'watch \$E1AD\] \$00 -> \$01' "$TMP/swap.err"; then
+        pass "BDOS marks the swapped drive read-only (\$E1AD bit 0)"
+    else fail "BDOS did not mark the swapped drive read-only"; fi
+    if grep -q 'watch \$E1AD\] \$01 -> \$00.*PC=\$E089' "$TMP/swap.err"; then
+        pass "Ctrl-C clears the read-only flag"
+    else fail "Ctrl-C did not clear the read-only flag"; fi
+fi
+
 echo "== 5. The undecoded-video-bank tripwire still fires (T27)"
 # roms/sesam_bank_probe.bin is a SESAM cartridge whose payload is
 # LD A,$01 / OUT ($05),A / HALT - i.e. it selects one of port $05's six

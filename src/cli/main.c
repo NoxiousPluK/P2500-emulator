@@ -181,9 +181,11 @@ int main(int argc, char **argv) {
     const char *ram_dump_path = NULL;
     bool stuck_detect = true;
     /* --swap-at MS:PATH - change the disk in the drive partway through a
-     * run, the way a person would. CP/M caches directory state, so the
-     * guest must be told: type Ctrl-C at the prompt afterwards to force a
-     * warm boot and re-read. Times are emulated milliseconds, like
+     * run, the way a person would. Reads pick the new disk up at once - a
+     * DIR straight after a swap lists it - because CP/M re-reads the
+     * directory every time. What the swap does cost is write access: BDOS
+     * notices the directory checksum has changed and marks the drive
+     * read-only until a warm boot. Times are emulated milliseconds, like
      * --type-after. */
     #define MAX_SWAPS 4
     struct { unsigned long at_ms; const char *path; uint8_t *buf; size_t size;
@@ -494,8 +496,9 @@ int main(int argc, char **argv) {
             if (m.cpu.cyc < swaps[sw].at_ms * (P2500_CPU_HZ / 1000u)) continue;
             p2500_fdc_attach(&m.fdc, swaps[sw].unit, swaps[sw].buf, swaps[sw].size);
             swaps[sw].done = true;
-            fprintf(stderr, "[step %lu] disk swapped: now %s (%zu bytes). CP/M caches "
-                            "directory state - send Ctrl-C at the prompt to re-read.\n",
+            fprintf(stderr, "[step %lu] disk swapped: now %s (%zu bytes). Reads see it "
+                            "immediately; CP/M marks the drive read-only until a warm "
+                            "boot (Ctrl-C).\n",
                     step, swaps[sw].path, swaps[sw].size);
         }
 

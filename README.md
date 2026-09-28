@@ -37,7 +37,7 @@ make test   # the regression suite
 
 `make` needs a C11 compiler; the GUI additionally needs SDL3 (`extra/sdl3`
 on Arch) and a C++17 compiler, and Dear ImGui is vendored. The core stays
-dependency-free so `make test` runs with no display at all: **47 checks**,
+dependency-free so `make test` runs with no display at all: **50 checks**,
 exit 1 on any failure. The GUI checks skip themselves if SDL3 is absent.
 
 ## Running it as a machine
@@ -143,10 +143,17 @@ project has used.
 
 `P2500_TRACE_FROM` / `P2500_TRACE_TO` give a bounded per-step trace.
 
-Disks can be changed mid-run, and CP/M handles it as on real hardware —
-swap, then Ctrl-C at the prompt to force a warm boot and re-read the
-directory. A disk with no system tracks cannot be warm-booted from, which is
-also authentic.
+Disks can be changed mid-run, and CP/M handles it as on real hardware. A
+swapped-in disk is **readable immediately** — `DIR` straight after a swap
+lists the new disk, because CP/M re-reads the directory on every search.
+What the swap costs is write access: these drives have a non-zero checksum
+count in their DPB (`CKS` = 16, i.e. removable media), so BDOS notices the
+directory checksum has changed and sets the drive's bit in its read-only
+vector at `$E1AD`. Ctrl-C clears it, by way of the BDOS reset at `$E086`.
+Until writing is implemented (`TODO.md` T30) that flag has no visible
+consequence, which is why Ctrl-C is not needed in practice today. A disk
+with no system tracks cannot be warm-booted from at all — Ctrl-C echoes and
+the machine sits there, which is also authentic.
 
 ## Validation
 

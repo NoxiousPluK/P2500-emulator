@@ -19,7 +19,7 @@ SuperCalc2 (an OEM build whose splash reads `PHILIPS P2000`) loads from
 `P25K_S` and opens files; MBASIC-80 runs from `P25TEST`; `VALLEY.BAS` runs
 off drive B with working screen attributes. Three of nine disk images boot.
 
-`make test` is the proof and the guard: 47 checks, exit 1 on any failure.
+`make test` is the proof and the guard: 50 checks, exit 1 on any failure.
 
 ```
 make                 # libp2500.a, p2500-emu, and p2500-gui if SDL3 is present
@@ -72,6 +72,16 @@ Attribute bits: 0 underline, 1 low intensity, 2 reverse, 3 flash.
 **Character cell** is 8×12. The character ROM's stride is 16 bytes per code;
 rows 0–11 are the glyph, 12–15 are padding. Reading 8 rows truncates every
 descender.
+
+**Swapping a disk mid-run** is read-transparent and write-opaque. CP/M
+re-reads the directory on every search, so a `DIR` straight after a swap
+lists the new disk with no warm boot. But `CKS` in the DPB is **16**, not 0
+— these drives are checksummed as removable media — so BDOS finds the
+directory checksum changed and sets the drive's bit in its **read-only
+vector at `$E1AD`** (the pair `$E1AF` is the login vector; the BDOS reset at
+`$E086` clears both, and `$E117` is the function that reads `$E1AD` back).
+That costs write access, not visibility. It has no observable consequence
+until T30 lands.
 
 **Disk geometry.** The logical track number in each sector's ID field is
 **physical track + 1**. Sector skew within a track is `0,2,…,14,1,3,…,15`.
