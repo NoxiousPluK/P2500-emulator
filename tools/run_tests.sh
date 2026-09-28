@@ -812,13 +812,17 @@ PY
     # is the only one that exercises next_row - the raster-bank wrap that
     # makes row y+1 sometimes +$1000 and sometimes -12224.
     #
-    # Sampled at three instants rather than one: the erase-and-blit of 51
-    # rows fills much of the time between moves, so a single instant can
-    # catch it mid-draw. The runs are deterministic, so this is a fixed set
-    # of samples rather than a retry loop - and at least one must show the
-    # sprite whole.
+    # Sampled at three instants rather than one: the blit still takes a third
+    # of the field, so a single instant can catch it mid-draw. The runs are
+    # deterministic, so this is a fixed set of samples rather than a retry
+    # loop - and at least one must show the sprite whole.
+    #
+    # The later samples are also a trail check. With no erase pass the sprite
+    # relies on its own blank margin to cover where it was, and the step has
+    # to stay inside that margin; a bug there shows up as a second copy on
+    # screen, which the exact row count below rejects.
     logo_seen=no
-    for steps in 41000000 41200000 41500000; do
+    for steps in 15000000 60000000 120000000; do
         $EMU --disk "$TMP/demo.raw" --max-steps $steps --type-at '4000:logo\r' \
              --no-stuck-detect --dump-screen "$TMP/logo.ppm" >/dev/null 2>&1
         if python3 - "$TMP/logo.ppm" <<'PY'
@@ -831,18 +835,21 @@ def lit(x, y):
     return px[((y * w) + x) * 3 + 1] > 0x80
 rows = [y for y in range(h) if any(lit(x, y) for x in range(w))]
 cols = [x for x in range(w) if any(lit(x, y) for y in range(h))]
-# The sprite is 160 x 51. A wrong next_row lands rows on top of each other,
-# which shows up as too few of them; the column span stays right either way,
-# so it is the row count that does the work here.
-ok = (len(rows) == 51 and rows[-1] - rows[0] == 50
-      and cols and cols[-1] - cols[0] + 1 == 160)
+# The logo's ink spans 144 x 45 - the sprite is 160 x 47 with a blank byte
+# each side and a blank row top and bottom, which is what lets it be drawn
+# with no erase pass. A wrong next_row lands rows on top of each other, so
+# the row count is what does the work here; the column span stays right
+# either way. Exact equality also catches a trail: anything left behind
+# widens the span or adds rows.
+ok = (len(rows) == 45 and rows[-1] - rows[0] == 44
+      and cols and 144 <= cols[-1] - cols[0] + 1 <= 145)
 sys.exit(0 if ok else 1)
 PY
         then logo_seen=yes; break; fi
     done
     if [ "$logo_seen" = yes ]; then
         pass "LOGO blits the sprite whole, row stepping included"
-    else fail "LOGO never showed a complete 160x51 sprite"; fi
+    else fail "LOGO never showed one clean 144x45 logo (trail, or mis-stepped rows)"; fi
 fi
 
 echo

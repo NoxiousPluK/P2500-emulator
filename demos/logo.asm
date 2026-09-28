@@ -11,15 +11,19 @@
 
 org $0100
 
-; How many fields between one-pixel steps. At 160 x 51 the erase and blit
-; take a little over one field, so the field sync settles on two fields per
-; redraw and MOVE_EVERY 1 already gives 25 px/s - a logo that drifts across
-; the screen in fifteen seconds rather than four. Raise it to slow down
-; further; the redraw guard below then earns its keep.
-MOVE_EVERY equ 1
+; How many fields between one-pixel steps. The single-pass blit of 21 x 47
+; bytes fits comfortably inside one field, so the loop runs at 50 Hz and
+; MOVE_EVERY 2 gives 25 px/s - a logo that drifts across the screen in
+; fifteen seconds rather than four. Raise it to slow down further; the
+; redraw guard below is what makes that free.
+MOVE_EVERY equ 2
 
-MAXX  equ 512 - logo_pix - 1
-MAXY  equ 256 - logo_h - 1
+; The sprite carries a byte of transparent margin each side and a blank row
+; top and bottom (mk_sprite --halo), so posx/posy address the margin's corner
+; and the visible logo sits 8 px right and 1 px down of it. Bounds keep the
+; whole blit - margin included - inside the 64-byte rows.
+MAXX  equ (64 - logo_w) * 8 + 7
+MAXY  equ 256 - logo_h
 
 start:
   call gfx_on
@@ -30,16 +34,14 @@ start:
   ; Start somewhere off-centre so the first bounce is not symmetric.
   ld hl,37
   ld (posx),hl
-  ld (oldx),hl
   ld a,23
   ld (posy),a
-  ld (oldy),a
 
-; Redraw only on the fields where the logo actually moved. Erasing and
-; blitting 51 rows twice over costs more than a field, so doing it when
-; nothing has changed would both waste the time and leave a half-drawn
-; sprite on screen for longer than it needs to be. With MOVE_EVERY at 1 it
-; moves every pass anyway; the guard is what makes raising it cheap.
+; One pass, one write per byte. Because the sprite carries its own margin
+; and the step is a single pixel, a plain store covers wherever it just was
+; - so there is no erase pass, nothing is ever briefly blank, and the work
+; halves. Erase-then-draw is what made it flicker: for the length of the
+; erase the logo was simply not there.
 frame:
   ld a,(movetick)
   dec a
@@ -51,14 +53,8 @@ frame:
 
   call split_x             ; posx -> xbyte, shift, sprite pointer
   call vid_in
-  call erase               ; old position first - they usually overlap
   call draw
   call vid_out
-
-  ld hl,(posx)
-  ld (oldx),hl
-  ld a,(posy)
-  ld (oldy),a
 
 frame_wait:
   call wait_field
@@ -73,9 +69,13 @@ frame_wait:
 
 ; --- position ---------------------------------------------------------------
 
+; x += dx, y += dy, bouncing at the edges.
+;
+; The step has to stay within what the sprite margin covers, because there is
+; no erase pass: 8 pixels horizontally, but only ONE row vertically. dy must
+; be +/-1 or the logo leaves a trail behind it - which is exactly what a
+; leftover -2 in here did.
 move:
-  ; x += dx, bounce at both ends. A negative x wraps to a large unsigned
-  ; value, so the high-bit test catches the left edge before the compare.
   ld hl,(posx)
   ld a,(dx)
   ld e,a
@@ -102,7 +102,7 @@ hit_left:
 hit_right:
   ld hl,MAXX
   ld (posx),hl
-  ld a,-2
+  ld a,-1
   ld (dx),a
 
 move_y:
@@ -110,7 +110,11 @@ move_y:
   ld b,a
   ld a,(dy)
   add a,b
-  jr c,hit_top             ; wrapped below zero
+  ; dy is two's complement, so this is a subtract in disguise: carry SET
+  ; means no borrow. Underflow is carry CLEAR - the other way round from how
+  ; it reads. With an erase pass this bug was invisible, because the clamp to
+  ; 0 was drawn over cleanly; without one it leaves the old sprite behind.
+  jr nc,hit_top
   cp MAXY+1
   jr nc,hit_bottom
   ld (posy),a
@@ -158,7 +162,8 @@ sx_done:
 
 ; --- blitting ---------------------------------------------------------------
 
-; Draw the sprite at (posx, posy), OR-ing so it never erases what it crosses.
+; Store the sprite at (posx, posy). A store, not an OR: the margin bytes are
+; blank and have to actually clear what was under them.
 draw:
   ld a,(xbyte)
   ld b,a
@@ -172,7 +177,6 @@ dr_row:
   ld b,logo_w
 dr_col:
   ld a,(de)
-  or (hl)
   ld (hl),a
   inc de
   inc hl
@@ -185,46 +189,12 @@ dr_col:
   jr nz,dr_row
   ret
 
-; Blank the rectangle the sprite occupied last frame.
-erase:
-  ld a,(oldx)
-  ld l,a
-  ld a,(oldx+1)
-  ld h,a
-  srl h
-  rr l
-  srl h
-  rr l
-  srl h
-  rr l
-  ld b,l
-  ld a,(oldy)
-  call row_addr
-  ld a,logo_h
-  ld (rowcnt),a
-er_row:
-  push hl
-  ld b,logo_w
-er_col:
-  ld (hl),0
-  inc hl
-  djnz er_col
-  pop hl
-  call next_row
-  ld a,(rowcnt)
-  dec a
-  ld (rowcnt),a
-  jr nz,er_row
-  ret
-
 include "p2500.inc"
 
 ; --- state ------------------------------------------------------------------
 
 posx:   dw 0
 posy:   db 0
-oldx:   dw 0
-oldy:   db 0
 dx:     db 1
 dy:     db 1
 movetick: db 1
