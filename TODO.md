@@ -49,7 +49,7 @@ constant. Where something is still assumed, it says so.
 | `$05` | Bank latch (W) / status (R) | Write: bit 3 = EPROM out of `$0000`–`$0FFF`; bits 0–2 all clear = video DRAM window at `$8000`–`$BFFF`, all set = main DRAM. **The other six combinations are undecoded and now trip a diagnostic (T27).** Read: bit 7 = RXD, bit 6 = TX handshake; bits 0–5 unknown, read back 1 |
 | `$06` | Keyboard data | Byte-wide, one `IN` per ch3 interrupt |
 | `$08`/`$09` | **MC6845 CRTC** | All 18 registers stored and printed at exit; **nothing renders from them yet (T37)**. 80×24, 12 scanlines/row, 311 scanlines/frame. Only R14–R17 read back, per the datasheet |
-| `$0A` | **Video attribute latch** | Write-only. The low nibble is the 4-bit attribute every subsequent write into the video window stores alongside the character (T27). Bit 6 is set by `ESC 3`. Not a POST latch, which is what it had been mistaken for |
+| `$0A` | **Video attribute latch + graphics-mode select** | Write-only. Low nibble = the 4-bit attribute every subsequent write into the video window stores alongside the character (T27). **Bit 6 selects high-resolution graphics mode**: `ESC 3` writes `$40` here, `ESC 4` ends it. Not a POST latch, which is what it had been mistaken for |
 | `$0F` | SESAM dongle / bootable cartridge | Access is counted; the IPL-only baseline is 32 reads / 6 writes |
 | `$10`–`$13` | **Z80A-PIO** (Z8420), FDD card | Mode 3 bit control. PA0 = µPD765 `INT` (**assumed, not traced**; if it ever misbehaves, try PA1 before concluding the model is wrong) |
 | `$14`/`$15` | **µPD765 FDC** | Idle status is exactly `$80`. Read path complete; write/format decoded but not implemented (T30) |
@@ -424,9 +424,17 @@ contexts where a GUI dependency would make it unrunnable.
   | | | | `3` | `$F1E3` (arms an alternate table; also `OUT ($0A),$40`) |
 
   An alternate table at `$F199` applies once `ESC 3` has set flag bit 5:
-  `0` → `$F1D1`, `4` → `$F1FB` (which clears bit 5 again). `ESC C`/`ESC c`
-  landing on cursor on/off independently confirms the decode — that is
-  exactly what `VALLEY.BAS` declares them as.
+  `0` → `$F1D1`, `4` → `$F1FB` (which clears bit 5 again).
+
+  **The P2219 manual's own CONTROL CODES (SCREEN) table matches this one
+  entry for entry, 13 for 13** — see
+  `../Information from the internet/P2219-manual-OCR/findings.md`. It names
+  them: `1`/`2` start and end **mosaic graphics**, `3`/`4` start and end
+  **high-resolution graphics**, `S`/`T` roll up and down, `U`/`V` next and
+  previous page, `Y rr cc` absolute cursor address with `$20` offsets,
+  `K`/`k` erase to end of line and page, `C`/`c` visible and invisible
+  cursor. The `±80` / `±1920` arithmetic recovered for `S/T/U/V` is right;
+  "cursor movement" was the wrong name for it.
 
   ### The parameter encoding
 
@@ -440,8 +448,11 @@ contexts where a GUI dependency would make it unrunnable.
   | 5 | 0 |
 
   The 16 legal parameters are therefore `@` `` ` `` `P` `p` `B` `b` `R` `r`
-  `A` `a` `Q` `q` `C` `c` `S` `s`, reaching all 16 nibble values (`Z` is a
-  17th, an alias for `$C`). **Verified by execution, not just by reading**:
+  `A` `a` `Q` `q` `C` `c` `S` `s`, reaching all 16 nibble values. (`Z` also
+  passes the validation table but is **not** an attribute: `ESC 0 Z` is
+  *reverse screen*, a command in its own right, and `$F252` special-cases it
+  with `cp $5A` before the attribute decode. An earlier note here called it
+  a seventeenth value aliasing `$C`, which was wrong.) **Verified by execution, not just by reading**:
   driving all 16 through MBASIC-80 and dumping the attribute plane
   reproduces the table exactly.
 
