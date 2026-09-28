@@ -5,9 +5,8 @@ evidence behind each item and the decoded hardware model; this file is the
 shape of the project and the reasoning about sequencing. Read `TODO.md`
 first if you are here to do work.
 
-Rewritten 2026-09-28. The historical "state before Phase 1" section and the
-long Phase 1 / Phase 2 plans are gone now that both are complete —
-`git log -p --follow ROADMAP.md` has them.
+Rewritten 2026-09-28 (previous: `5e73169`). Completed phases are summarised
+rather than narrated; `git log -p --follow ROADMAP.md` has the long form.
 
 ## Goal
 
@@ -19,13 +18,12 @@ image, with a working screen and keyboard, on a hardware model that is
 
 **Every mechanism in this emulator should trace to a specific byte in a real
 dump.** The project's recurring failure mode has been introducing a
-plausible-sounding mechanism (a free-running counter, a synthetic `$3019`
-handoff, a step-count cooldown), tuning it until something moved, and then
-building further work on top of it. Each later turned out to be covering for
-a misread port. When a busy-wait will not clear, the answer has so far
-*always* been in the ROM, not in a constant.
+plausible-sounding mechanism, tuning it until something moved, and then
+building on it. Each later turned out to be covering for a misread port.
+When a busy-wait will not clear, the answer has so far *always* been in the
+ROM, not in a constant.
 
-Five corollaries, each paid for:
+Corollaries, each paid for:
 
 - **Address-diversity is not evidence of progress.** Zeroed RAM decodes as
   `NOP` and produces an ever-growing distinct-address count indistinguishable
@@ -33,274 +31,207 @@ Five corollaries, each paid for:
   actually present at that address.
 - **"It got further" is not evidence the mechanism is right.** The CTC
   channel-chaining model cleared a real stall and was still wrong. The tell
-  was that it needed a second special case (`channel3_rx_ready`) to keep the
-  first from misbehaving. **When a fix needs a qualifier, look for the
-  mechanism it is standing in for before building on it.**
-- **Check how far "derived from firmware" actually reaches before declaring
-  something unmeasurable.** The IM2 daisy-chain order looked like pure wiring
-  that only a multimeter could settle. It is not: the IPL's DMA and PIO
-  handlers share one saved-SP word and one private stack, so only one of the
-  two orders lets them coexist, and the wrong one kills the machine in an
-  `RST 38` loop. Two of the three "hardware only" questions this project
-  raised turned out to be answerable from bytes already in the repository.
+  was that it needed a second special case to keep the first from
+  misbehaving. **When a fix needs a qualifier, look for the mechanism it is
+  standing in for.**
+- **"Not derivable" needs an exhausted search, not a failed one.** The video
+  attribute write path was twice declared underivable from firmware — once
+  because no surviving software sets an attribute, once because every
+  `OUT ($05)` in the corpus was accounted for. Both searches were real and
+  both were in the wrong place: the answer was port `$0A`, sitting in a
+  screen driver nobody had disassembled. Before calling something
+  hardware-only, name the code you have *not* read.
 - **A silent drop is worse than a stall.** The single-slot interrupt model
-  discarded one device's entire interrupt stream with no diagnostic, and did
-  so for the whole of Phase 1. Every model that can refuse to act should say
-  so when it does — which is why the exit report now asserts 1:1
-  request/acknowledge counts.
-- **"Not derivable" needs an exhausted search, not a failed one.** The
-  video attribute write path was twice declared underivable from firmware -
-  once on the grounds that no surviving software sets an attribute, once on
-  the grounds that every `OUT ($05)` in the corpus was accounted for. Both
-  searches were real and both were in the wrong place: the answer was port
-  `$0A` and it was sitting in a screen driver that had never been
-  disassembled. Before calling something hardware-only, name the code you
-  have *not* read.
+  discarded one device's entire interrupt stream with no diagnostic, for the
+  whole of Phase 1. Every model that can refuse to act should say so — which
+  is why the exit report asserts 1:1 request/acknowledge counts and why
+  unmodelled ports are now counted rather than ignored.
 - **Suspect the input before the emulator, but prove it.** Four disk images
-  failed to boot for reasons that were not in this code at all: they are
-  double-stepped dumps missing every other track. The proof was not a hunch
-  but the `.IMD` cylinder maps, which split the nine images perfectly along
-  the boot/no-boot line. The inverse also holds — `P25K_G` is clean, so its
-  failure *is* ours.
+  failed for reasons that were not in this code: they are double-stepped
+  dumps. The proof was the `.IMD` cylinder maps, which split the nine images
+  perfectly along the boot/no-boot line. The inverse also holds — `P25K_G`
+  is clean, so its failure *is* ours.
+- **A test that cannot fail is worse than no test.** Twice now: a stale GUI
+  binary passed the whole front-end section for hours, and a pixel probe for
+  the screen offset passed with the offset deleted. Negative-test anything
+  that guards a behaviour you care about.
 
 ---
 
-## Phase 1 — a correct floppy path — COMPLETE
+## Phases 1–3 — complete
 
-The boot sector's own `LD DE,$1030 / CALL $0003` produces a real `READ
-DATA`, the DMA delivers 32 sectors to `$1000`–`$2FFF`, and execution reaches
-`$4A00` un-gated — a hard, falsifiable criterion, since `$4A00` is where the
-real boot sector jumps after its own `LDIR` and nothing reaches it by
-accident.
+**Phase 1, a correct floppy path.** The boot sector's own `READ DATA` runs,
+the DMA delivers, execution reaches `$4A00`. Getting there meant correcting
+three misidentifications provable from the ROM bytes: ports `$10`–`$13` are
+a PIO not a CTC, port `$16` is the DMA and was the missing data path, and
+`CALL $3019` is a relocated RAM test rather than a disk handoff. The
+expected side effect happened — every tuning constant disappeared.
 
-Getting there meant correcting three misidentifications, all provable from
-the ROM bytes: ports `$10`–`$13` are a Z80A-PIO and not a CTC; port `$16` is
-the Z80A-DMA and was the missing `READ DATA` data path; and `CALL $3019` is
-the ROM's own relocated RAM test, not a disk handoff. Four further
-compounding bugs sat between "wired up" and "actually runs", none of them in
-the wiring itself. The expected side effect happened: every tuning constant
-in the codebase disappeared.
+**Phase 2, CP/M running.** `A>` and a correct `DIR`. What it took: a real
+IM2 daisy chain (the vendored core's single pending-interrupt slot had been
+silently discarding one device's entire stream), the chain order *derived*
+from the IPL's own stack discipline, a T-state-driven CTC whose payoff is a
+falsifiable check — CBIOS's baud table decodes to 75–2400 baud each within
+0.3% — the CTC's real per-channel wiring, and port `$05` as an input.
 
-## Phase 2 — CP/M actually running — COMPLETE (2026-09-27)
-
-`make test` renders the `A>` prompt and `DIR` lists the disk's real
-contents. Those six files are what the disk image holds, so the listing is
-fixed by the media rather than by anything in this emulator.
-
-What it took, over and above Phase 1:
-
-- **A real IM2 daisy chain.** The vendored core's single pending-interrupt
-  slot had been silently discarding one device's entire interrupt stream: the
-  IPL's DMA end-of-block handler `$07F3` had never executed in any run of
-  this emulator. It now runs 87 times, once per transfer, every request
-  acknowledged 1:1. This alone cleared the deadlock that had looked like a
-  clock problem — it was the *disk* completion that never arrived.
-- **The chain order, derived rather than guessed** (guiding principle,
-  corollary 3).
-- **A T-state-driven CTC with a real prescaler.** The ×4 fudge is gone, and
-  the payoff is a falsifiable check: CBIOS's table at `$F546` now decodes to
-  75/110/150/300/600/1200/2400 baud, each within 0.3%, which it cannot do
-  under a wrong prescaler or a per-instruction tick.
-- **The CTC's actual per-channel wiring.** ch0 is the serial transmit bit
-  clock (TIMER, no CLK/TRG at all); ch1's CLK/TRG is the serial RXD line;
-  ch2's is an unidentified 50 Hz strobe feeding the real-time clock; ch3's is
-  the keyboard's byte-ready strobe.
-- **Port `$05` as an input** — bit 7 RXD, bit 6 transmit handshake.
-- **`tools/disasm_ram.sh`**, which is why any CBIOS finding here is
-  checkable at all. The `.phi` files are sector-interleaved on disk, so only
-  a `--dump-ram` image yields usable addresses.
+**Phase 3, an interactive machine.** An SDL3 + ImGui front-end with a
+CRTC-driven renderer, live keyboard, a styled menu bar and native file
+dialogs. The renderer lives in the core so both front-ends call it and
+cannot drift; pacing is one video field per presented frame, making the
+frame loop and the guest's own 50 Hz clock strobe the same event by
+construction. Along the way the video card was fully decoded: 16K × 12 bits,
+the attribute nibble latched in port `$0A`, the 8×12 character cell, and the
+complete escape-code set — which the P2219 manual then confirmed entry for
+entry.
 
 ---
 
-## Phase 3 — an interactive machine (current)
+## Phase 4 — a *complete* machine (current)
 
-**Mostly landed 2026-09-28.** `p2500-gui` boots a disk to the `A>` prompt in
-an SDL3 window and takes live keyboard input. Geometry, cursor position and
-cursor shape all come from the MC6845's registers; the renderer lives in the
-core (`p2500_video_render`) and both front-ends call it, so they cannot drift
-apart. Pacing is one video field of emulation per presented frame, which
-makes the frame loop and the guest's own 50 Hz clock strobe the same event by
-construction. `libp2500.a` is still dependency-free and `make test` still
-needs no display — the front-end is tested under `SDL_VIDEODRIVER=dummy`.
+Four things stand between "boots and runs software" and "emulates the
+machine". In `TODO.md` order:
 
-What is left in `TODO.md` P1: **T39, the debugger panels**, which are the
-actual reason for wanting a GUI, and **T34** (a log callback and a real
-reset) which the GUI works without today but a log panel and a reset button
-will need. T38's live input works; what is deferred there is accented-key
-decoding, which needs the `$E274` dead-key table read first rather than
-guessed.
+**The debugger panels (P1).** The GUI exists because instrumentation is what
+has moved this project every single time. The menu bar is scaffolding; the
+panels are the point. Device state first — the daisy chain, the CTC
+channels, DMA registers, FDC phase — because that is the panel that would
+have turned two multi-session chases into single glances.
 
-Note that T27 turned out not to gate this after all. The attribute plane is
-modelled and composited, and since nothing that survives ever sets an
-attribute, the renderer was unblocked by *answering* the layout question
-rather than by resolving the write path.
+**Graphics mode (P2).** The character path is complete and the graphics path
+is entirely absent. It is fully specified now — 512 × 256 dots, one bit
+each, selected by port `$0A` bit 6 — so this is implementation, not
+research. It is also the last major part of the video hardware that exists
+only on paper.
 
-**The GUI's primary purpose is a debugger, not a settings dialog.** Every
-advance in this project came from instrumentation — `--peek`, `--count`,
-`--watch`, `--dump-ram`, trace windows. A live view of the daisy chain and
-the CTC channels would have turned the two hardest bugs in this project's
-history from archaeology into inspection. Build the panels first and the file
-dialogs last.
+**Writing to disk (P3).** Reading works; the DMA↔FDC data flow is inverted
+for writes and `WRITE DATA` / `FORMAT` are decoded but unimplemented. This
+is what stands between the emulator and running `CONFIG`, copying files with
+`PIP`, or saving from SuperCalc — and it is a prerequisite for modelling
+SESAM properly, since disk initialization *writes*.
 
-Three console questions are already settled and need no further research:
+**The FDC's drive-ready model (P4).** Two hangs — a diskless boot, and
+`P25K_G` after its last successful read — that look like one cause: a real
+µPD765 polls each drive's READY and interrupts on changes, and this emulator
+has two synthetic post-reset interrupts instead. Whether real hardware also
+hangs with an empty drive is genuinely open; the honest move is to model the
+line properly rather than invent an interrupt that makes a symptom go away.
 
-- **Video is settled, except for one wire.** The CRTC registers decode to
-  80×24 at 12 scanlines/row, matching the official P2219 manual's 640×288
-  mode, and the card's memory is 16 K words × **12 bits** — an 8-bit
-  character code plus a 4-bit attribute nibble (underline, reverse, flash,
-  low intensity). Four independent facts agree on that; see `TODO.md` T27.
-  The glyph is the full 8×12 cell, not 8×8 (T27a). What is *not* known is
-  how the CPU reaches the attribute nibble, and it is not derivable —
-  **nothing in the entire disk corpus ever sets an attribute.** The emulator
-  models the plane, declines to guess the selector, and now raises a
-  diagnostic on any bank value it cannot account for, so the day something
-  does set one it announces itself.
-- **Keyboard**: there are **two** input paths, not one, which is what made
-  this confusing for so long. The keyboard is port `$06`, byte-wide,
-  announced by a strobe on CTC channel 3. The serial port is the bit-banged
-  one, on channels 0 and 1 — transmit on port `$04` clocked by ch0, receive
-  by sampling port `$05` bit 7 once per bit cell under ch1, whose CLK/TRG is
-  the RXD line itself so the start bit triggers the sequence. Typing works
-  end to end and `make test` asserts it.
-- **Printer**: port `$04`, transmit-only, out DB25 pin 3, and the rate is no
-  longer a guess — CBIOS's own baud table at `$F546`, selected by `$F727`,
-  which is 1200 baud on this disk. Everything is modelled and nothing
-  exercises it, so `PIP LST:=FILE.TXT` is both the remaining work and its own
-  test.
+## Phase 5 — the media, and what is locked inside it
 
-## Phase 4 — writing, and the disks that still fail
+The nine disk images are the entire surviving software corpus this project
+has, and four of them are half dumps. That is now the biggest single
+constraint on what can be learned, because those four hold the P2219 system
+diskette itself, the `CONFIG` utility, the alternate BIOS profiles and the
+national keyboard tables.
 
-Parallel to Phase 3 and independent of it.
+**Re-imaging them with single-stepping is the highest-leverage action
+available to this project, and it needs hardware rather than code.** About
+60% of each file can already be salvaged, which was enough to identify what
+is there but not to run any of it.
 
-- **Write and format** (`TODO.md` T30). Reading works; `WRITE DATA` and
-  `FORMAT A TRACK` are decoded but unimplemented, and the DMA↔FDC data flow
-  is still inverted, which is what blocks them. `PIP` copying a file onto a
-  disk is the test.
-- **Multi-track reads past `EOT`** (`TODO.md` T31). CP/M's directory reads
-  stay inside one track, which is why `DIR` is correct without this; a large
-  sequential file read is not.
-- **`P25K_G`** (`TODO.md` T42) — the one complete, clean image that does not
-  reach a prompt, so this failure belongs to this emulator rather than to the
-  dump. Characterised down to a single unsignalled event slot; the next step
-  is to identify which ISR is supposed to signal it.
-- **The four double-stepped images are blocked on re-imaging**, not on code.
-  They were read by a 96 TPI drive single-stepping across 48 TPI media, so
-  every other track is simply absent. `tools/imd_tool.py verify` reports this
-  for any `.IMD`.
+Everything else here is downstream of that: the UCSD p-System disks (a
+genuinely different bootstrap, and the best independent test of the disk
+path that could exist), reading `.IMD` directly for bad-sector fidelity, and
+`CFTABLES.PHI` for the keyboard tables.
 
-## Phase 5 — everything else
+## Phase 6 — research that no longer needs hardware
 
-Not on the critical path; listed so it is not forgotten.
+Two sources opened up recently and are far from exhausted.
 
-- **UCSD p-System boot** (`P2k5_LOGIC`, `P2k5_TKS`) — a genuinely different
-  bootstrap and therefore a real independent test of the disk path, and the
-  first thing that would test the IM2 chain against software that was never
-  considered while building it. Blocked until those disks are re-imaged.
-- **SESAM dongle emulation for real software.** The protocol is modelled;
-  what is missing is a real key's 3 bytes. Any P2219 disk that refuses to
-  boot with `INIT ERROR` is testing this.
-- **An Emscripten build** (`TODO.md` T40), which falls out nearly free if
-  T36 uses SDL3's callback app model from the start. A browser-playable P2500
-  is a disproportionately good outcome for a machine with this little
-  surviving software.
+**The `.PHI` system files are memory-mapped images**, so any disk's CBIOS and
+PBIOS can be disassembled without booting it, and different builds diffed
+against each other. The standing note that they were unusable for static
+analysis was an artifact of a broken extractor. This is how `P25K_G`'s
+failure was narrowed from "an event never signals" to "the disk device's
+request never completes", and it is the route to the drive-type tables, the
+national keyboard tables and the `$E274` dead-key decode.
+
+**The P2219 manual is OCR'd** and checked in. It has already settled the
+attribute encoding, the screen control codes, capitals lock, the drive map
+and SESAM initialization — several of which confirmed firmware decodes
+independently, and two of which corrected them. The printer interface, the
+disk formats, the utility descriptions and the sideways 8-bit code table on
+page 27 are still unread.
+
+## Phase 7 — everything else
+
+- **SESAM for real software.** The protocol is modelled; a real key's three
+  bytes are missing. The manual reveals more than expected: a system disk is
+  *initialized* against a key on first boot, writing to itself, after which
+  the wrong key gives `INIT ERROR`. So a genuine key may not boot these
+  particular images.
+- **An Emscripten build.** Nearly free given SDL3's callback model, and a
+  browser-playable P2500 is a disproportionately good outcome for a machine
+  with this little surviving software.
 - **The FXD/SASI card.** Was out of scope "until a Winchester-configured
-  `PBIx.PHI` turns up" — and something that looks like one now has
-  (`TODO.md` T45). Salvaged fragments of `p25k_prg`'s alternate BIOS
-  profiles show drive-type tables where `SYSTEM` and `SYS09` list only
-  `5s`/`5d` while **`SYS12` and `SYS13` list `hd`**. Not proof: those files
-  are 61–67% recovered and the tables are undecoded. Re-imaging that disk
-  is the cheap way to settle it.
-- **The `$18`–`$1E` port cluster**, which appears in `SYS09.PHI` and is most
-  likely the optional 8" drive interface. Ignore it unless a disk image needs
-  it.
+  `PBIx.PHI` turns up" — and something that looks like one now has. Salvaged
+  fragments of the alternate BIOS profiles show drive-type tables where
+  `SYSTEM` and `SYS09` list only `5s`/`5d` while **`SYS12` and `SYS13` list
+  `hd`**. Not proof: those files are 61–67% recovered and the tables are
+  undecoded. Re-imaging that disk settles it.
 
-**A MAME driver** is a plausible eventual sibling but would reuse the
-*findings* and `make test` as an oracle rather than the code — MAME's devices
-are C++ classes deriving from `device_t`, driven by its own scheduler and
-address maps, and it already ships `z80daisy`, `z80ctc`, `z80pio`, `z80dma`
-and `upd765`. So the transferable assets are the decoded hardware model
-(documentation, not code) and the test suite as an equivalence check: a MAME
-driver that boots to `A>` and lists the same six files is demonstrably
-equivalent. Worth keeping the core clean for; not worth contorting it for.
+**A MAME driver** remains a plausible sibling, but it would reuse the
+*findings* and `make test` as an oracle rather than the code — MAME's
+devices are C++ classes with their own scheduler, and it already ships
+`z80daisy`, `z80ctc`, `z80pio`, `z80dma` and `upd765`. Worth keeping the
+core clean for; not worth contorting it for.
 
 ---
 
-## What hardware work would help, and what would not
+## What hardware work would help
 
-**Nothing has been blocked on hardware through either completed phase.** The
-Phase 2 review's claim that it had found this project's first un-derivable
-questions did not survive contact with the work: two of its three were
-answerable from bytes already here — the daisy-chain order, from the IPL's
-own stack discipline, and what the CTC's CLK/TRG pins are, from reading
-CBIOS's four ISRs.
+**Nothing has been blocked on hardware through four phases.** The one
+genuine exception is the media: re-imaging the four double-stepped disks
+needs a drive and cannot be done from here.
 
-So the list below is shorter than expected. Measurement would still settle
-these faster than firmware archaeology, and **refuting any of them would be
-more valuable than confirming it.** Full checklist in
+Beyond that, measurement would settle these faster than firmware
+archaeology, and **refuting any of them would be more valuable than
+confirming it**. Full checklist in
 `../Tracing/P2500-predicted-wiring-from-firmware.md`.
 
-1. **Where the CTC sits in the IM2 daisy chain**, relative to the FDD card's
+1. **Re-image the double-stepped disks.** See Phase 5. Not a measurement,
+   but the highest-value physical task by a wide margin.
+2. **The video card's dot-clock crystal** — the can at ref `5101`, reported
+   to start with "12", never identified. Cheap, and it settles `TODO.md` T29
+   by arithmetic: the CRTC is programmed for 311 scanlines of 98 character
+   times, so the frame rate is the dot clock over 243,824. If that is 50 Hz,
+   CTC channel 2 is the video frame rate rather than mains and the last
+   non-derived frequency in the emulator becomes derived.
+3. **Where the CTC sits in the IM2 daisy chain**, relative to the FDD card's
    PIO and DMA. The DMA-before-PIO half is settled; this half is not, and it
-   decides whether a 50 Hz clock tick can pre-empt a disk handler that
-   released itself early with `EI`/`RETI`. Tracing `IEI`/`IEO` between the
-   Z8430, Z8420 and Z8410 is a continuity check. The emulator currently puts
-   the CTC last, which is the conservative reading.
-2. **The video card's dot-clock crystal** — the can-shaped part at ref
-   `5101`, never identified. Cheap to read and it settles `TODO.md` T29 by
-   arithmetic: the CRTC is programmed for 311 scanlines of 98 character
-   times, so the frame rate is the dot clock over 243,824. If that comes out
-   at 50 Hz, CTC channel 2 is the video frame rate rather than mains, and
-   the last non-derived frequency in the emulator becomes derived.
-
-3. **What pulses CTC channel 2's CLK/TRG** — the 50 Hz real-time clock tick.
-   Mains-derived or the video card's frame rate; both are 50 Hz so the
-   emulator is right either way. See the item above for the cheaper route.
-4. **Which nibble bit is which attribute.** The attribute *path* is solved
-   (`TODO.md` T27): the CPU latches a 4-bit nibble in port `$0A` and the card
-   stores it beside the next character. What is not pinned is which bit means
-   underline, reverse, flash or low intensity. Firmware may still settle it -
-   the `ESC S/T/U/V` handlers and `$F30C` are unread - so this is a
-   *measurement of last resort*, not a first resort.
-
-   Worth recording how the previous version of this item read: "unlike every
-   other open question in this project it is *provably* not answerable from
-   firmware". That was wrong, and wrong in the project's characteristic way -
-   it concluded "not derivable" from a failed search rather than from an
-   exhausted one. The answer was in a driver nobody had disassembled yet.
+   decides whether a clock tick can pre-empt a disk handler that released
+   itself early with `EI`/`RETI`. Tracing `IEI`/`IEO` between the Z8430,
+   Z8420 and Z8410 is a continuity check.
+4. **The drive READY line**, which decides whether a real machine also hangs
+   with an empty drive (`TODO.md` T43).
 5. **FDD card: which µPD765 signals reach PIO port A bits 0 and 1.** The
    emulator has to guess this. A 10-minute continuity check settles it.
 6. **FDD card: PIO port B direction** (`$A1` mask → PB0/PB5/PB7 inputs). One
    measurement that validates or kills the entire PIO identification.
-7. **Port `$05`'s remaining readable bits.** Bit 7 is RXD and bit 6 is a
-   transmit handshake, both confirmed from the code that reads them. Bits 0–5
-   are unknown and currently read back as 1. This is a live polled input now,
-   not a write-only latch.
-8. **CPU card: the port `$05` latch and what its outputs gate.** Turns a
-   reasoned guess into a fact, and is needed properly for the video-RAM
-   window.
-9. **CPU card: the four `515xx` decode PROMs' address inputs.** Their truth
-   tables are already dumped but inert without the wiring. Would give the
-   complete memory and I/O map in one go.
-10. **The Philips P2500 System Reference Manual (`5103 992 30421`).**
-   Supersedes all of the above. Still the single biggest documentation gap in
-   the whole project.
+7. **Port `$05`'s remaining readable bits.** Bit 7 is RXD and bit 6 a
+   transmit handshake, both confirmed from the code that reads them. Bits
+   0–5 are unknown and read back as 1.
+8. **The four `515xx` decode PROMs' address inputs.** Truth tables already
+   dumped but inert without the wiring. Would give the complete memory and
+   I/O map in one go.
+9. **The Philips P2500 System Reference Manual (`5103 992 30421`).**
+   Supersedes most of the above, and the P2219 manual explicitly defers to it
+   for high-resolution graphics detail. Still the single biggest
+   documentation gap.
 
-Things that would *not* help much right now: the SASI/FXD card, the
-backplane's glue logic, the DIP switch (all 8 read ON, so there is no bit
-pattern to correlate), and the video card's DIN connectors. All matter
-eventually; none unblocks anything.
+Things that would *not* help much: the backplane glue logic, the DIP switch
+(all 8 read ON, so there is no bit pattern to correlate), and the video
+card's DIN connectors.
 
 ---
 
 ## Cross-references
 
 - `TODO.md` — the work queue, the decoded hardware model, address references
+- `../Information from the internet/P2219-manual-OCR/` — the CP/M manual,
+  OCR'd, with `findings.md` for what it settled
 - `../ROM Dumps/CPU-Card-Boot-EPROM/disassembly/findings.md` — the IPL
-- `../Disk Images/findings/BIOS-disassembly-findings.md` — the CP/M BIOS
-- `../Disk Images/findings/IMD-integrity-manifest.txt` — per-image dump
-  integrity, from `tools/imd_tool.py verify`
+- `../Disk Images/findings/` — image integrity, BIOS disassembly, salvage
+- `../UCSD p-System Repair/README.md` — p-System viability
 - `../Tracing/P2500-predicted-wiring-from-firmware.md` — what to measure
 - `../P2500-System-Specifications.md` — the consolidated spec sheet
-- MC6845 register semantics: <https://book.martypc.net/display-graphics/6845>
-  (see `TODO.md`'s source assessment for what a 6845 reference can and
-  cannot settle for this board)
