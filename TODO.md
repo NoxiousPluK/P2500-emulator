@@ -249,8 +249,17 @@ contexts where a GUI dependency would make it unrunnable.
   anything above Latin-1 needs a bundled TTF, with the weight and licence
   that implies. The symbol is five straight strokes, so `draw_caps_glyph()`
   draws it into the menu bar with `AddPolyline` — the real symbol, crisp at
-  any size, no font. It doubles as the lock-state indicator, which is the
-  part that was actually confusing.
+  any size, no font.
+
+  It doubles as the **lock-state indicator**, which is the part that was
+  actually confusing: pinned to the far right of the bar behind a hairline
+  separator, vertically centred, and **always drawn** — bright when engaged,
+  faint when not — so its position never moves and the state reads at a
+  glance. Size it off the bar height rather than the font: much under half
+  the bar and the three vertical strokes merge into an unreadable blob.
+
+  `--no-caps-lock` starts the GUI disengaged, which is what makes the off
+  state reachable headlessly.
 
   What is already known about the encoding, checked rather than assumed:
   - **Alphanumerics are plain ASCII** — raw ASCII on port `$06` drives CP/M
