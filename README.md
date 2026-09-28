@@ -40,7 +40,7 @@ make test   # the regression suite
 
 `make` needs a C11 compiler; the GUI additionally needs SDL3 (`extra/sdl3`
 on Arch) and a C++17 compiler, and Dear ImGui is vendored. The core stays
-dependency-free so `make test` runs with no display at all: **55 checks**,
+dependency-free so `make test` runs with no display at all: **57 checks**,
 exit 1 on any failure. The GUI checks skip themselves if SDL3 is absent.
 
 ## Running it as a machine
@@ -90,10 +90,12 @@ are configured — unshifted keys produce capitals.
 with integer scaling. `--frames N --screenshot f.ppm`, `--shot-window f.ppm`,
 `--push-at MS:STRING`, `--panels LIST`, `--verbose-io`, `--break ADDR` and
 `--watch ADDR` let the front-end and its panels be driven and captured with no
-display, which is how `make test` checks them. `--mouse X,Y[,left|right]`
-parks and clicks a synthetic pointer, so the menu-bar lamps are covered too
-— the front-end reports its own lamp geometry to the log rather than the
-suite hardcoding pixel columns that a new menu would quietly invalidate.
+display, which is how `make test` checks them. `--mouse [FRAME:]X,Y[,left|right]`
+scripts a synthetic pointer — repeat it to click one thing and then another —
+so the menu-bar lamps and the panels' own widgets are covered too. The
+front-end reports its lamp geometry and its field positions to the log rather
+than the suite hardcoding pixel columns that a new menu would quietly
+invalidate.
 
 ## The debugger
 

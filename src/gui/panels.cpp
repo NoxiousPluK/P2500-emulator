@@ -150,6 +150,11 @@ static void draw_memory(P2500Panels &p, const P2500Machine &m, P2500Debug &dbg)
     ImGui::SameLine();
     uint16_t want = 0;
     if (addr_input("go to", p.mem_entry, sizeof p.mem_entry, &want)) p.mem_goto = want;
+    {
+        const ImVec2 lo = ImGui::GetItemRectMin(), hi = ImGui::GetItemRectMax();
+        p.goto_field_x = (lo.x + hi.x) * 0.5f;
+        p.goto_field_y = (lo.y + hi.y) * 0.5f;
+    }
     ImGui::SameLine();
     ImGui::Checkbox("follow PC", &p.mem_follow_pc);
     if (p.mem_follow_pc) p.mem_goto = m.cpu.pc;

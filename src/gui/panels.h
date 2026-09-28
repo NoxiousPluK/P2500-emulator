@@ -30,6 +30,10 @@ struct P2500Panels {
     int mem_goto = -1; /* >= 0 for one frame after a jump is requested */
     char mem_entry[8] = "";
     bool mem_follow_pc = false;
+    /* Where the "go to" field ended up on screen, so a headless run can
+     * click it without the suite pinning a pixel column that any layout
+     * change would invalidate. -1 until the panel has been drawn. */
+    float goto_field_x = -1.0f, goto_field_y = -1.0f;
 
     /* Disassembly. */
     bool disasm_follow_pc = true;

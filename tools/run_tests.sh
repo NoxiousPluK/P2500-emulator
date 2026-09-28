@@ -454,6 +454,32 @@ PY
     else
         fail "the front-end did not report its lamp geometry"
     fi
+
+    # --- the guest keeps its keyboard after the UI has used a text field ---
+    # ImGui's SDL3 backend calls SDL_StopTextInput() when one of its fields
+    # loses focus, which turns SDL_EVENT_TEXT_INPUT off for the whole window.
+    # That is where every printable key the guest receives comes from, so one
+    # use of any address field used to leave the machine untypeable. Key
+    # events were unaffected, so the menus and F-keys went on working and hid
+    # it - which is why this is asserted on SDL's own text-input state and
+    # not on WantCaptureKeyboard, which looks correct throughout.
+    SDL_VIDEODRIVER=dummy ./p2500-gui --disk "$DISK" --frames 8 --panels memory \
+        --shot-window "$TMP/mem.ppm" >"$TMP/mem.log" 2>&1
+    FIELD=$(sed -n 's/.*memory panel: goto field at \([0-9]*\),\([0-9]*\).*/\1,\2/p' "$TMP/mem.log" | head -1)
+    if [ -z "$FIELD" ]; then
+        fail "the memory panel did not report its field position"
+    else
+        SDL_VIDEODRIVER=dummy ./p2500-gui --disk "$DISK" --frames 60 --panels memory \
+            --mouse "10:$FIELD,left" --mouse '30:640,450,left' \
+            >"$TMP/focus.log" 2>&1
+        # The field must actually have taken focus, or the test proves nothing.
+        if grep -q 'guest text input: off' "$TMP/focus.log"; then
+            pass "clicking a panel field takes the keyboard"
+        else fail "the scripted click never reached the field"; fi
+        if [ "$(grep -c 'guest text input: on' "$TMP/focus.log")" -ge 1 ]; then
+            pass "the guest gets its keyboard back when the field is done"
+        else fail "text input never came back - the P2500 is untypeable"; fi
+    fi
 else
     echo "== 7. SDL3 front-end - skipped (run 'make gui' to build it)"
 fi

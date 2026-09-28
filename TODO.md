@@ -19,7 +19,7 @@ SuperCalc2 (an OEM build whose splash reads `PHILIPS P2000`) loads from
 `P25K_S` and opens files; MBASIC-80 runs from `P25TEST`; `VALLEY.BAS` runs
 off drive B with working screen attributes. Three of nine disk images boot.
 
-`make test` is the proof and the guard: 55 checks, exit 1 on any failure.
+`make test` is the proof and the guard: 57 checks, exit 1 on any failure.
 
 ```
 make                 # libp2500.a, p2500-emu, and p2500-gui if SDL3 is present

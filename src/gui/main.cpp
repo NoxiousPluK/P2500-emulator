@@ -89,8 +89,14 @@ struct App {
     /* Scripted pointer, for the same reason --push-at exists: the lamps in
      * the menu bar are controls now, and a control that can only be checked
      * by a person looking at it is a control nothing guards. -1 disables. */
-    int mouse_x = -1, mouse_y = -1;
-    int mouse_button = 0;        /* 0 none, 1 left, 2 right */
+    /* A scripted pointer: move to a place, optionally click, at a given
+     * frame. Several steps, because the interesting questions are about
+     * sequences - clicking a field and then clicking away from it. */
+    struct { unsigned long at_frame; int x, y, button; } mouse[MAX_PUSHES];
+    int mouse_steps = 0;
+    int mouse_x = -1, mouse_y = -1;   /* where the script has left it */
+    bool ui_had_keyboard = false;     /* to log capture/release transitions */
+    bool text_input_was = true;       /* SDL_StartTextInput() runs at init */
     SDL_AtomicInt disk_pending;  /* set by the file-dialog callback */
     char disk_path[1024];
     unsigned pending_unit;       /* which drive the dialog was opened for */
@@ -697,7 +703,8 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[])
     int npush = 0;
     const char *panels_arg = NULL;
     bool verbose_devices = false;
-    int mouse_x = -1, mouse_y = -1, mouse_button = 0;
+    struct { unsigned long at_frame; int x, y, button; } mouse_script[MAX_PUSHES];
+    int mouse_steps = 0;
     uint16_t break_at[MAX_PUSHES] = {0};
     int nbreak = 0;
     uint16_t watch_at[MAX_PUSHES] = {0};
@@ -719,13 +726,21 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[])
          * the screen be checked headlessly. */
         else if (!strcmp(argv[i], "--panels") && i + 1 < argc) panels_arg = argv[++i];
         else if (!strcmp(argv[i], "--verbose-io")) verbose_devices = true;
-        else if (!strcmp(argv[i], "--mouse") && i + 1 < argc) {
+        else if (!strcmp(argv[i], "--mouse") && i + 1 < argc && mouse_steps < MAX_PUSHES) {
+            /* [FRAME:]X,Y[,left|right] - the frame is optional and defaults
+             * to 3, which is the earliest the UI has laid itself out. */
             char *arg = argv[++i];
-            mouse_x = atoi(arg);
+            char *colon = strchr(arg, ':');
+            unsigned long at = 3;
+            if (colon) { *colon = '\0'; at = strtoul(arg, NULL, 0); arg = colon + 1; }
             char *c1 = strchr(arg, ',');
-            mouse_y = c1 ? atoi(c1 + 1) : 0;
             char *c2 = c1 ? strchr(c1 + 1, ',') : NULL;
-            if (c2) mouse_button = (c2[1] == 'r' || c2[1] == 'R') ? 2 : 1;
+            mouse_script[mouse_steps].at_frame = at;
+            mouse_script[mouse_steps].x = atoi(arg);
+            mouse_script[mouse_steps].y = c1 ? atoi(c1 + 1) : 0;
+            mouse_script[mouse_steps].button =
+                c2 ? ((c2[1] == 'r' || c2[1] == 'R') ? 2 : 1) : 0;
+            mouse_steps++;
         }
         else if (!strcmp(argv[i], "--break") && i + 1 < argc && nbreak < MAX_PUSHES)
             break_at[nbreak++] = (uint16_t)strtoul(argv[++i], NULL, 16);
@@ -745,7 +760,7 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[])
                     "                 [--frames N] [--screenshot out.ppm] [--shot-window out.ppm]\n"
                     "                 [--push-at MS:STRING ...] [--no-caps-lock]\n"
                     "                 [--panels devices,memory,disasm,log] [--verbose-io]\n"
-                    "                 [--mouse X,Y[,left|right]]\n"
+                    "                 [--mouse [FRAME:]X,Y[,left|right] ...]\n"
                     "                 [--break ADDR ...] [--watch ADDR ...]");
             return SDL_APP_FAILURE;
         }
@@ -828,9 +843,13 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[])
         app->panels.show_log = strstr(panels_arg, "log") != NULL;
     }
     app->panels.verbose_devices = verbose_devices;
-    app->mouse_x = mouse_x;
-    app->mouse_y = mouse_y;
-    app->mouse_button = mouse_button;
+    app->mouse_steps = mouse_steps;
+    for (int i = 0; i < mouse_steps; i++) {
+        app->mouse[i].at_frame = mouse_script[i].at_frame;
+        app->mouse[i].x = mouse_script[i].x;
+        app->mouse[i].y = mouse_script[i].y;
+        app->mouse[i].button = mouse_script[i].button;
+    }
 
     SDL_StartTextInput(app->window);
     set_status(app, disks[0] ? "ready" : "no disk - File > Load Disk A...");
@@ -952,13 +971,25 @@ SDL_AppResult SDL_AppIterate(void *appstate)
          * dummy video driver is nothing useful. The click is delivered as a
          * press and a release on consecutive frames because that is what a
          * real one is; a same-frame pair never registers. */
-        if (app->mouse_x >= 0) {
+        if (app->mouse_steps) {
             ImGuiIO &io = ImGui::GetIO();
-            io.AddMousePosEvent((float)app->mouse_x, (float)app->mouse_y);
-            if (app->mouse_button && app->frames == 4)
-                io.AddMouseButtonEvent(app->mouse_button - 1, true);
-            if (app->mouse_button && app->frames == 5)
-                io.AddMouseButtonEvent(app->mouse_button - 1, false);
+            /* Move on the step's own frame, press on the next and release on
+             * the one after: ImGui has to have hovered the item for a frame
+             * before a press lands on it. */
+            for (int i = 0; i < app->mouse_steps; i++)
+                if (app->frames == app->mouse[i].at_frame) {
+                    app->mouse_x = app->mouse[i].x;
+                    app->mouse_y = app->mouse[i].y;
+                }
+            if (app->mouse_x >= 0)
+                io.AddMousePosEvent((float)app->mouse_x, (float)app->mouse_y);
+            for (int i = 0; i < app->mouse_steps; i++) {
+                if (!app->mouse[i].button) continue;
+                if (app->frames == app->mouse[i].at_frame + 1)
+                    io.AddMouseButtonEvent(app->mouse[i].button - 1, true);
+                if (app->frames == app->mouse[i].at_frame + 2)
+                    io.AddMouseButtonEvent(app->mouse[i].button - 1, false);
+            }
         }
         ImGui::NewFrame();
         draw_menu_bar(app);
@@ -966,6 +997,36 @@ SDL_AppResult SDL_AppIterate(void *appstate)
         P2500PanelActions act = p2500_panels_draw(app->panels, app->m, app->dbg,
                                                   app->paused, &want_pause_toggle);
         ImGui::Render();
+        /* Whether the guest can be typed into at all. Logged on change,
+         * because "the UI took the keyboard and never gave it back" is a
+         * transition, not a state you can catch in a screenshot. */
+        const bool captured = ImGui::GetIO().WantCaptureKeyboard;
+        if (captured != app->ui_had_keyboard) {
+            app->ui_had_keyboard = captured;
+            SDL_Log("ui keyboard: %s", captured ? "captured by a panel"
+                                                : "released to the P2500");
+        }
+        /* Re-arm the guest's keyboard.
+         *
+         * ImGui's SDL3 backend calls SDL_StopTextInput() when one of its
+         * text fields loses focus (imgui_impl_sdl3.cpp, PlatformSetImeData),
+         * and that switches SDL_EVENT_TEXT_INPUT off for the whole window.
+         * Nothing turns it back on: as far as the backend is concerned
+         * nobody wants text any more. But the guest always does - that event
+         * is where every printable key it receives comes from - so one use
+         * of any debugger address field left the machine untypeable until
+         * restart. Key events were unaffected, which is why the menus, the
+         * F-keys and the cursor keys went on working and hid it.
+         *
+         * Checked every frame rather than on a transition: the backend can
+         * stop text input at moments we do not model, and asking SDL what
+         * the state actually is costs nothing. */
+        if (!captured && !SDL_TextInputActive(app->window))
+            SDL_StartTextInput(app->window);
+        if (app->text_input_was != SDL_TextInputActive(app->window)) {
+            app->text_input_was = !app->text_input_was;
+            SDL_Log("guest text input: %s", app->text_input_was ? "on" : "off");
+        }
         if (want_pause_toggle) toggle_pause(app);
         /* Stepping runs after the frame is composed, so the listing the user
          * clicked is the state the step started from. ~0 means "one 50 Hz
@@ -1004,9 +1065,13 @@ SDL_AppResult SDL_AppIterate(void *appstate)
      * background and the window's clear colour are the same, and the top
      * text rows of a character cell are blank, so a screen drawn at y=0
      * looks identical to a correctly offset one in a screenshot. */
-    if (app->win_shot_path && app->frames == 2)
+    if (app->win_shot_path && app->frames == 2) {
         SDL_Log("layout: menu %d px, screen at y=%.0f, %.0fx%.0f",
                 top, dst.y, dst.w, dst.h);
+        if (app->panels.goto_field_x >= 0.0f)
+            SDL_Log("memory panel: goto field at %.0f,%.0f",
+                    app->panels.goto_field_x, app->panels.goto_field_y);
+    }
 
     SDL_SetRenderDrawColor(app->renderer, 8, 12, 8, 255);
     SDL_RenderClear(app->renderer);
