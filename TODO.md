@@ -227,6 +227,41 @@ contexts where a GUI dependency would make it unrunnable.
   into a small `core/debug.h` both front-ends drive rather than
   reimplementing them against ImGui.
 
+  ### Menus: use ImGui's, not a native menu bar (assessed 2026-09-28)
+
+  A native menu bar is the obvious thing to want and it is the wrong tool
+  here, for a platform-specific reason worth writing down so it is not
+  re-litigated.
+
+  | Option | Verdict |
+  |---|---|
+  | [SDL PR #13752](https://github.com/libsdl-org/SDL/pull/13752) | **Windows and macOS only**, and still unmerged - opened 2025-08-15, last touched 2026-03-22. Its Linux section is the author writing "Basically I'm not sure where to start here", with GIO/portals and GTK floated as ideas. Adopting it means vendoring an SDL fork to get nothing on this machine |
+  | [thomashope/native-menu-bar](https://github.com/thomashope/native-menu-bar) | Genuinely nice - Unlicense, two files, clean C. But its SDL example wires up **Win32 only** (`wmInfo.info.win.window`), and the GTK backend takes a `GtkWindow*`: it is for apps that already are GTK apps. Its own TODO still has "test GTK backends on WSL" unchecked, and it targets SDL2 |
+
+  The blocker underneath both is **Wayland**, which is what this machine
+  runs. There is no foreign-window reparenting, so a GTK menu bar cannot be
+  attached to an SDL window; and KDE on Wayland has no global application
+  menu by default, so there is no bar to export to either. A native menu bar
+  is best supported on exactly the two platforms this project is not
+  developed on.
+
+  **So draw the menu bar in-window with ImGui** (`BeginMainMenuBar`). It
+  behaves identically on every platform and backend because the application
+  draws it, it works on Wayland today, and ImGui is being vendored for the
+  panels anyway - the menu bar is very nearly free once it is. This is also
+  what most ImGui-based emulators do.
+
+  Keep the menu *model* - ids, captions, checked state, the action each item
+  fires - as plain data in `src/gui/`, separate from the code that renders
+  it. Then a native backend can be added later if SDL ever lands one,
+  without the menu definitions moving.
+
+  **One genuinely native piece is available right now and should be used:**
+  `SDL_ShowOpenFileDialog` (`SDL3/SDL_dialog.h`, present in 3.4.16). On
+  Linux it goes through the XDG desktop portal, so "Load disk image..."
+  gets KDE's own file dialog on Wayland rather than a hand-rolled browser.
+  There is no reason to build a file picker.
+
 ---
 
 ## P2 — Video attributes (gates T37)
