@@ -63,6 +63,14 @@ typedef struct {
     int pushes;
     bool paused;
     bool turbo;
+    /* The machine boots with capitals lock ENGAGED: $E34C in the shipped
+     * CBIOS image is $20, and CONIN XORs alphabetic input with it ($E4B7),
+     * so an unshifted key produces a capital. The manual documents a
+     * capitals-lock key that toggles it, but that key is handled by the
+     * keyboard controller, which this emulator does not model - so the
+     * equivalent is offered here, at the boundary where we synthesise the
+     * keystrokes. Checked means the machine behaves as shipped. */
+    bool caps_lock;
     bool quit;
     bool has_ui;                 /* false only if ImGui failed to initialise */
     float menu_h;                /* measured each frame, offsets the screen */
@@ -293,6 +301,14 @@ static void draw_menu_bar(App *app)
         ImGui::EndMenu();
     }
 
+    if (ImGui::BeginMenu("Machine")) {
+        if (ImGui::MenuItem("Capitals lock", NULL, app->caps_lock)) {
+            app->caps_lock = !app->caps_lock;
+            set_status(app, "capitals lock %s", app->caps_lock ? "on (as shipped)" : "off");
+        }
+        ImGui::EndMenu();
+    }
+
     /* Status, right-aligned. Keeps the bar useful rather than decorative. */
     if (app->status[0]) {
         float w = ImGui::CalcTextSize(app->status).x;
@@ -371,6 +387,7 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[])
     app->frame_limit = frame_limit;
     app->shot_path = shot_path;
     app->win_shot_path = win_shot_path;
+    app->caps_lock = true; /* as the disks ship */
     app->pushes = npush;
     for (int i = 0; i < npush; i++) {
         app->push[i].at_ms = push_at[i];
@@ -441,9 +458,14 @@ SDL_AppResult SDL_AppEvent(void *appstate, SDL_Event *event)
         /* One byte per character the platform produced. Anything outside
          * 7-bit ASCII needs the $E274 dead-key table decoded first (T38), so
          * it is dropped rather than guessed at. */
-        for (const char *c = event->text.text; *c; c++)
-            if ((unsigned char)*c >= 0x20 && (unsigned char)*c < 0x7F)
-                p2500_keyboard_push(&app->m.keyboard, (uint8_t)*c);
+        for (const char *c = event->text.text; *c; c++) {
+            unsigned char b = (unsigned char)*c;
+            if (b < 0x20 || b >= 0x7F) continue;
+            /* With capitals lock off we pre-invert, cancelling CBIOS's own
+             * XOR, so the letter that appears is the letter that was typed. */
+            if (!app->caps_lock && SDL_isalpha(b)) b ^= 0x20;
+            p2500_keyboard_push(&app->m.keyboard, b);
+        }
         return SDL_APP_CONTINUE;
     case SDL_EVENT_KEY_DOWN: {
         const SDL_Keycode k = event->key.key;
