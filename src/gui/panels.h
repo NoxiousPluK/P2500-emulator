@@ -14,6 +14,7 @@
 
 #include "core/machine.h"
 #include "core/debug.h"
+#include "core/log.h"
 
 struct P2500Panels {
     bool show_devices = false;
@@ -37,16 +38,25 @@ struct P2500Panels {
     char break_entry[8] = "";
     char watch_entry[12] = "";
 
-    /* Event log: watch hits and breakpoint stops, i.e. whatever the shared
-     * debug code reports. A ring, so a long run cannot grow without bound.
-     * Not the port/IRQ log yet - that needs the core's 63 stderr writes
-     * behind a callback first (TODO.md T34). */
-    static const int LOG_CAP = 400;
+    /* The log: every diagnostic the core produces (TODO.md T34), plus the
+     * watch hits and breakpoint stops core/debug.c reports. A ring, so a
+     * long run cannot grow without bound - and one deep enough to hold a
+     * whole disk operation's worth of the firehose, which is the point of
+     * having it at all. */
+    static const int LOG_CAP = 2048;
     static const int LOG_LEN = 176;
     char log[LOG_CAP][LOG_LEN] = {};
+    unsigned char log_level[LOG_CAP] = {};
     int log_head = 0;   /* next slot to write */
     int log_count = 0;
+    unsigned long log_total = 0; /* including what has scrolled out of the ring */
     bool log_autoscroll = true;
+    bool log_show[3] = { true, true, true }; /* by P2500LogLevel */
+    char log_filter[32] = "";
+    /* The device `verbose` switches, all together. Off by default: with
+     * them on the core emits a few thousand lines per emulated second, and
+     * a log nobody can read is not instrumentation. */
+    bool verbose_devices = false;
 };
 
 /* What the user asked the run loop to do this frame. The panels never step
@@ -57,7 +67,12 @@ struct P2500PanelActions {
     bool reset_baseline = false; /* watches need re-baselining */
 };
 
-void p2500_panels_log(P2500Panels &p, const char *fmt, ...);
+void p2500_panels_log(P2500Panels &p, P2500LogLevel level, const char *category,
+                      const char *fmt, ...);
+
+/* The sink to hand p2500_set_log(); `userdata` must be the P2500Panels. */
+void p2500_panels_log_sink(void *userdata, P2500LogLevel level,
+                           const char *category, const char *message);
 
 /* The contents of the View menu - drawn by main.cpp inside its menu bar so
  * the bar stays one thing in one place. */

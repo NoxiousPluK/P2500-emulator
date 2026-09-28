@@ -91,18 +91,17 @@ entry.
 
 ## Phase 4 — a *complete* machine (current)
 
-Four things stand between "boots and runs software" and "emulates the
-machine". In `TODO.md` order:
+Four things stood between "boots and runs software" and "emulates the
+machine". In `TODO.md` order, the first is now finished:
 
-**The debugger panels (P1).** *Mostly done.* The GUI exists because
+**The debugger panels (P1).** *Done.* The GUI exists because
 instrumentation is what has moved this project every single time. Device
-state, memory and disassembly are in, and the machinery behind them —
-`core/debug.{c,h}` — is shared with the harness, so `p2500-emu --state` and
-`--disasm` print exactly what the panels draw. That was deliberate: a panel
-no headless run can contradict is a panel that can quietly start lying. What
-remains is the port/IRQ log, which is really T34 — the core still writes 63
-diagnostics straight to `stderr`, and a core that writes to `stderr` cannot
-feed a GUI, a MAME `logerror()`, or a browser console.
+state, memory, disassembly and the log are all in, and the machinery behind
+them — `core/debug.{c,h}` and `core/log.{c,h}` — is shared with the harness,
+so `p2500-emu --state` and `--disasm` print exactly what the panels draw and
+the core's diagnostics reach both front-ends through one callback. That was
+the deliberate part: a panel no headless run can contradict is a panel that
+can quietly start lying.
 
 **Graphics mode (P2).** The character path is complete and the graphics path
 is entirely absent. It is fully specified now — 512 × 256 dots, one bit

@@ -33,7 +33,14 @@ void p2500_fdc_attach(P2500Fdc *fdc, unsigned unit,
 }
 
 void p2500_fdc_init(P2500Fdc *fdc, const uint8_t *disk, size_t disk_size) {
+    /* Re-initialising a device must not silently take its diagnostics
+     * away with it: a caller that swaps a keystroke queue in, as the
+     * CLI does, would otherwise lose every message the device had to
+     * make from then on - a silent drop, which is the failure mode
+     * this project has paid for most often (TODO.md T34). */
+    const P2500Log *log = fdc->log;
     memset(fdc, 0, sizeof(*fdc));
+    fdc->log = log;
     fdc->phase = P2500_FDC_IDLE;
     fdc->cylinder = 0;
     fdc->last_seek_ok = true;
@@ -67,8 +74,8 @@ bool p2500_fdc_raise_startup_interrupt(P2500Fdc *fdc) {
     fdc->startup_interrupts_remaining--;
     fdc->seek_int_pending = true;
     if (fdc->verbose)
-        fprintf(stderr, "[fdc] post-reset unsolicited interrupt (ISSUE-1 fix 2, %d remaining)\n",
-                fdc->startup_interrupts_remaining);
+        p2500_logf(fdc->log, P2500_LOG_TRACE, "fdc", "post-reset unsolicited interrupt (ISSUE-1 fix 2, %d remaining)",
+                   fdc->startup_interrupts_remaining);
     /* Deliberately doesn't call fire_interrupt()/touch int_line - the
      * caller (machine.c) delivers this as a one-shot pulse instead of
      * the held level real completions use. See machine.c's port $12
@@ -115,8 +122,8 @@ static void do_read_data(P2500Fdc *fdc) {
          * but it never got that far, so a diskless machine sat in the
          * $06C6 busy-wait forever with a blank screen. */
         if (fdc->verbose)
-            fprintf(stderr, "[fdc] READ DATA unit %u C=%u R=%u: drive not ready\n",
-                    fdc->unit, c, r);
+            p2500_logf(fdc->log, P2500_LOG_WARN, "fdc", "READ DATA unit %u C=%u R=%u: drive not ready",
+                       fdc->unit, c, r);
         uint8_t res[7] = {0x48, 0x00, 0x00, c, fdc->command[3], r, fdc->command[5]};
         set_result(fdc, res, 7);
         fire_interrupt(fdc);
@@ -124,8 +131,8 @@ static void do_read_data(P2500Fdc *fdc) {
     }
     if (off + P2500_FDC_SECTOR_SIZE > media_size) {
         if (fdc->verbose)
-            fprintf(stderr, "[fdc] READ DATA C=%u R=%u out of range (off=0x%zx)\n",
-                    c, r, off);
+            p2500_logf(fdc->log, P2500_LOG_WARN, "fdc", "READ DATA C=%u R=%u out of range (off=0x%zx)",
+                       c, r, off);
         uint8_t res[7] = {0x40, 0x00, 0x00, c, fdc->command[3], r, fdc->command[5]};
         set_result(fdc, res, 7);
         fire_interrupt(fdc);
@@ -136,11 +143,11 @@ static void do_read_data(P2500Fdc *fdc) {
         size_t avail = media_size - off;
         p2500_dma_deliver(fdc->dma, fdc->ram, media + off, avail);
         if (fdc->verbose)
-            fprintf(stderr, "[fdc] READ DATA C=%u R=%u -> disk offset 0x%zx, "
-                            "handed to DMA\n", c, r, off);
+            p2500_logf(fdc->log, P2500_LOG_TRACE, "fdc", "READ DATA C=%u R=%u -> disk offset 0x%zx, "
+                               "handed to DMA", c, r, off);
     } else if (fdc->verbose) {
-        fprintf(stderr, "[fdc] READ DATA C=%u R=%u -> sector ready but no "
-                        "RAM/DMA wired up, dropped\n", c, r);
+        p2500_logf(fdc->log, P2500_LOG_WARN, "fdc", "READ DATA C=%u R=%u -> sector ready but no "
+                           "RAM/DMA wired up, dropped", c, r);
     }
 
     uint8_t res[7] = {0x00, 0x00, 0x00, c, fdc->command[3], (uint8_t)(r + 1), fdc->command[5]};
@@ -157,11 +164,15 @@ static void finish_command(P2500Fdc *fdc) {
     if (fdc->command_len > 1 && opcode != 0x08)
         fdc->unit = fdc->command[1] & 0x03;
     if (fdc->verbose) {
-        fprintf(stderr, "[fdc] command %s (opcode $%02X) args=[",
-                info ? info->name : "UNKNOWN", opcode);
-        for (size_t i = 1; i < fdc->command_len; i++)
-            fprintf(stderr, "$%02X ", fdc->command[i]);
-        fprintf(stderr, "]\n");
+        /* Assembled rather than streamed: a log sink takes whole messages,
+         * so the argument bytes have to be one string, not one call each. */
+        char args[3 * sizeof fdc->command + 1];
+        size_t at = 0;
+        for (size_t i = 1; i < fdc->command_len && at + 4 < sizeof args; i++)
+            at += (size_t)snprintf(args + at, sizeof args - at, "$%02X ", fdc->command[i]);
+        args[at] = '\0';
+        p2500_logf(fdc->log, P2500_LOG_TRACE, "fdc", "command %s (opcode $%02X) args=[%s]",
+                   info ? info->name : "UNKNOWN", opcode, args);
     }
 
     /* Once a real disk operation is under way, stop synthesizing startup
@@ -201,11 +212,11 @@ static void finish_command(P2500Fdc *fdc) {
             uint8_t res[2] = {st0, fdc->cylinder};
             set_result(fdc, res, 2);
             fdc->seek_int_pending = false;
-            if (fdc->verbose) fprintf(stderr, "[fdc] SENSE INTERRUPT STATUS -> ST0=$%02X PCN=$%02X (2 bytes)\n", st0, fdc->cylinder);
+            if (fdc->verbose) p2500_logf(fdc->log, P2500_LOG_TRACE, "fdc", "SENSE INTERRUPT STATUS -> ST0=$%02X PCN=$%02X (2 bytes)", st0, fdc->cylinder);
         } else {
             uint8_t res[1] = {0x80};
             set_result(fdc, res, 1);
-            if (fdc->verbose) fprintf(stderr, "[fdc] SENSE INTERRUPT STATUS -> Invalid Command $80 (1 byte)\n");
+            if (fdc->verbose) p2500_logf(fdc->log, P2500_LOG_TRACE, "fdc", "SENSE INTERRUPT STATUS -> Invalid Command $80 (1 byte)");
         }
         break;
     case 0x04: { /* SENSE DRIVE STATUS */
@@ -232,12 +243,12 @@ static void finish_command(P2500Fdc *fdc) {
 uint8_t p2500_fdc_read_data(P2500Fdc *fdc) {
     if (fdc->phase != P2500_FDC_RESULT || fdc->result_pos >= fdc->result_len) {
         if (fdc->verbose)
-            fprintf(stderr, "[fdc] read past end of result phase\n");
+            p2500_logf(fdc->log, P2500_LOG_WARN, "fdc", "read past end of result phase");
         return 0x00;
     }
     uint8_t v = fdc->result[fdc->result_pos++];
     if (fdc->verbose)
-        fprintf(stderr, "[fdc] read result byte %zu/%zu = $%02X\n", fdc->result_pos, fdc->result_len, v);
+        p2500_logf(fdc->log, P2500_LOG_TRACE, "fdc", "read result byte %zu/%zu = $%02X", fdc->result_pos, fdc->result_len, v);
     if (fdc->result_pos >= fdc->result_len) {
         fdc->phase = P2500_FDC_IDLE;
         /* Real hardware clears /INT once the host has read through the
@@ -266,6 +277,6 @@ void p2500_fdc_write_data(P2500Fdc *fdc, uint8_t value) {
         if (fdc->command_len >= fdc->command_expected)
             finish_command(fdc);
     } else if (fdc->verbose) {
-        fprintf(stderr, "[fdc] unexpected write $%02X while phase=%d\n", value, fdc->phase);
+        p2500_logf(fdc->log, P2500_LOG_WARN, "fdc", "unexpected write $%02X while phase=%d", value, fdc->phase);
     }
 }

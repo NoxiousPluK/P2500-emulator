@@ -37,7 +37,7 @@ make test   # the regression suite
 
 `make` needs a C11 compiler; the GUI additionally needs SDL3 (`extra/sdl3`
 on Arch) and a C++17 compiler, and Dear ImGui is vendored. The core stays
-dependency-free so `make test` runs with no display at all: **40 checks**,
+dependency-free so `make test` runs with no display at all: **42 checks**,
 exit 1 on any failure. The GUI checks skip themselves if SDL3 is absent.
 
 ## Running it as a machine
@@ -83,9 +83,9 @@ are configured — unshifted keys produce capitals.
 
 `--scale N` sets the initial zoom; the window is resizable and letterboxes
 with integer scaling. `--frames N --screenshot f.ppm`, `--shot-window f.ppm`,
-`--push-at MS:STRING`, `--panels LIST`, `--break ADDR` and `--watch ADDR` let
-the front-end and its panels be driven and captured with no display, which is
-how `make test` checks them.
+`--push-at MS:STRING`, `--panels LIST`, `--verbose-io`, `--break ADDR` and
+`--watch ADDR` let the front-end and its panels be driven and captured with no
+display, which is how `make test` checks them.
 
 ## The debugger
 
@@ -105,9 +105,13 @@ away from what the harness reports.
 - **Disassembly** (F3) — around PC, with a clickable breakpoint gutter and
   Step / Step 100 / Step field. Forwards from an anchor only: a Z80 stream
   cannot be decoded backwards, and guessing would show confident nonsense.
-- **Event log** (F4) — watch hits and breakpoint stops. It becomes the
-  port/IRQ log once the core's `stderr` writes are behind a callback
-  (`TODO.md` T34).
+- **Log** (F4) — every diagnostic the core produces: port access, the IM2
+  daisy chain, CTC/PIO/DMA/FDC decode, plus watch hits and breakpoint stops.
+  Filterable by level and by substring; warnings are amber, deliberately off
+  the phosphor palette, because those are the lines saying the emulator
+  declined to act. **Debug > Verbose device logging** arms the device
+  switches — off by default, since they emit a few thousand lines per
+  emulated second.
 
 ## The headless harness
 
@@ -129,7 +133,7 @@ project has used.
 | `--watch ADDR[:LEN]` / `--count ADDR` / `--break ADDR` | trace writes, count executions, stop |
 | `--state` | every device's live state — the same lines the GUI's device panel draws |
 | `--disasm ADDR[:COUNT]` | disassemble, bank-aware, through the same decoder the GUI uses |
-| `--verbose-io` | log every I/O port access (very noisy) |
+| `--verbose-io` | arm every device's diagnostics — ports, the daisy chain, CTC/PIO/DMA/FDC (very noisy) |
 | `--no-stuck-detect` | disable the state-hash cycle detector |
 
 `P2500_TRACE_FROM` / `P2500_TRACE_TO` give a bounded per-step trace.
@@ -220,6 +224,9 @@ either front-end.**
   latching a nibble in port `$0A`
 - `debug.{c,h}` — a Z80 disassembler, the watch/counter/breakpoint tables
   both front-ends drive, and the live-state lines both of them print
+- `log.{c,h}` — the one diagnostics sink every device writes through. The
+  core does not know what stderr is; the CLI prints, the GUI fills a panel,
+  and an embedding that wants neither installs nothing
 - `ctc` / `pio` / `dma` / `fdc` / `keyboard` / `sesam` — the devices
 - `vendor/superzazu_z80/` — the vendored CPU core
 

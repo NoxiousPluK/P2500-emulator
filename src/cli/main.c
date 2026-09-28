@@ -77,6 +77,16 @@ static void check_landmarks(const P2500Machine *m, uint16_t pc, unsigned long st
     }
 }
 
+/* The core's diagnostics, put back exactly where they used to go. The
+ * "[cat] " prefix each line carried is now a separate argument (TODO.md
+ * T34), so this sink restores it and the output is byte-for-byte what it
+ * was before the refactor - which is what lets make test verify it. */
+static void cli_log(void *userdata, P2500LogLevel level, const char *category,
+                    const char *message) {
+    (void)userdata; (void)level;
+    fprintf(stderr, "[%s] %s\n", category, message);
+}
+
 /* --watch reports, printed exactly as they always were - the text is built
  * in core/debug.c now so the GUI's log panel shows the same line. */
 static void cli_watch(void *userdata, uint16_t addr, uint8_t was, uint8_t now,
@@ -340,6 +350,7 @@ int main(int argc, char **argv) {
 
     P2500Machine m;
     p2500_init(&m);
+    p2500_set_log(&m, cli_log, NULL);
     m.verbose_unknown_ports = verbose_io;
 
     if (!p2500_load_rom(&m, rom_path)) {
@@ -378,6 +389,10 @@ int main(int argc, char **argv) {
     }
     m.fdc.verbose = verbose_io; /* also wanted with no disk attached */
     m.pio.verbose = verbose_io;
+    /* The daisy chain was the one device the harness could not see, while
+     * the GUI's log panel could. Added with T34 rather than found by it -
+     * the refactor itself changed no output at all. */
+    m.intctl.verbose = verbose_io;
     m.dma.verbose = verbose_io;
     m.ctc.verbose = verbose_io;
     m.sesam.verbose = verbose_io;

@@ -5,6 +5,8 @@
 #include <stddef.h>
 #include <stdbool.h>
 
+#include "log.h"
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -31,6 +33,9 @@ typedef struct {
     size_t pos;
     unsigned long reads;  /* statistics - a protection check shows up here */
     unsigned long writes;
+    /* Diagnostics sink, pointed at the machine's own by p2500_init().
+     * NULL is fine - the messages are simply discarded (TODO.md T34). */
+    const P2500Log *log;
     bool verbose;
 } P2500Sesam;
 

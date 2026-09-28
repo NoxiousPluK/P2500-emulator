@@ -109,14 +109,14 @@ static void log_request(P2500Machine *m, int source, uint8_t vector) {
     if (!m->intctl.verbose) return;
     uint16_t call_target, final_dest;
     if (resolve_im2_target(m, vector, &call_target, &final_dest))
-        fprintf(stderr, "[irq] %s requests vector=$%02X at PC=$%04X IFF1=%d "
-                        "(-> $%04X -> $%04X)\n",
-                p2500_intctl_name(source), vector, m->cpu.pc, m->cpu.iff1,
-                call_target, final_dest);
+        p2500_logf(&m->log, P2500_LOG_TRACE, "irq", "%s requests vector=$%02X at PC=$%04X IFF1=%d "
+                           "(-> $%04X -> $%04X)",
+                   p2500_intctl_name(source), vector, m->cpu.pc, m->cpu.iff1,
+                   call_target, final_dest);
     else
-        fprintf(stderr, "[irq] %s requests vector=$%02X at PC=$%04X - I=$%02X is not yet "
-                        "a real table page, holding\n",
-                p2500_intctl_name(source), vector, m->cpu.pc, m->cpu.i);
+        p2500_logf(&m->log, P2500_LOG_WARN, "irq", "%s requests vector=$%02X at PC=$%04X - I=$%02X is not yet "
+                           "a real table page, holding",
+                   p2500_intctl_name(source), vector, m->cpu.pc, m->cpu.i);
 }
 
 /* Every peripheral routes its interrupt request through the daisy chain in
@@ -223,7 +223,7 @@ static uint8_t port_in(z80 *cpu, uint8_t port) {
     default:
         m->unhandled_in[port]++;
         if (m->verbose_unknown_ports)
-            fprintf(stderr, "[io] unhandled IN ($%02X)\n", port);
+            p2500_logf(&m->log, P2500_LOG_WARN, "io", "unhandled IN ($%02X)", port);
         return 0xFF;
     }
 }
@@ -244,12 +244,11 @@ static void port_out(z80 *cpu, uint8_t port, uint8_t value) {
              * If this ever fires, it is the single best lead on how the CPU
              * reaches the video card's attribute plane - TODO.md T27. */
             m->unknown_bank_writes++;
-            fprintf(stderr,
-                    "[bank] OUT ($05) <- $%02X selects an unknown $8000-$BFFF "
-                    "window (bits 0-2 = %u); routed to main DRAM. See TODO.md T27.\n",
-                    value, (unsigned)(value & P2500_BANK_VIDEO_MASK));
+            p2500_logf(&m->log, P2500_LOG_TRACE, "bank", "OUT ($05) <- $%02X selects an unknown $8000-$BFFF "
+                       "window (bits 0-2 = %u); routed to main DRAM. See TODO.md T27.",
+                       value, (unsigned)(value & P2500_BANK_VIDEO_MASK));
         } else if (m->verbose_unknown_ports) {
-            fprintf(stderr, "[io] OUT ($05) <- $%02X (bank select)\n", value);
+            p2500_logf(&m->log, P2500_LOG_TRACE, "io", "OUT ($05) <- $%02X (bank select)", value);
         }
         break;
     case 0x08:
@@ -258,8 +257,8 @@ static void port_out(z80 *cpu, uint8_t port, uint8_t value) {
     case 0x09:
         if (m->crtc_index < 18) m->crtc_regs[m->crtc_index] = value;
         else if (m->verbose_unknown_ports)
-            fprintf(stderr, "[crtc] write $%02X to nonexistent register R%u ignored\n",
-                    value, m->crtc_index);
+            p2500_logf(&m->log, P2500_LOG_WARN, "crtc", "write $%02X to nonexistent register R%u ignored",
+                       value, m->crtc_index);
         break;
     case 0x0F:
         p2500_sesam_out(&m->sesam, value);
@@ -315,13 +314,13 @@ static void port_out(z80 *cpu, uint8_t port, uint8_t value) {
         m->port0a_latch = value;
         m->attr_latch = value & P2500_VRAM_ATTR_MASK;
         if (m->verbose_unknown_ports)
-            fprintf(stderr, "[video] OUT ($0A) <- $%02X: attribute nibble now $%X\n",
-                    value, m->attr_latch);
+            p2500_logf(&m->log, P2500_LOG_TRACE, "video", "OUT ($0A) <- $%02X: attribute nibble now $%X",
+                       value, m->attr_latch);
         break;
     default:
         m->unhandled_out[port]++;
         if (m->verbose_unknown_ports)
-            fprintf(stderr, "[io] unhandled OUT ($%02X) <- $%02X\n", port, value);
+            p2500_logf(&m->log, P2500_LOG_WARN, "io", "unhandled OUT ($%02X) <- $%02X", port, value);
         break;
     }
 }
@@ -367,6 +366,19 @@ void p2500_init(P2500Machine *m) {
     p2500_keyboard_init(&m->keyboard, NULL, 0);
     p2500_serial_init(&m->serial);
 
+    /* Every device writes its diagnostics through the machine's one sink
+     * (TODO.md T34). Pointed here rather than copied so p2500_set_log()
+     * stays a single assignment; it is why P2500Machine must not be moved
+     * after init, as m->fdc.ram already required. */
+    m->intctl.log = &m->log;
+    m->fdc.log = &m->log;
+    m->pio.log = &m->log;
+    m->dma.log = &m->log;
+    m->ctc.log = &m->log;
+    m->keyboard.log = &m->log;
+    m->serial.log = &m->log;
+    m->sesam.log = &m->log;
+
     m->bank = 0x07; /* EPROM visible at $0000-$0FFF, as at power-on */
     m->verbose_unknown_ports = false;
 }
@@ -399,8 +411,10 @@ void p2500_reset(P2500Machine *m) {
     bool verbose = m->verbose_unknown_ports;
     bool fdc_verbose = m->fdc.verbose;
     bool serial_verbose = m->serial.verbose;
+    P2500Log log = m->log;
 
     p2500_init(m);
+    m->log = log;
 
     memcpy(m->eprom, eprom, sizeof eprom);
     memcpy(m->charrom, charrom, sizeof charrom);
@@ -416,6 +430,11 @@ void p2500_reset(P2500Machine *m) {
     m->verbose_unknown_ports = verbose;
     m->fdc.verbose = fdc_verbose;
     m->serial.verbose = serial_verbose;
+}
+
+void p2500_set_log(P2500Machine *m, P2500LogFn fn, void *userdata) {
+    m->log.fn = fn;
+    m->log.userdata = userdata;
 }
 
 unsigned long p2500_run_tstates(P2500Machine *m, unsigned long tstates) {

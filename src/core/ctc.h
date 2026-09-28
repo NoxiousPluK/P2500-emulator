@@ -2,6 +2,8 @@
 #define P2500_CTC_H
 
 #include <stdint.h>
+
+#include "log.h"
 #include <stdbool.h>
 
 #ifdef __cplusplus
@@ -101,6 +103,9 @@ typedef struct {
     uint8_t vector_base; /* shared per-chip; loadable from channel 0 only */
     bool vector_set;
 
+    /* Diagnostics sink, pointed at the machine's own by p2500_init().
+     * NULL is fine - the messages are simply discarded (TODO.md T34). */
+    const P2500Log *log;
     P2500CtcInterruptCallback on_interrupt;
     P2500CtcResetCallback on_reset;
     void *interrupt_userdata;

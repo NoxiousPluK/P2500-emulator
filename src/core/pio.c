@@ -3,7 +3,14 @@
 #include <string.h>
 
 void p2500_pio_init(P2500Pio *pio) {
+    /* Re-initialising a device must not silently take its diagnostics
+     * away with it: a caller that swaps a keystroke queue in, as the
+     * CLI does, would otherwise lose every message the device had to
+     * make from then on - a silent drop, which is the failure mode
+     * this project has paid for most often (TODO.md T34). */
+    const P2500Log *log = pio->log;
     memset(pio, 0, sizeof(*pio));
+    pio->log = log;
 }
 
 static void evaluate_interrupt(P2500Pio *pio, int port) {
@@ -22,8 +29,8 @@ static void evaluate_interrupt(P2500Pio *pio, int port) {
     if (condition && !pio->condition_was_true[port] &&
         pio->vector_set[port] && pio->on_interrupt) {
         if (pio->verbose)
-            fprintf(stderr, "[pio] port %c interrupt condition met, vector=$%02X\n",
-                    port == P2500_PIO_PORT_A ? 'A' : 'B', pio->vector[port]);
+            p2500_logf(pio->log, P2500_LOG_TRACE, "pio", "port %c interrupt condition met, vector=$%02X",
+                       port == P2500_PIO_PORT_A ? 'A' : 'B', pio->vector[port]);
         pio->on_interrupt(pio->interrupt_userdata, pio->vector[port]);
     }
     pio->condition_was_true[port] = condition;
@@ -38,13 +45,13 @@ void p2500_pio_write_control(P2500Pio *pio, int port, uint8_t value) {
         pio->io_mask[port] = value;
         pio->state[port] = P2500_PIO_WAIT_CONTROL;
         if (pio->verbose)
-            fprintf(stderr, "[pio] port %c I/O mask = $%02X\n", label, value);
+            p2500_logf(pio->log, P2500_LOG_TRACE, "pio", "port %c I/O mask = $%02X", label, value);
         return;
     case P2500_PIO_WAIT_MONITOR_MASK:
         pio->monitor_mask[port] = value;
         pio->state[port] = P2500_PIO_WAIT_CONTROL;
         if (pio->verbose)
-            fprintf(stderr, "[pio] port %c monitor mask = $%02X\n", label, value);
+            p2500_logf(pio->log, P2500_LOG_TRACE, "pio", "port %c monitor mask = $%02X", label, value);
         evaluate_interrupt(pio, port);
         return;
     case P2500_PIO_WAIT_CONTROL:
@@ -54,15 +61,15 @@ void p2500_pio_write_control(P2500Pio *pio, int port, uint8_t value) {
     if ((value & 0x0F) == 0x0F) { /* mode control word */
         pio->mode[port] = (uint8_t)((value >> 6) & 0x03);
         if (pio->verbose)
-            fprintf(stderr, "[pio] port %c mode = %d\n", label, pio->mode[port]);
+            p2500_logf(pio->log, P2500_LOG_TRACE, "pio", "port %c mode = %d", label, pio->mode[port]);
         if (pio->mode[port] == 3) pio->state[port] = P2500_PIO_WAIT_IO_MASK;
         return;
     }
     if ((value & 0x0F) == 0x03) { /* interrupt enable/disable short form */
         pio->int_enabled[port] = (value & 0x80) != 0;
         if (pio->verbose)
-            fprintf(stderr, "[pio] port %c interrupt %s\n", label,
-                    pio->int_enabled[port] ? "enabled" : "disabled");
+            p2500_logf(pio->log, P2500_LOG_TRACE, "pio", "port %c interrupt %s", label,
+                       pio->int_enabled[port] ? "enabled" : "disabled");
         if (!pio->int_enabled[port] && pio->on_int_reset)
             pio->on_int_reset(pio->interrupt_userdata, port);
         evaluate_interrupt(pio, port);
@@ -74,10 +81,10 @@ void p2500_pio_write_control(P2500Pio *pio, int port, uint8_t value) {
         pio->active_high[port] = (value & 0x20) != 0;
         bool mask_follows = (value & 0x10) != 0;
         if (pio->verbose)
-            fprintf(stderr, "[pio] port %c interrupt control: enabled=%d and=%d "
-                            "active_high=%d mask_follows=%d\n", label,
-                    pio->int_enabled[port], pio->and_mode[port], pio->active_high[port],
-                    mask_follows);
+            p2500_logf(pio->log, P2500_LOG_TRACE, "pio", "port %c interrupt control: enabled=%d and=%d "
+                               "active_high=%d mask_follows=%d", label,
+                       pio->int_enabled[port], pio->and_mode[port], pio->active_high[port],
+                       mask_follows);
         if (!pio->int_enabled[port] && pio->on_int_reset)
             pio->on_int_reset(pio->interrupt_userdata, port);
         if (mask_follows) pio->state[port] = P2500_PIO_WAIT_MONITOR_MASK;
@@ -88,11 +95,11 @@ void p2500_pio_write_control(P2500Pio *pio, int port, uint8_t value) {
         pio->vector[port] = value;
         pio->vector_set[port] = true;
         if (pio->verbose)
-            fprintf(stderr, "[pio] port %c vector = $%02X\n", label, value);
+            p2500_logf(pio->log, P2500_LOG_TRACE, "pio", "port %c vector = $%02X", label, value);
         return;
     }
     if (pio->verbose)
-        fprintf(stderr, "[pio] port %c unrecognized control byte $%02X\n", label, value);
+        p2500_logf(pio->log, P2500_LOG_WARN, "pio", "port %c unrecognized control byte $%02X", label, value);
 }
 
 void p2500_pio_write_data(P2500Pio *pio, int port, uint8_t value) {

@@ -2,6 +2,8 @@
 #define P2500_PIO_H
 
 #include <stdint.h>
+
+#include "log.h"
 #include <stdbool.h>
 
 #ifdef __cplusplus
@@ -60,6 +62,9 @@ typedef struct {
     uint8_t monitor_mask[P2500_PIO_PORTS]; /* 0 = monitored bit, 1 = masked off */
     bool condition_was_true[P2500_PIO_PORTS]; /* edge detection so a held level fires once */
 
+    /* Diagnostics sink, pointed at the machine's own by p2500_init().
+     * NULL is fine - the messages are simply discarded (TODO.md T34). */
+    const P2500Log *log;
     P2500PioInterruptCallback on_interrupt;
     /* Called with the port number when that port's interrupts are
      * disabled by a control word. On a Z80-PIO that clears any pending or

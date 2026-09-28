@@ -7,14 +7,29 @@
 
 #include "imgui.h"
 
-void p2500_panels_log(P2500Panels &p, const char *fmt, ...)
+void p2500_panels_log(P2500Panels &p, P2500LogLevel level, const char *category,
+                      const char *fmt, ...)
 {
+    /* Shorter than a log line, so the "[cat] " prefix always fits. */
+    char body[P2500Panels::LOG_LEN - 24];
     va_list ap;
     va_start(ap, fmt);
-    vsnprintf(p.log[p.log_head], P2500Panels::LOG_LEN, fmt, ap);
+    vsnprintf(body, sizeof body, fmt, ap);
     va_end(ap);
+    snprintf(p.log[p.log_head], P2500Panels::LOG_LEN, "[%s] %s", category, body);
+    p.log_level[p.log_head] = (unsigned char)level;
     p.log_head = (p.log_head + 1) % P2500Panels::LOG_CAP;
     if (p.log_count < P2500Panels::LOG_CAP) p.log_count++;
+    p.log_total++;
+}
+
+void p2500_panels_log_sink(void *userdata, P2500LogLevel level,
+                           const char *category, const char *message)
+{
+    /* "%s" rather than passing `message` as the format: it is data from the
+     * core, and one stray %s in a device's diagnostic would otherwise be a
+     * format-string bug. */
+    p2500_panels_log(*(P2500Panels *)userdata, level, category, "%s", message);
 }
 
 void p2500_panels_menu(P2500Panels &p)
@@ -22,7 +37,12 @@ void p2500_panels_menu(P2500Panels &p)
     ImGui::MenuItem("Device state", "F1", &p.show_devices);
     ImGui::MenuItem("Memory", "F2", &p.show_memory);
     ImGui::MenuItem("Disassembly", "F3", &p.show_disasm);
-    ImGui::MenuItem("Event log", "F4", &p.show_log);
+    ImGui::MenuItem("Log", "F4", &p.show_log);
+    ImGui::Separator();
+    if (ImGui::MenuItem("Verbose device logging", NULL, p.verbose_devices)) {
+        p.verbose_devices = !p.verbose_devices;
+        p.show_log = true;
+    }
 }
 
 /* A hex address entry that commits on Enter. Returns true, with *out set,
@@ -292,18 +312,48 @@ static void draw_disasm(P2500Panels &p, const P2500Machine &m, P2500Debug &dbg,
 static void draw_log(P2500Panels &p)
 {
     ImGui::SetNextWindowPos(ImVec2(120, 300), ImGuiCond_FirstUseEver);
-    ImGui::SetNextWindowSize(ImVec2(720, 300), ImGuiCond_FirstUseEver);
-    if (!ImGui::Begin("Event log", &p.show_log)) { ImGui::End(); return; }
+    ImGui::SetNextWindowSize(ImVec2(780, 320), ImGuiCond_FirstUseEver);
+    if (!ImGui::Begin("Log", &p.show_log)) { ImGui::End(); return; }
+
     ImGui::Checkbox("auto-scroll", &p.log_autoscroll);
+    ImGui::SameLine();
+    ImGui::Checkbox("warn", &p.log_show[P2500_LOG_WARN]);
+    ImGui::SameLine();
+    ImGui::Checkbox("info", &p.log_show[P2500_LOG_INFO]);
+    ImGui::SameLine();
+    ImGui::Checkbox("trace", &p.log_show[P2500_LOG_TRACE]);
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(ImGui::GetFontSize() * 10.0f);
+    ImGui::InputTextWithHint("##filter", "substring", p.log_filter, sizeof p.log_filter);
     ImGui::SameLine();
     if (ImGui::SmallButton("Clear")) { p.log_count = 0; p.log_head = 0; }
     ImGui::SameLine();
-    ImGui::TextDisabled("%d of %d", p.log_count, P2500Panels::LOG_CAP);
+    /* The total, not just what the ring holds: "2048 of 2048" would hide
+     * the fact that most of a busy run has already gone past. */
+    ImGui::TextDisabled("%d held / %lu seen", p.log_count, p.log_total);
+    if (!p.verbose_devices)
+        ImGui::TextDisabled("Device logging is off - Debug > Verbose device logging");
     ImGui::Separator();
+
     if (ImGui::BeginChild("lines")) {
         const int first = (p.log_head - p.log_count + P2500Panels::LOG_CAP) % P2500Panels::LOG_CAP;
-        for (int i = 0; i < p.log_count; i++)
-            ImGui::TextUnformatted(p.log[(first + i) % P2500Panels::LOG_CAP]);
+        for (int i = 0; i < p.log_count; i++) {
+            const int slot = (first + i) % P2500Panels::LOG_CAP;
+            const unsigned char lvl = p.log_level[slot];
+            if (lvl < 3 && !p.log_show[lvl]) continue;
+            if (p.log_filter[0] && !strstr(p.log[slot], p.log_filter)) continue;
+            /* Amber for a warning, deliberately off the phosphor palette:
+             * these are the lines saying the emulator declined to act, and
+             * this project's most expensive bugs were all silent drops. */
+            if (lvl == P2500_LOG_WARN)
+                ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(255, 176, 64, 255));
+            else if (lvl == P2500_LOG_TRACE)
+                ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
+            else
+                ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_Text));
+            ImGui::TextUnformatted(p.log[slot]);
+            ImGui::PopStyleColor();
+        }
         if (p.log_autoscroll && ImGui::GetScrollY() >= ImGui::GetScrollMaxY() - 1.0f)
             ImGui::SetScrollHereY(1.0f);
     }

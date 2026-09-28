@@ -2,6 +2,8 @@
 #define P2500_FDC_H
 
 #include <stdint.h>
+
+#include "log.h"
 #include <stdbool.h>
 #include <stddef.h>
 #include "dma.h"
@@ -123,6 +125,9 @@ typedef struct {
     uint8_t *ram;
     P2500Dma *dma;
 
+    /* Diagnostics sink, pointed at the machine's own by p2500_init().
+     * NULL is fine - the messages are simply discarded (TODO.md T34). */
+    const P2500Log *log;
     P2500FdcInterruptCallback on_interrupt;
     void *interrupt_userdata;
 

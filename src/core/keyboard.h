@@ -5,6 +5,8 @@
 #include <stddef.h>
 #include <stdbool.h>
 
+#include "log.h"
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -59,6 +61,9 @@ typedef struct {
     uint8_t ring[64];
     uint8_t ring_head, ring_tail;
 
+    /* Diagnostics sink, pointed at the machine's own by p2500_init().
+     * NULL is fine - the messages are simply discarded (TODO.md T34). */
+    const P2500Log *log;
     bool verbose;
 } P2500Keyboard;
 
@@ -74,7 +79,10 @@ uint8_t p2500_keyboard_in(P2500Keyboard *kb);  /* port $06 */
 void p2500_keyboard_push(P2500Keyboard *kb, uint8_t byte);
 
 typedef struct {
-    bool verbose; /* echo each transmitted byte to stdout as it's sent */
+    /* Diagnostics sink, pointed at the machine's own by p2500_init().
+     * NULL is fine - the messages are simply discarded (TODO.md T34). */
+    const P2500Log *log;
+    bool verbose; /* echo each transmitted byte as it is sent */
 } P2500Serial;
 
 void p2500_serial_init(P2500Serial *s);

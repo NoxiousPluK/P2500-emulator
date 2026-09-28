@@ -12,6 +12,7 @@
 #include "ctc.h"
 #include "keyboard.h"
 #include "intctl.h"
+#include "log.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -199,9 +200,19 @@ typedef struct {
 
     bool verbose_unknown_ports;
     unsigned long total_instructions;
+
+    /* The one diagnostics sink. Every device holds a pointer to it, so
+     * installing a front-end's logger is a single assignment - see
+     * p2500_set_log(). Note this makes P2500Machine non-relocatable, as
+     * fdc.ram and fdc.dma already did. */
+    P2500Log log;
 } P2500Machine;
 
 void p2500_init(P2500Machine *m);
+
+/* Install (or with NULL, remove) the diagnostics sink every device writes
+ * through. Survives p2500_reset(), like the ROM images and mounted disks. */
+void p2500_set_log(P2500Machine *m, P2500LogFn fn, void *userdata);
 
 /* Power-cycle the machine while KEEPING everything a front-end attached:
  * the boot EPROM and character ROM images, the mounted disk, the SESAM

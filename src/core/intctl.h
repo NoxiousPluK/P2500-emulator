@@ -4,6 +4,8 @@
 #include <stdint.h>
 #include <stdbool.h>
 
+#include "log.h"
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -96,6 +98,9 @@ typedef struct {
     uint8_t vector[P2500_INT_SOURCES];
     unsigned long requests[P2500_INT_SOURCES];      /* statistics, for the harness */
     unsigned long acknowledged[P2500_INT_SOURCES];
+    /* Diagnostics sink, pointed at the machine's own by p2500_init().
+     * NULL is fine - the messages are simply discarded (TODO.md T34). */
+    const P2500Log *log;
     bool verbose;
 } P2500IntCtl;
 

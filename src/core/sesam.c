@@ -3,7 +3,14 @@
 #include <string.h>
 
 void p2500_sesam_init(P2500Sesam *s, const uint8_t *stream, size_t stream_len) {
+    /* Re-initialising a device must not silently take its diagnostics
+     * away with it: a caller that swaps a keystroke queue in, as the
+     * CLI does, would otherwise lose every message the device had to
+     * make from then on - a silent drop, which is the failure mode
+     * this project has paid for most often (TODO.md T34). */
+    const P2500Log *log = s->log;
     memset(s, 0, sizeof(*s));
+    s->log = log;
     s->stream = stream;
     s->stream_len = stream_len;
 }
@@ -12,8 +19,8 @@ uint8_t p2500_sesam_in(P2500Sesam *s) {
     s->reads++;
     uint8_t v = (!s->stream || s->pos >= s->stream_len) ? 0xFF : s->stream[s->pos++];
     if (s->verbose)
-        fprintf(stderr, "[sesam] IN ($0F) -> $%02X (read %lu, pos %zu/%zu)\n",
-                v, s->reads, s->pos, s->stream_len);
+        p2500_logf(s->log, P2500_LOG_TRACE, "sesam", "IN ($0F) -> $%02X (read %lu, pos %zu/%zu)",
+                   v, s->reads, s->pos, s->stream_len);
     return v;
 }
 
@@ -24,6 +31,6 @@ void p2500_sesam_out(P2500Sesam *s, uint8_t value) {
     if (s->verbose) {
         const char *what = value == 1 ? "power on" : value == 3 ? "reset address counter"
                          : value == 0 ? "power off" : "unknown";
-        fprintf(stderr, "[sesam] OUT ($0F) <- $%02X (%s)\n", value, what);
+        p2500_logf(s->log, P2500_LOG_TRACE, "sesam", "OUT ($0F) <- $%02X (%s)", value, what);
     }
 }

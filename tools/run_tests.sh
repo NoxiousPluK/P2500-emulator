@@ -405,6 +405,47 @@ if grep -q -- '--break reached' "$TMP/break.out" &&
     pass "--break stops with PC on the breakpoint"
 else fail "--break did not stop at \$0333"; fi
 
+echo "== 9. Core diagnostics go through the log callback (TODO.md T34)"
+# The core no longer writes to stderr; the CLI installs a sink that puts the
+# "[cat] " prefix back, so this output is what it always was. The risk in
+# that refactor is a message quietly going nowhere, so check every category
+# still arrives.
+./p2500-emu --disk "$DISK" --max-steps 4000000 --verbose-io --type 'DIR\r' \
+    >/dev/null 2>"$TMP/verbose.err"
+missing=""
+for cat in ctc dma fdc io int pio sesam; do
+    grep -q "^\[$cat\] " "$TMP/verbose.err" || missing="$missing $cat"
+done
+if [ -z "$missing" ]; then
+    pass "every device category still reaches the log ($(wc -l <"$TMP/verbose.err") lines)"
+else fail "no output from category:$missing"; fi
+
+if [ -x ./p2500-gui ]; then
+    # The GUI's log panel is fed by the same sink. With device logging off it
+    # says so; with --verbose-io it fills, so the panel must carry more ink.
+    for v in off on; do
+        [ "$v" = on ] && V=--verbose-io || V=
+        SDL_VIDEODRIVER=dummy ./p2500-gui --disk "$DISK" --frames 300 --panels log \
+            $V --shot-window "$TMP/log-$v.ppm" >>"$TMP/gui.log" 2>&1
+    done
+    python3 - "$TMP/log-off.ppm" "$TMP/log-on.ppm" <<'PY' && pass "the log panel is fed by the core" || fail "the log panel got nothing from the core"
+import sys
+def load(p):
+    d = open(p, 'rb').read()
+    hdr = d.split(b'\n', 3)
+    w, h = (int(v) for v in hdr[1].split())
+    return w, h, d[len(b'\n'.join(hdr[:3])) + 1:]
+w, h, off = load(sys.argv[1])
+_, _, on = load(sys.argv[2])
+def ink(px):
+    return sum(1 for i in range(0, len(px), 3) if px[i + 1] > 0x40)
+a, b = ink(off), ink(on)
+if b <= a * 1.2:
+    print("    log panel unchanged: quiet %d lit px, verbose %d" % (a, b)); sys.exit(1)
+sys.exit(0)
+PY
+fi
+
 echo
 if [ "$fails" -eq 0 ]; then echo "All checks passed."; exit 0; fi
 echo "$fails check(s) failed."

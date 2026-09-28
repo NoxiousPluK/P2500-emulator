@@ -487,14 +487,15 @@ static void draw_menu_bar(App *app)
  * line the CLI writes to stderr. */
 static void gui_watch(void *userdata, uint16_t, uint8_t, uint8_t, const char *text)
 {
-    p2500_panels_log(*(P2500Panels *)userdata, "%s", text);
+    p2500_panels_log(*(P2500Panels *)userdata, P2500_LOG_INFO, "watch", "%s", text);
 }
 
 static void hit_breakpoint(App *app)
 {
     app->paused = true;
     set_status(app, "stopped at breakpoint $%04X", app->m.cpu.pc);
-    p2500_panels_log(app->panels, "[step %lu] breakpoint $%04X reached",
+    p2500_panels_log(app->panels, P2500_LOG_INFO, "brk",
+                     "[step %lu] breakpoint $%04X reached",
                      app->m.total_instructions, app->m.cpu.pc);
     /* Also to the log the harness reads, so a headless run can assert that
      * the breakpoint fired rather than inferring it from pixels. */
@@ -570,6 +571,7 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[])
     const char *push_text[MAX_PUSHES] = {0};
     int npush = 0;
     const char *panels_arg = NULL;
+    bool verbose_devices = false;
     uint16_t break_at[MAX_PUSHES] = {0};
     int nbreak = 0;
     uint16_t watch_at[MAX_PUSHES] = {0};
@@ -590,6 +592,7 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[])
          * with no display, the same way --frames/--shot-window already let
          * the screen be checked headlessly. */
         else if (!strcmp(argv[i], "--panels") && i + 1 < argc) panels_arg = argv[++i];
+        else if (!strcmp(argv[i], "--verbose-io")) verbose_devices = true;
         else if (!strcmp(argv[i], "--break") && i + 1 < argc && nbreak < MAX_PUSHES)
             break_at[nbreak++] = (uint16_t)strtoul(argv[++i], NULL, 16);
         else if (!strcmp(argv[i], "--watch") && i + 1 < argc && nwatch < MAX_PUSHES)
@@ -607,7 +610,7 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[])
                     "                 [--disk path] [--disk-b path] [--disk-c path]\n"
                     "                 [--frames N] [--screenshot out.ppm] [--shot-window out.ppm]\n"
                     "                 [--push-at MS:STRING ...] [--no-caps-lock]\n"
-                    "                 [--panels devices,memory,disasm,log]\n"
+                    "                 [--panels devices,memory,disasm,log] [--verbose-io]\n"
                     "                 [--break ADDR ...] [--watch ADDR ...]");
             return SDL_APP_FAILURE;
         }
@@ -674,6 +677,7 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[])
                   ImGui_ImplSDLRenderer3_Init(app->renderer);
     if (!app->has_ui) SDL_Log("ImGui backend init failed; running without a UI");
 
+    p2500_set_log(&app->m, p2500_panels_log_sink, &app->panels);
     p2500_debug_init(&app->dbg);
     app->dbg.on_watch = gui_watch;
     app->dbg.userdata = &app->panels;
@@ -686,6 +690,7 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[])
         app->panels.show_disasm = strstr(panels_arg, "disasm") != NULL;
         app->panels.show_log = strstr(panels_arg, "log") != NULL;
     }
+    app->panels.verbose_devices = verbose_devices;
 
     SDL_StartTextInput(app->window);
     set_status(app, disks[0] ? "ready" : "no disk - File > Load Disk A...");
@@ -743,6 +748,20 @@ SDL_AppResult SDL_AppEvent(void *appstate, SDL_Event *event)
 SDL_AppResult SDL_AppIterate(void *appstate)
 {
     App *app = (App *)appstate;
+
+    /* One switch, applied every frame, so toggling the menu item takes
+     * effect immediately and a --verbose-io start behaves identically. */
+    {
+        const bool v = app->panels.verbose_devices;
+        app->m.verbose_unknown_ports = v;
+        app->m.fdc.verbose = v;
+        app->m.pio.verbose = v;
+        app->m.dma.verbose = v;
+        app->m.ctc.verbose = v;
+        app->m.sesam.verbose = v;
+        app->m.keyboard.verbose = v;
+        app->m.intctl.verbose = v;
+    }
 
     if (SDL_GetAtomicInt(&app->disk_pending)) {
         SDL_SetAtomicInt(&app->disk_pending, 0);

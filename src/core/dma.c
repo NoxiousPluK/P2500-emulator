@@ -23,14 +23,21 @@ static const char *role_name(P2500DmaByteRole role) {
 }
 
 void p2500_dma_init(P2500Dma *dma) {
+    /* Re-initialising a device must not silently take its diagnostics
+     * away with it: a caller that swaps a keystroke queue in, as the
+     * CLI does, would otherwise lose every message the device had to
+     * make from then on - a silent drop, which is the failure mode
+     * this project has paid for most often (TODO.md T34). */
+    const P2500Log *log = dma->log;
     memset(dma, 0, sizeof(*dma));
+    dma->log = log;
 }
 
 static void queue_push(P2500Dma *dma, P2500DmaByteRole role) {
     if (dma->queue_len >= P2500_DMA_QUEUE_CAP) {
         if (dma->verbose)
-            fprintf(stderr, "[dma] follow-byte queue overflow, dropping role %s\n",
-                    role_name(role));
+            p2500_logf(dma->log, P2500_LOG_WARN, "dma", "follow-byte queue overflow, dropping role %s",
+                       role_name(role));
         return;
     }
     dma->queue[dma->queue_len++] = role;
@@ -57,35 +64,35 @@ static void notify_int_reset(P2500Dma *dma) {
 static void execute_command(P2500Dma *dma, uint8_t value) {
     switch (value) {
     case 0xC3: /* Reset */
-        if (dma->verbose) fprintf(stderr, "[dma] RESET\n");
+        if (dma->verbose) p2500_logf(dma->log, P2500_LOG_TRACE, "dma", "RESET");
         dma->loaded = false;
         dma->interrupts_enabled = false;
         dma->dma_enabled = false;
         notify_int_reset(dma);
         break;
     case 0xCF: /* Load */
-        if (dma->verbose) fprintf(stderr, "[dma] LOAD\n");
+        if (dma->verbose) p2500_logf(dma->log, P2500_LOG_TRACE, "dma", "LOAD");
         dma->loaded = true;
         break;
     case 0xAB: /* Enable interrupts */
-        if (dma->verbose) fprintf(stderr, "[dma] ENABLE INTERRUPTS\n");
+        if (dma->verbose) p2500_logf(dma->log, P2500_LOG_TRACE, "dma", "ENABLE INTERRUPTS");
         dma->interrupts_enabled = true;
         break;
     case 0xAF: /* Disable interrupts */
-        if (dma->verbose) fprintf(stderr, "[dma] DISABLE INTERRUPTS\n");
+        if (dma->verbose) p2500_logf(dma->log, P2500_LOG_TRACE, "dma", "DISABLE INTERRUPTS");
         dma->interrupts_enabled = false;
         notify_int_reset(dma);
         break;
     case 0x87: /* Enable DMA */
-        if (dma->verbose) fprintf(stderr, "[dma] ENABLE DMA\n");
+        if (dma->verbose) p2500_logf(dma->log, P2500_LOG_TRACE, "dma", "ENABLE DMA");
         dma->dma_enabled = true;
         break;
     case 0x83: /* Disable DMA */
-        if (dma->verbose) fprintf(stderr, "[dma] DISABLE DMA\n");
+        if (dma->verbose) p2500_logf(dma->log, P2500_LOG_TRACE, "dma", "DISABLE DMA");
         dma->dma_enabled = false;
         break;
     case 0xA3: /* Reset and Disable Interrupts */
-        if (dma->verbose) fprintf(stderr, "[dma] RESET AND DISABLE INTERRUPTS\n");
+        if (dma->verbose) p2500_logf(dma->log, P2500_LOG_TRACE, "dma", "RESET AND DISABLE INTERRUPTS");
         dma->interrupts_enabled = false;
         notify_int_reset(dma);
         break;
@@ -102,10 +109,10 @@ static void execute_command(P2500Dma *dma, uint8_t value) {
          * WR6 command table) but not modeled - nothing this project has
          * traced ever sends these, and none of them affect the fields
          * this emulator's READ DATA path actually needs. */
-        if (dma->verbose) fprintf(stderr, "[dma] WR6 command $%02X (recognized, not modeled)\n", value);
+        if (dma->verbose) p2500_logf(dma->log, P2500_LOG_WARN, "dma", "WR6 command $%02X (recognized, not modeled)", value);
         break;
     default:
-        if (dma->verbose) fprintf(stderr, "[dma] unrecognized WR6 command $%02X\n", value);
+        if (dma->verbose) p2500_logf(dma->log, P2500_LOG_WARN, "dma", "unrecognized WR6 command $%02X", value);
         break;
     }
 }
@@ -124,9 +131,9 @@ static void decode_base_register(P2500Dma *dma, uint8_t value) {
         dma->direction = (value & 0x04) ? P2500_DMA_DIR_IO_TO_MEMORY
                                          : P2500_DMA_DIR_MEMORY_TO_IO;
         if (dma->verbose)
-            fprintf(stderr, "[dma] WR0 base $%02X: direction=%s\n", value,
-                    dma->direction == P2500_DMA_DIR_IO_TO_MEMORY ? "IO->memory (READ)"
-                                                                  : "memory->IO (WRITE)");
+            p2500_logf(dma->log, P2500_LOG_TRACE, "dma", "WR0 base $%02X: direction=%s", value,
+                       dma->direction == P2500_DMA_DIR_IO_TO_MEMORY ? "IO->memory (READ)"
+                                                                     : "memory->IO (WRITE)");
         if (value & 0x08) queue_push(dma, P2500_DMA_NEXT_A_ADDR_LO);
         if (value & 0x10) queue_push(dma, P2500_DMA_NEXT_A_ADDR_HI);
         if (value & 0x20) queue_push(dma, P2500_DMA_NEXT_BLOCKLEN_LO);
@@ -134,19 +141,19 @@ static void decode_base_register(P2500Dma *dma, uint8_t value) {
         return;
     }
     if ((value & 0x87) == 0x04) { /* WR1: D7,D2,D1,D0 = 0,1,0,0 */
-        if (dma->verbose) fprintf(stderr, "[dma] WR1 base $%02X (Port A device/timing)\n", value);
+        if (dma->verbose) p2500_logf(dma->log, P2500_LOG_TRACE, "dma", "WR1 base $%02X (Port A device/timing)", value);
         if (value & 0x40) queue_push(dma, P2500_DMA_NEXT_WR1_TIMING);
         return;
     }
     if ((value & 0x87) == 0x00) { /* WR2: D7,D2,D1,D0 = 0,0,0,0 */
-        if (dma->verbose) fprintf(stderr, "[dma] WR2 base $%02X (Port B device/timing)\n", value);
+        if (dma->verbose) p2500_logf(dma->log, P2500_LOG_TRACE, "dma", "WR2 base $%02X (Port B device/timing)", value);
         if (value & 0x40) queue_push(dma, P2500_DMA_NEXT_WR2_TIMING);
         return;
     }
     if ((value & 0x83) == 0x81) { /* WR4: D7,D1,D0 = 1,0,1 */
         static const char *modes[4] = {"Byte", "Continuous", "Burst", "Do Not Program"};
         if (dma->verbose)
-            fprintf(stderr, "[dma] WR4 base $%02X (mode=%s)\n", value, modes[(value >> 5) & 3]);
+            p2500_logf(dma->log, P2500_LOG_TRACE, "dma", "WR4 base $%02X (mode=%s)", value, modes[(value >> 5) & 3]);
         if ((value & 0x0C) == 0x0C) { /* D2 and D3 both set */
             queue_push(dma, P2500_DMA_NEXT_B_ADDR_LO);
             queue_push(dma, P2500_DMA_NEXT_B_ADDR_HI);
@@ -155,13 +162,13 @@ static void decode_base_register(P2500Dma *dma, uint8_t value) {
         return;
     }
     if ((value & 0xC7) == 0x82) { /* WR5: D7,D6,D2,D1,D0 = 1,0,0,1,0 */
-        if (dma->verbose) fprintf(stderr, "[dma] WR5 base $%02X (Ready/CE/EOB behavior)\n", value);
+        if (dma->verbose) p2500_logf(dma->log, P2500_LOG_TRACE, "dma", "WR5 base $%02X (Ready/CE/EOB behavior)", value);
         return;
     }
     if ((value & 0x83) == 0x80) { /* WR3: D7,D1,D0 = 1,0,0 - see dma.h note */
         if (dma->verbose)
-            fprintf(stderr, "[dma] WR3 base $%02X (stop-on-match=%d, int-enable=%d, dma-enable=%d)\n",
-                    value, (value >> 2) & 1, (value >> 5) & 1, (value >> 6) & 1);
+            p2500_logf(dma->log, P2500_LOG_TRACE, "dma", "WR3 base $%02X (stop-on-match=%d, int-enable=%d, dma-enable=%d)",
+                       value, (value >> 2) & 1, (value >> 5) & 1, (value >> 6) & 1);
         if (value & 0x20) dma->interrupts_enabled = true;
         if (value & 0x40) dma->dma_enabled = true;
         if (value & 0x08) queue_push(dma, P2500_DMA_NEXT_WR3_MASK);
@@ -169,7 +176,7 @@ static void decode_base_register(P2500Dma *dma, uint8_t value) {
         return;
     }
     if (dma->verbose)
-        fprintf(stderr, "[dma] unrecognized base register byte $%02X\n", value);
+        p2500_logf(dma->log, P2500_LOG_WARN, "dma", "unrecognized base register byte $%02X", value);
 }
 
 /* Handles one follow-up data byte per its queued role. Some roles (the
@@ -188,7 +195,7 @@ static void handle_follow_byte(P2500Dma *dma, P2500DmaByteRole role, uint8_t val
         /* Parsed correctly (keeps the stream in sync) but not modeled -
          * see dma.h's "Not implemented" note. */
         if (dma->verbose)
-            fprintf(stderr, "[dma] %s = $%02X (not modeled)\n", role_name(role), value);
+            p2500_logf(dma->log, P2500_LOG_WARN, "dma", "%s = $%02X (not modeled)", role_name(role), value);
         break;
     case P2500_DMA_NEXT_BLOCKLEN_LO:
         dma->block_length_raw = (uint16_t)((dma->block_length_raw & 0xFF00) | value);
@@ -197,26 +204,26 @@ static void handle_follow_byte(P2500Dma *dma, P2500DmaByteRole role, uint8_t val
     case P2500_DMA_NEXT_BLOCKLEN_HI:
         dma->block_length_raw = (uint16_t)((dma->block_length_raw & 0x00FF) | ((uint16_t)value << 8));
         dma->block_length = (uint16_t)(dma->block_length_raw + 1);
-        if (dma->verbose) fprintf(stderr, "[dma] block length = %u bytes\n", dma->block_length);
+        if (dma->verbose) p2500_logf(dma->log, P2500_LOG_TRACE, "dma", "block length = %u bytes", dma->block_length);
         break;
     case P2500_DMA_NEXT_B_ADDR_LO:
         dma->port_b_addr = (uint16_t)((dma->port_b_addr & 0xFF00) | value);
         break;
     case P2500_DMA_NEXT_B_ADDR_HI:
         dma->port_b_addr = (uint16_t)((dma->port_b_addr & 0x00FF) | ((uint16_t)value << 8));
-        if (dma->verbose) fprintf(stderr, "[dma] Port B (RAM) address = $%04X\n", dma->port_b_addr);
+        if (dma->verbose) p2500_logf(dma->log, P2500_LOG_TRACE, "dma", "Port B (RAM) address = $%04X", dma->port_b_addr);
         break;
     case P2500_DMA_NEXT_INT_CTRL:
         if (dma->verbose)
-            fprintf(stderr, "[dma] interrupt control byte = $%02X (on-RDY=%d on-match=%d "
-                            "on-EOB=%d status-affects-vector=%d)\n",
-                    value, (value >> 6) & 1, value & 1, (value >> 1) & 1, (value >> 5) & 1);
+            p2500_logf(dma->log, P2500_LOG_TRACE, "dma", "interrupt control byte = $%02X (on-RDY=%d on-match=%d "
+                               "on-EOB=%d status-affects-vector=%d)",
+                       value, (value >> 6) & 1, value & 1, (value >> 1) & 1, (value >> 5) & 1);
         if ((value & 0x0C) == 0x0C) queue_push(dma, P2500_DMA_NEXT_PULSE_CTRL);
         if (value & 0x10) queue_push(dma, P2500_DMA_NEXT_VECTOR);
         break;
     case P2500_DMA_NEXT_VECTOR:
         dma->vector = value;
-        if (dma->verbose) fprintf(stderr, "[dma] interrupt vector = $%02X\n", dma->vector);
+        if (dma->verbose) p2500_logf(dma->log, P2500_LOG_TRACE, "dma", "interrupt vector = $%02X", dma->vector);
         break;
     case P2500_DMA_NEXT_BASE:
         break; /* unreachable - queue never holds this role */
@@ -235,7 +242,7 @@ void p2500_dma_write(P2500Dma *dma, uint8_t value) {
 void p2500_dma_deliver(P2500Dma *dma, uint8_t *ram, const uint8_t *src, size_t len) {
     if (!dma->dma_enabled || dma->direction != P2500_DMA_DIR_IO_TO_MEMORY) {
         if (dma->verbose)
-            fprintf(stderr, "[dma] deliver requested but DMA not enabled for READ - dropped\n");
+            p2500_logf(dma->log, P2500_LOG_WARN, "dma", "deliver requested but DMA not enabled for READ - dropped");
         return;
     }
     if (len > dma->block_length) len = dma->block_length;
@@ -244,7 +251,7 @@ void p2500_dma_deliver(P2500Dma *dma, uint8_t *ram, const uint8_t *src, size_t l
 
     memcpy(&ram[dma->port_b_addr], src, len);
     if (dma->verbose)
-        fprintf(stderr, "[dma] delivered %zu bytes to RAM $%04X\n", len, dma->port_b_addr);
+        p2500_logf(dma->log, P2500_LOG_TRACE, "dma", "delivered %zu bytes to RAM $%04X", len, dma->port_b_addr);
 
     if (dma->interrupts_enabled && dma->on_interrupt)
         dma->on_interrupt(dma->interrupt_userdata, dma->vector);

@@ -19,7 +19,7 @@ SuperCalc2 (an OEM build whose splash reads `PHILIPS P2000`) loads from
 `P25K_S` and opens files; MBASIC-80 runs from `P25TEST`; `VALLEY.BAS` runs
 off drive B with working screen attributes. Three of nine disk images boot.
 
-`make test` is the proof and the guard: 40 checks, exit 1 on any failure.
+`make test` is the proof and the guard: 42 checks, exit 1 on any failure.
 
 ```
 make                 # libp2500.a, p2500-emu, and p2500-gui if SDL3 is present
@@ -31,7 +31,7 @@ make test
 What is modelled and working: the full IPL and CP/M boot, three floppy
 drives, the IM2 daisy chain, CTC/PIO/DMA/µPD765, the MC6845 with a
 CRTC-driven renderer, the video attribute plane, keyboard and serial input,
-a styled ImGui menu bar, and the debugger panels behind it.
+a styled ImGui menu bar, and a four-panel debugger behind it.
 
 The biggest gap is now **writing to disk** (P3): nothing in CP/M's read-only
 path needed it, which is why the prompt was reachable without it, and it is
@@ -84,7 +84,7 @@ statically — see T50.
 
 ---
 
-## P1 — Finish the front-end
+## P1 — Finish the front-end *(complete)*
 
 The GUI's purpose is instrumentation. Every advance this project has made
 came from it: `--peek`, `--count`, `--watch`, `--dump-ram`, the layout
@@ -94,8 +94,8 @@ twin, because a panel nothing can assert against is decoration.
 
 What is left in this phase is T34, which is also the fourth panel.
 
-- [x] **T39. The ImGui debugger panels.** Three of the four are in, plus the
-  headless half; the fourth waits on T34. The shared code is
+- [x] **T39. The ImGui debugger panels.** All four are in, plus the
+  headless half of each. The shared code is
   `src/core/debug.{c,h}` — a Z80 disassembler, the watch/counter/breakpoint
   tables, and the live-state lines — which both front-ends drive, so
   `p2500-emu --state` and the GUI's device panel cannot report different
@@ -120,9 +120,13 @@ What is left in this phase is T34, which is also the fourth panel.
   3. **Disassembly** (F3) — around PC, clickable breakpoint gutter,
      Step / Step 100 / Step field. Forwards from an anchor only: a Z80
      stream cannot be decoded backwards, and a guess would look confident.
-  4. **Port/IRQ log** — *not done, needs T34.* F4 opens an event log today,
-     fed by the watch and breakpoint reports; T34 turns it into the real
-     thing.
+  4. **Log** (F4) — every diagnostic the core produces, now that T34 put
+     them behind a callback, plus the watch hits and breakpoint stops.
+     Filterable by level and by substring; warnings are amber, deliberately
+     off the phosphor palette, because they are the lines saying the
+     emulator declined to act. *Debug > Verbose device logging* arms the
+     device switches; off by default, since they emit a few thousand lines
+     per emulated second.
 
   The disassembler is cross-checked against `z80dasm` by
   `tools/disasm_crosscheck.py` — ~34,000 instructions per `make test` run,
@@ -136,22 +140,26 @@ What is left in this phase is T34, which is also the fourth panel.
   step-over that runs past a `CALL`, and symbol names from the CBIOS tables
   so the listing reads `SELDSK` rather than `$E620`.
 
-- [ ] **T34. A log callback in the core.** The reset half is done
-  (`p2500_reset()`). What is left: **63 `fprintf(stderr, …)` calls in the
-  core** (`dma.c` 24, `fdc.c` 12, `pio.c` 8, `machine.c` 7, `ctc.c` 5,
-  `intctl.c` 4, `keyboard.c` 3). A core that writes to `stderr` cannot feed
-  a GUI log panel, a MAME `logerror()`, or a browser console. Replace with
-  one `p2500_log_fn` on the machine (level + category + formatted message);
-  the CLI installs a callback reproducing today's output verbatim, so this
-  stays a no-behaviour-change refactor `make test` can verify.
+- [x] **T34. A log callback in the core.** Done. `src/core/log.{c,h}` is one
+  `P2500Log` on the machine; every device holds a pointer to it and writes
+  through `p2500_logf(level, category, …)`. The `[cat] ` prefix each message
+  used to carry inline is now the category argument, and the CLI's sink puts
+  it back, so **stderr output is byte-for-byte what it was** — verified by
+  diffing a full CP/M boot plus `DIR` with every verbose switch on, 183 KB
+  of diagnostics, against a build of the previous commit.
 
-  The core has **no non-const file-scope state at all** — the expensive
+  The one thing that needed care: a device's `_init` must not take its own
+  sink away with it. The CLI re-initialises the keyboard to install a
+  keystroke queue, which silently cost four `[kbd]` lines until each `_init`
+  learned to carry `log` across its `memset`. That is the project's usual
+  failure mode in miniature — the messages did not error, they just stopped.
+
+  Changed behaviour, deliberately and separately: `--verbose-io` now also
+  enables `intctl.verbose`, so the harness can see the daisy chain the GUI's
+  panel could already show.
+
+  The core still has **no non-const file-scope state at all** — the expensive
   property to retrofit, already correct. Keep it that way.
-
-  **This is now the only thing between the GUI and its fourth panel.** F4
-  opens an event log fed by `core/debug.c`'s watch and breakpoint reports;
-  a `p2500_log_fn` is what turns it into the port/IRQ log that would have
-  paid for itself in T42 and T43.
 
 ---
 

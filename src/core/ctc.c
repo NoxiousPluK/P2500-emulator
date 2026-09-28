@@ -3,7 +3,14 @@
 #include <string.h>
 
 void p2500_ctc_init(P2500Ctc *ctc) {
+    /* Re-initialising a device must not silently take its diagnostics
+     * away with it: a caller that swaps a keystroke queue in, as the
+     * CLI does, would otherwise lose every message the device had to
+     * make from then on - a silent drop, which is the failure mode
+     * this project has paid for most often (TODO.md T34). */
+    const P2500Log *log = ctc->log;
     memset(ctc, 0, sizeof(*ctc));
+    ctc->log = log;
     for (int ch = 0; ch < P2500_CTC_CHANNELS; ch++)
         ctc->clk_trg[ch] = true; /* CLK/TRG inputs idle high until driven */
 }
@@ -28,8 +35,8 @@ void p2500_ctc_write(P2500Ctc *ctc, int channel, uint8_t value) {
         ctc->prescale_acc[channel] = 0;
         ctc->started[channel] = true;
         if (ctc->verbose)
-            fprintf(stderr, "[ctc] channel %d time constant = $%02X (%u)\n",
-                    channel, value, reload_value(ctc, channel));
+            p2500_logf(ctc->log, P2500_LOG_TRACE, "ctc", "channel %d time constant = $%02X (%u)",
+                       channel, value, reload_value(ctc, channel));
         return;
     }
 
@@ -43,14 +50,14 @@ void p2500_ctc_write(P2500Ctc *ctc, int channel, uint8_t value) {
          * misdecode worth seeing rather than silently accepting. */
         if (channel != 0) {
             if (ctc->verbose)
-                fprintf(stderr, "[ctc] ignoring vector byte $%02X written to channel %d "
-                                "(a real CTC only accepts it on channel 0)\n", value, channel);
+                p2500_logf(ctc->log, P2500_LOG_WARN, "ctc", "ignoring vector byte $%02X written to channel %d "
+                                   "(a real CTC only accepts it on channel 0)", value, channel);
             return;
         }
         ctc->vector_base = (uint8_t)(value & 0xF8);
         ctc->vector_set = true;
         if (ctc->verbose)
-            fprintf(stderr, "[ctc] interrupt vector base = $%02X\n", ctc->vector_base);
+            p2500_logf(ctc->log, P2500_LOG_TRACE, "ctc", "interrupt vector base = $%02X", ctc->vector_base);
         return;
     }
 
@@ -65,13 +72,13 @@ void p2500_ctc_write(P2500Ctc *ctc, int channel, uint8_t value) {
     bool software_reset = (value & 0x02) != 0;
 
     if (ctc->verbose)
-        fprintf(stderr, "[ctc] channel %d control $%02X: int=%d mode=%s presc=%d edge=%s "
-                        "tc_follows=%d reset=%d\n",
-                channel, value, ctc->int_enabled[channel],
-                ctc->counter_mode[channel] ? "COUNTER" : "TIMER",
-                ctc->prescaler_256[channel] ? 256 : 16,
-                ctc->rising_edge[channel] ? "rising" : "falling",
-                time_constant_follows, software_reset);
+        p2500_logf(ctc->log, P2500_LOG_TRACE, "ctc", "channel %d control $%02X: int=%d mode=%s presc=%d edge=%s "
+                           "tc_follows=%d reset=%d",
+                   channel, value, ctc->int_enabled[channel],
+                   ctc->counter_mode[channel] ? "COUNTER" : "TIMER",
+                   ctc->prescaler_256[channel] ? 256 : 16,
+                   ctc->rising_edge[channel] ? "rising" : "falling",
+                   time_constant_follows, software_reset);
 
     if (software_reset) {
         ctc->started[channel] = false;
@@ -108,7 +115,7 @@ static void count_down(P2500Ctc *ctc, int ch) {
     if (ctc->int_enabled[ch] && ctc->on_interrupt) {
         uint8_t vector = (uint8_t)(ctc->vector_base | (ch << 1));
         if (ctc->verbose)
-            fprintf(stderr, "[ctc] channel %d ZC/TO, vector=$%02X\n", ch, vector);
+            p2500_logf(ctc->log, P2500_LOG_TRACE, "ctc", "channel %d ZC/TO, vector=$%02X", ch, vector);
         ctc->on_interrupt(ctc->interrupt_userdata, ch, vector);
     }
 }

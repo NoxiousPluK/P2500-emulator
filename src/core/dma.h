@@ -2,6 +2,8 @@
 #define P2500_DMA_H
 
 #include <stdint.h>
+
+#include "log.h"
 #include <stdbool.h>
 #include <stddef.h>
 
@@ -140,6 +142,9 @@ typedef struct {
     bool interrupts_enabled; /* WR6 $AB seen, cleared by $AF (or WR3 D5) */
     bool dma_enabled;        /* WR6 $87 seen, cleared by $83 (or WR3 D6) */
 
+    /* Diagnostics sink, pointed at the machine's own by p2500_init().
+     * NULL is fine - the messages are simply discarded (TODO.md T34). */
+    const P2500Log *log;
     P2500DmaInterruptCallback on_interrupt;
     /* Called when a command resets the chip or disables its interrupts -
      * see notify_int_reset in dma.c. */
