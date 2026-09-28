@@ -191,14 +191,53 @@ contexts where a GUI dependency would make it unrunnable.
   fail if the glyph is truncated back to 8 rows), and a solid cursor block
   at row 6 column 2.
 
-- [~] **T38. Live keyboard input — WORKING; two pieces deferred.** That
-  constant is a 100 Hz retry loop standing in for "the user keeps pressing
-  the key", and it exists only because the CLI has no concept of a key
-  *event*. A GUI does: strobe CTC channel 3 exactly once per
-  `SDL_EVENT_KEY_DOWN`. It is the last piece of the model not derived from
-  firmware, and this is what retires it.
+- [~] **T38. Live keyboard input — WORKING; two pieces deferred.**
+  `p2500_keyboard_push()` feeds a 64-byte ring the front-end writes and port
+  `$06` drains, alongside the scripted queue the CLI already had, so the
+  regression suite's behaviour is unchanged by this existing. The GUI takes
+  printable characters from `SDL_EVENT_TEXT_INPUT` rather than from keysyms
+  — the right call for a multilingual keyboard — and maps only the keys with
+  no text form. `--push-at MS:STRING` drives the same call a keypress does,
+  so `make test` covers the path with no display.
 
-  What is already known, checked rather than assumed:
+  **Deferred, deliberately:**
+  - **`P2500_KEYSTROKE_HZ` is still there.** The plan was to delete it in
+    favour of one strobe per key event, but that 100 Hz retry is also what
+    makes a byte survive CBIOS zeroing its ring-buffer header late in init
+    (`$ED02`), and it costs nothing for live input since a pushed byte waits
+    in the ring. Removing it needs the init-order question settled first.
+  - **Accented input is dropped rather than guessed.** Anything outside
+    7-bit ASCII needs the `$E274` dead-key table decoded first; sending a
+    wrong byte would be worse than sending none.
+
+  **Capitals lock, and why typing looks case-inverted.** CONIN XORs
+  alphabetic input with a mask at `$E34C` (`$E4AD`-`$E4BB`) that holds
+  `$20`, so an unshifted key produces a capital. **This is authentic**, and
+  confirmed three ways:
+
+  - The P2219 manual's KEYBOARD section says the keyboard codes are 7-bit
+    ISO — lowercase unshifted — and documents a dedicated key used "as the
+    'capitals lock' toggle". (Its keycap glyph is too degraded in the scan
+    to identify.)
+  - `$E34C` is **not computed**. Watching it across a whole boot shows a
+    single write, by the loader's own `LDIR` at `PC=$1082`: the `$20` is
+    data inside the shipped CBIOS image, i.e. how the disk was configured.
+  - CBIOS's only toggle for it (`$E482`: `ld a,($E34C) / xor $20 / ld
+    ($E34C),a`) sits on a CONST path that never runs normally, because CONST
+    returns early while `$E551` is `$FF`.
+
+  So the machine boots with capitals lock engaged, which suits a system
+  whose commands and filenames are uppercase anyway. **Output is unaffected**
+  — `VALLEY.BAS`'s own lowercase literals (`"strike: S AND 1-3"`) render as
+  lowercase, so CONOUT is faithful and only CONIN transforms.
+
+  The real toggle key is handled by the keyboard controller, which is not
+  modelled, so the GUI offers the equivalent under **Machine > Capitals
+  lock** (checked = as shipped). Unchecking pre-inverts the letters the
+  front-end sends, cancelling CBIOS's XOR so the letter typed is the letter
+  that appears. Nothing in the guest is patched.
+
+  What is already known about the encoding, checked rather than assumed:
   - **Alphanumerics are plain ASCII** — raw ASCII on port `$06` drives CP/M
     end to end, which is what `--type 'dir\r'` does.
   - **Special keys are high-bit codes.** CBIOS's table at `$E274` decodes
@@ -220,7 +259,8 @@ contexts where a GUI dependency would make it unrunnable.
   never sees it, and the core headers gained `extern "C"` guards so C++ can
   link against them.
 
-  A **File** menu is up — Load Disk, Reset, Pause, Screenshot, Quit — styled
+  A **File** menu is up — Load Disk A/B/C, Reset, Pause, Screenshot, Quit —
+  plus a **Machine** menu carrying the capitals-lock toggle (T38), styled
   on the emulator's own phosphor palette (square corners, green on the bezel
   colour) so it reads as part of the machine rather than as a debug overlay,
   and the emulated screen is offset below it and integer-scaled by hand
@@ -781,7 +821,7 @@ on-disk `.phi` files are sector-interleaved, so the `org 0` listings in
 |---|---|
 | `$E200` | CP/M 2.2 CBIOS jump table (BOOT/WBOOT/CONST/CONIN/CONOUT/LIST/…) |
 | `$E274` | Special-key translation table (cursor diamond + dead-key diacritics; see T38) |
-| `$E34C` | **Shift-lock mask.** CONIN XORs alphabetic input with it (`$E4B7`-`$E4BB`); it holds `$20`, so an unshifted key produces uppercase. Authentic - see T38 |
+| `$E34C` | **Capitals-lock mask.** CONIN XORs alphabetic input with it (`$E4B7`-`$E4BB`); it holds `$20` as shipped, so an unshifted key produces a capital. Toggled at `$E482`. See T38 |
 | `$E46C` | **CONST** — returns 0 unless `($E551)` != `$FF` and `($E553)` != `($0020)` |
 | `$E48C` | **CONIN** — `CALL $E46C` / `JR Z` until CONST reports a character |
 | `$E4C3` | **CONOUT** — ESC state machine at `$E34D`, translation table at `$E257`, then posts the byte as a request. Never touches an attribute (T27) |

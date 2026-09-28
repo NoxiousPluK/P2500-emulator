@@ -68,7 +68,9 @@ being hardcoded, so the window follows whatever the guest programs.
 | Ctrl+O / Ctrl+R / Ctrl+Q | load disk / reset / quit |
 
 There is a **File** menu with Load Disk A/B/C, Reset, Pause, Screenshot and
-Quit.
+Quit, and a **Machine** menu with a capitals-lock toggle — the machine boots
+with capitals lock engaged, which is how these disks are configured, so
+unshifted keys produce capitals (`TODO.md` T38).
 It is drawn by Dear ImGui rather than being a native menu bar, styled on the
 same phosphor palette as the screen — see `TODO.md` T39 for why a native one
 is not viable on Wayland. "Load Disk" uses `SDL_ShowOpenFileDialog`, which
