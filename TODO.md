@@ -24,8 +24,7 @@ off drive B with working screen attributes. Three of nine disk images boot.
 ```
 make                 # libp2500.a, p2500-emu, and p2500-gui if SDL3 is present
 make test
-./p2500-gui --disk "../Disk Images/extracted/P25K_B/P25K_B.raw" \
-            --disk-b "../Disk Images/extracted/P2500GAM/P2500GAM.raw"
+./p2500-gui --disk disks/P25K_B.raw --disk-b disks/P2500GAM.raw
 ```
 
 What is modelled and working: the full IPL and CP/M boot, three floppy

@@ -52,9 +52,13 @@ exit 1 on any failure. The GUI checks skip themselves if SDL3 is absent.
 ## Running it as a machine
 
 ```
-./p2500-gui --disk "../Disk Images/extracted/P25K_B/P25K_B.raw" \
-            --disk-b "../Disk Images/extracted/P2500GAM/P2500GAM.raw"
+./p2500-gui --disk disks/P25K_B.raw --disk-b disks/P2500GAM.raw
 ```
+
+`disks/` holds the four images known to work — a CP/M system disk,
+SuperCalc2, a development disk with MACRO-80 and MBASIC, and a disk of BASIC
+games; see `disks/README.md`. Nothing else is needed to run the emulator or
+the test suite.
 
 Boots to `A>` in a window, **at the speed of the real machine**: the guest is
 held to 50 fields a second against the wall clock, not against the display's
@@ -209,7 +213,7 @@ and the writer cannot drift apart. Every build is read back through
 ```
 # A bootable disk with one program on it.
 tools/cpm_build.py othello.raw OTHELLO.COM \
-    --boot-from "../Disk Images/extracted/P25K_B/P25K_B.raw"
+    --boot-from disks/P25K_B.raw
 
 # A data disk for drive B:.
 tools/cpm_build.py games.raw *.BAS

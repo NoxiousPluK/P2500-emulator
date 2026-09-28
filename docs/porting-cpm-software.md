@@ -115,7 +115,7 @@ To make an image this emulator (or real hardware) can use:
 
 ```
 tools/cpm_build.py othello.raw path/to/OTHELLO.COM \
-    --boot-from "../Disk Images/extracted/P25K_B/P25K_B.raw"
+    --boot-from disks/P25K_B.raw
 ./p2500-gui --disk othello.raw
 ```
 

@@ -38,7 +38,7 @@ examples:
 
     # A disk that boots CP/M on its own, with one program added.
     tools/cpm_build.py othello.raw OTHELLO.COM \\
-        --boot-from "../Disk Images/extracted/P25K_B/P25K_B.raw"
+        --boot-from disks/P25K_B.raw
 """
 
 import argparse

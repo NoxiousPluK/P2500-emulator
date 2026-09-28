@@ -20,7 +20,7 @@ set -u
 cd "$(dirname "$0")/.."
 
 EMU=./p2500-emu
-DISK="../Disk Images/extracted/P25K_B/P25K_B.raw"
+DISK="disks/P25K_B.raw"
 REF="../ROM Dumps/CPU-Card-Boot-EPROM/emulation/vram_after_banner.bin"
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
@@ -87,6 +87,9 @@ echo "== 4b. The IPL's own give-up path still works"
 # A disk that is readable but not bootable must make sub_0333h return, so the
 # IPL prints its own banner and halts - rather than blocking in the $06C6
 # busy-wait. This is the only test of the failure path.
+# Deliberately not in disks/: this dump is damaged (T45) and boots nothing.
+# It is here because the IPL's give-up path needs a disk that is readable and
+# not bootable, which is exactly what a half-captured disk is.
 PSYS="../Disk Images/extracted/P2k5_LOGIC/P2k5_LOGIC_deinterleaved.raw"
 if [ ! -f "$PSYS" ]; then
     echo "  SKIP  $PSYS not present"
@@ -105,7 +108,7 @@ else
 fi
 
 echo "== 4c. Drive B: (T44)"
-GAMES="../Disk Images/extracted/P2500GAM/P2500GAM.raw"
+GAMES="disks/P2500GAM.raw"
 if [ ! -f "$GAMES" ]; then
     echo "  SKIP  $GAMES not present"
 else
@@ -134,7 +137,7 @@ echo "== 4d. Swapping a disk mid-run"
 # Ctrl-C clears it through the BDOS reset at $E086. That flag has no visible
 # consequence until writing exists (T30), which is exactly why the claim
 # needs a test rather than a sentence in a tooltip.
-SYSDISK="../Disk Images/extracted/P25K_S/P25K_S.raw"
+SYSDISK="disks/P25K_S.raw"
 if [ ! -f "$SYSDISK" ]; then
     echo "  SKIP  $SYSDISK not present"
 else
