@@ -1,4 +1,5 @@
 #include "core/machine.h"
+#include "core/debug.h"
 #include "core/video.h"
 #include <ctype.h>
 #include <stdio.h>
@@ -76,6 +77,32 @@ static void check_landmarks(const P2500Machine *m, uint16_t pc, unsigned long st
     }
 }
 
+/* --watch reports, printed exactly as they always were - the text is built
+ * in core/debug.c now so the GUI's log panel shows the same line. */
+static void cli_watch(void *userdata, uint16_t addr, uint8_t was, uint8_t now,
+                      const char *text) {
+    (void)userdata; (void)addr; (void)was; (void)now;
+    fprintf(stderr, "%s\n", text);
+}
+
+/* --state: every device's live state, through the same label/value lines the
+ * GUI's device panel draws (TODO.md T39). Having it here is not duplication
+ * for its own sake - it is how a panel's claims get checked without a
+ * display, and how run_tests.sh can assert on device state at all. */
+static void print_state(const P2500Machine *m) {
+    printf("\nDevice state\n");
+    for (int t = 0; t < P2500_DBG_TOPICS; t++) {
+        printf("\n[%s]\n", p2500_debug_topic_name((P2500DebugTopic)t));
+        int n = p2500_debug_topic_lines(m, (P2500DebugTopic)t);
+        for (int l = 0; l < n; l++) {
+            char label[48], value[192];
+            p2500_debug_line(m, (P2500DebugTopic)t, l,
+                             label, sizeof label, value, sizeof value);
+            printf("  %-22s %s\n", label, value);
+        }
+    }
+}
+
 static uint8_t *read_whole_file(const char *path, size_t *out_size) {
     FILE *f = fopen(path, "rb");
     if (!f) return NULL;
@@ -124,24 +151,23 @@ int main(int argc, char **argv) {
     #define MAX_POKES 8
     struct { uint16_t addr; uint8_t bytes[64]; size_t len; } pokes[MAX_POKES];
     int num_pokes = 0;
-    /* --watch ADDR[:LEN] - report every change to that byte (or run of
-       bytes) with the PC and registers that caused it (TODO.md T25).
-       Defaults to $0003 and $0039 - the two page-zero corruption canaries
-       this project has needed most often - when none is given. */
-    #define MAX_WATCHES 16
-    struct { uint16_t addr; uint16_t len; uint8_t last[64]; } watches[MAX_WATCHES];
-    int num_watches = 0;
-    /* --count ADDR - count executions at that PC and print the total at
-       exit. "Does this handler ever actually run?" is the single question
-       this project asks most (TODO.md T25). */
-    #define MAX_COUNTS 16
-    struct { uint16_t addr; unsigned long hits; unsigned long first_step; } counts[MAX_COUNTS];
-    int num_counts = 0;
-    /* --break ADDR - stop the run the first time PC reaches it, so the
-       exit report's registers/peeks describe that exact moment. */
-    #define MAX_BREAKS 8
-    uint16_t breaks[MAX_BREAKS];
-    int num_breaks = 0;
+    /* --watch ADDR[:LEN], --count ADDR and --break ADDR all live in
+     * core/debug.c now, so the GUI drives the identical code (TODO.md T39).
+     * --watch reports every change to a byte with the PC and registers that
+     * caused it; --count answers "does this handler ever actually run?",
+     * the single question this project asks most; --break stops the run at
+     * a PC so the exit report describes that exact moment.
+     * With no --watch given, $0003 and $0039 are watched - the two
+     * page-zero corruption canaries this project has needed most often. */
+    P2500Debug dbg;
+    p2500_debug_init(&dbg);
+    dbg.on_watch = cli_watch;
+    /* --state - dump every device's live state at exit. --disasm ADDR:N -
+     * disassemble N instructions from ADDR, bank-aware, at exit. */
+    bool dump_state = false;
+    #define MAX_DISASM 4
+    struct { uint16_t addr; unsigned count; } disasms[MAX_DISASM];
+    int num_disasms = 0;
     const char *ram_dump_path = NULL;
     bool stuck_detect = true;
     /* --swap-at MS:PATH - change the disk in the drive partway through a
@@ -251,26 +277,34 @@ int main(int argc, char **argv) {
         }
         else if (!strcmp(argv[i], "--no-stuck-detect")) stuck_detect = false;
         else if (!strcmp(argv[i], "--watch") && i + 1 < argc) {
-            if (num_watches >= MAX_WATCHES) { fprintf(stderr, "too many --watch args\n"); return 1; }
             char *arg = argv[++i];
             char *colon = strchr(arg, ':');
             if (colon) *colon = '\0';
-            watches[num_watches].addr = (uint16_t)strtoul(arg, NULL, 16);
-            watches[num_watches].len = colon ? (uint16_t)strtoul(colon + 1, NULL, 0) : 1;
-            if (watches[num_watches].len < 1) watches[num_watches].len = 1;
-            if (watches[num_watches].len > 64) watches[num_watches].len = 64;
-            num_watches++;
+            uint16_t addr = (uint16_t)strtoul(arg, NULL, 16);
+            uint16_t len = colon ? (uint16_t)strtoul(colon + 1, NULL, 0) : 1;
+            if (p2500_debug_add_watch(&dbg, addr, len) < 0) {
+                fprintf(stderr, "too many --watch args\n"); return 1;
+            }
         }
         else if (!strcmp(argv[i], "--count") && i + 1 < argc) {
-            if (num_counts >= MAX_COUNTS) { fprintf(stderr, "too many --count args\n"); return 1; }
-            counts[num_counts].addr = (uint16_t)strtoul(argv[++i], NULL, 16);
-            counts[num_counts].hits = 0;
-            counts[num_counts].first_step = 0;
-            num_counts++;
+            if (p2500_debug_add_count(&dbg, (uint16_t)strtoul(argv[++i], NULL, 16)) < 0) {
+                fprintf(stderr, "too many --count args\n"); return 1;
+            }
         }
         else if (!strcmp(argv[i], "--break") && i + 1 < argc) {
-            if (num_breaks >= MAX_BREAKS) { fprintf(stderr, "too many --break args\n"); return 1; }
-            breaks[num_breaks++] = (uint16_t)strtoul(argv[++i], NULL, 16);
+            if (p2500_debug_add_break(&dbg, (uint16_t)strtoul(argv[++i], NULL, 16)) < 0) {
+                fprintf(stderr, "too many --break args\n"); return 1;
+            }
+        }
+        else if (!strcmp(argv[i], "--state")) dump_state = true;
+        else if (!strcmp(argv[i], "--disasm") && i + 1 < argc) {
+            if (num_disasms >= MAX_DISASM) { fprintf(stderr, "too many --disasm args\n"); return 1; }
+            char *arg = argv[++i];
+            char *colon = strchr(arg, ':');
+            disasms[num_disasms].addr = (uint16_t)strtoul(arg, NULL, 16);
+            disasms[num_disasms].count = colon ? (unsigned)strtoul(colon + 1, NULL, 0) : 16;
+            if (disasms[num_disasms].count == 0) disasms[num_disasms].count = 1;
+            num_disasms++;
         }
         else if (!strcmp(argv[i], "--poke") && i + 1 < argc) {
             if (num_pokes >= MAX_POKES) { fprintf(stderr, "too many --poke args\n"); return 1; }
@@ -298,6 +332,7 @@ int main(int argc, char **argv) {
                             "  [--watch ADDR[:LEN] ...] [--count ADDR ...] [--type STRING] [--type-after MS]\n"
                             "  [--type-at MS:STRING ...]\n"
                             "  [--break ADDR ...] [--swap-at MS:PATH ...] [--push-at MS:STRING ...]\n"
+                            "  [--state] [--disasm ADDR[:COUNT] ...]\n"
                             "  [--no-stuck-detect]\n", argv[0]);
             return 1;
         }
@@ -408,40 +443,19 @@ int main(int argc, char **argv) {
     int reset_visits = 0;
     const char *stop_reason = NULL;
 
-    if (num_watches == 0) { /* the two default page-zero canaries */
-        watches[num_watches].addr = 0x0003; watches[num_watches].len = 1; num_watches++;
-        watches[num_watches].addr = 0x0039; watches[num_watches].len = 1; num_watches++;
+    if (dbg.watches == 0) { /* the two default page-zero canaries */
+        p2500_debug_add_watch(&dbg, 0x0003, 1);
+        p2500_debug_add_watch(&dbg, 0x0039, 1);
     }
-    for (int w = 0; w < num_watches; w++)
-        for (uint16_t j = 0; j < watches[w].len; j++)
-            watches[w].last[j] = p2500_peek(&m, (uint16_t)(watches[w].addr + j));
+    p2500_debug_baseline(&dbg, &m);
 
     for (; step < max_steps; step++) {
         uint16_t pc = m.cpu.pc;
 
-        for (int w = 0; w < num_watches; w++) {
-            for (uint16_t j = 0; j < watches[w].len; j++) {
-                uint16_t a = (uint16_t)(watches[w].addr + j);
-                uint8_t now = p2500_peek(&m, a);
-                if (now == watches[w].last[j]) continue;
-                fprintf(stderr, "[step %lu] [watch $%04X] $%02X -> $%02X, PC=$%04X SP=$%04X "
-                                "A=$%02X BC=$%02X%02X DE=$%02X%02X HL=$%02X%02X\n",
-                        step, a, watches[w].last[j], now, pc, m.cpu.sp, m.cpu.a,
-                        m.cpu.b, m.cpu.c, m.cpu.d, m.cpu.e, m.cpu.h, m.cpu.l);
-                watches[w].last[j] = now;
-            }
-        }
-        for (int c = 0; c < num_counts; c++) {
-            if (counts[c].addr != pc) continue;
-            if (counts[c].hits == 0) counts[c].first_step = step;
-            counts[c].hits++;
-        }
-        for (int b = 0; b < num_breaks; b++) {
-            if (breaks[b] != pc) continue;
+        if (p2500_debug_before_step(&dbg, &m, step)) {
             stop_reason = "--break reached";
             break;
         }
-        if (stop_reason) break;
 
         for (int pi = 0; pi < num_pushes; pi++) {
             if (pushes[pi].done) continue;
@@ -560,12 +574,12 @@ int main(int argc, char **argv) {
     }
     if (detected_cycle)
         printf("  (repeating PC cycle of %u instructions detected)\n", detected_cycle);
-    for (int c = 0; c < num_counts; c++) {
-        if (counts[c].hits)
+    for (int c = 0; c < dbg.counts; c++) {
+        if (dbg.count[c].hits)
             printf("  --count $%04X: %lu execution(s), first at step %lu\n",
-                   counts[c].addr, counts[c].hits, counts[c].first_step);
+                   dbg.count[c].addr, dbg.count[c].hits, dbg.count[c].first_step);
         else
-            printf("  --count $%04X: never executed\n", counts[c].addr);
+            printf("  --count $%04X: never executed\n", dbg.count[c].addr);
     }
     printf("Emulated time: %.3f s (%lu T-states at %u Hz)\n",
            (double)m.cpu.cyc / (double)P2500_CPU_HZ, m.cpu.cyc, P2500_CPU_HZ);
@@ -664,6 +678,23 @@ int main(int argc, char **argv) {
             printf("\n");
         }
     }
+
+    for (int di = 0; di < num_disasms; di++) {
+        printf("\n--disasm $%04X:%u\n", disasms[di].addr, disasms[di].count);
+        uint16_t at = disasms[di].addr;
+        for (unsigned k = 0; k < disasms[di].count; k++) {
+            char text[80];
+            int len = p2500_disasm(&m, at, text, sizeof text);
+            printf("  $%04X: ", at);
+            for (int b = 0; b < 4; b++)
+                if (b < len) printf("%02X ", p2500_peek(&m, (uint16_t)(at + b)));
+                else printf("   ");
+            printf(" %s\n", text);
+            at = (uint16_t)(at + len);
+        }
+    }
+
+    if (dump_state) print_state(&m);
 
     if (ram_dump_path) {
         FILE *f = fopen(ram_dump_path, "wb");

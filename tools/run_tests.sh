@@ -228,7 +228,7 @@ PY
     # been pushed below it.
     SDL_VIDEODRIVER=dummy ./p2500-gui --disk "$DISK" --frames 400 \
         --shot-window "$TMP/win.ppm" >>"$TMP/gui.log" 2>&1
-    python3 - "$TMP/win.ppm" <<'PY' && pass "menu bar renders" || fail "menu bar did not draw"
+    python3 - "$TMP/win.ppm" "$TMP/gui.ppm" <<'PY' && pass "menu bar renders" || fail "menu bar did not draw"
 import sys
 d = open(sys.argv[1], 'rb').read()
 hdr = d.split(b'\n', 3)
@@ -248,12 +248,26 @@ check(bar > 20, "no lit pixels in the menu bar band - the UI did not draw")
 # always drawn, so there must be ink in the last 24 px of the band.
 check(any(lit(x, y) for x in range(w - 24, w) for y in range(2, 18)),
       "no capitals-lock indicator at the right of the menu bar")
-# The emulated screen must start below the bar. Probe a strip that is empty
-# in the menu bar - to the right of the menu labels, left of the
-# right-aligned status and lock indicator - but which the "Philips P2500"
-# banner would occupy if the screen were drawn at y=0.
-check(not any(lit(x, y) for x in range(140, 200) for y in range(2, 16)),
+# The emulated screen must start below the bar. Probe a strip that falls in a
+# gap between two menu labels but which the "Philips P2500" banner would
+# occupy if the screen were drawn at y=0.
+#
+# The probe's own discriminating power is asserted rather than assumed: the
+# same region is looked up in the screen-only capture (half the scale, since
+# the composite is drawn at 2x), and if the banner has no ink there then the
+# probe could never have failed and is reported as broken. That is the guard
+# a previous version of this check lacked - adding a third menu moved the
+# labels under the old strip and it went on passing.
+PROBE_X, PROBE_Y = range(118, 144), range(2, 22)
+check(not any(lit(x, y) for x in PROBE_X for y in PROBE_Y),
       "banner ink inside the menu band - screen was not offset")
+sd = open(sys.argv[2], 'rb').read()
+shdr = sd.split(b'\n', 3)
+sw, sh = (int(v) for v in shdr[1].split())
+spx = sd[len(b'\n'.join(shdr[:3])) + 1:]
+check(any(spx[((y // 2) * sw + x // 2) * 3 + 1] > 0x60 for x in PROBE_X for y in PROBE_Y),
+      "the probe strip is blank on the emulated screen too - this check "
+      "cannot fail, move it over the banner")
 sys.exit(0 if ok else 1)
 PY
     # The offset itself comes from the front-end's own layout report: a
@@ -263,9 +277,133 @@ PY
     if grep -qE 'layout: menu [0-9]+ px, screen at y=[1-9]' "$TMP/gui.log"; then
         pass "screen is offset below the menu bar"
     else fail "screen not offset below the menu bar"; fi
+
+    # --- the debugger panels (TODO.md T39) ---------------------------------
+    # Drawn under the dummy driver like the menu bar, so what the panels put
+    # on screen can be asserted with no display.
+    SDL_VIDEODRIVER=dummy ./p2500-gui --disk "$DISK" --frames 200 \
+        --panels devices,memory,disasm,log --shot-window "$TMP/panels.ppm" \
+        >"$TMP/panels.log" 2>&1
+    python3 - "$TMP/win.ppm" "$TMP/panels.ppm" <<'PY' && pass "debugger panels draw" || fail "debugger panels did not draw"
+import sys
+def load(p):
+    d = open(p, 'rb').read()
+    hdr = d.split(b'\n', 3)
+    w, h = (int(v) for v in hdr[1].split())
+    return w, h, d[len(b'\n'.join(hdr[:3])) + 1:]
+bw, bh, bare = load(sys.argv[1])
+pw, ph, panels = load(sys.argv[2])
+if (bw, bh) != (pw, ph):
+    print("    captures differ in size"); sys.exit(1)
+# Below the menu bar the bare window holds the emulated screen alone. Opening
+# four panels has to put substantially more ink there; were --panels ignored,
+# the two images would be identical.
+def ink(px):
+    return sum(1 for i in range(bw * 3 * 30, len(px), 3) if px[i + 1] > 0x40)
+a, b = ink(bare), ink(panels)
+if b <= a * 1.2:
+    print("    panels added no ink: %d -> %d lit pixels" % (a, b)); sys.exit(1)
+sys.exit(0)
+PY
+
+    # A breakpoint must actually stop the machine, and the run/pause lamp in
+    # the bar must show it. Two runs identical but for --break.
+    SDL_VIDEODRIVER=dummy ./p2500-gui --disk "$DISK" --frames 400 --break E46F \
+        --shot-window "$TMP/paused.ppm" >"$TMP/guibreak.log" 2>&1
+    if grep -q 'breakpoint: stopped at \$E46F' "$TMP/guibreak.log"; then
+        pass "--break stops the GUI at the requested PC"
+    else fail "--break did not stop the GUI"; fi
+    python3 - "$TMP/win.ppm" "$TMP/paused.ppm" <<'PY' && pass "run/pause lamp follows the run state" || fail "run/pause lamp did not change"
+import sys
+def load(p):
+    d = open(p, 'rb').read()
+    hdr = d.split(b'\n', 3)
+    w, h = (int(v) for v in hdr[1].split())
+    return w, h, d[len(b'\n'.join(hdr[:3])) + 1:]
+w, h, run = load(sys.argv[1])
+_, _, paused = load(sys.argv[2])
+# The lamp sits between the two hairlines left of the capitals-lock keycap.
+def ink(px):
+    return sum(1 for y in range(3, 21) for x in range(w - 48, w - 26)
+               if px[((y * w) + x) * 3 + 1] > 0x60)
+r, p = ink(run), ink(paused)
+# Paused is the bright state, and two bars carry more ink than a dim
+# triangle, so this is a real inequality rather than a coin flip.
+if p <= r:
+    print("    lamp unchanged: running %d lit px, paused %d" % (r, p)); sys.exit(1)
+sys.exit(0)
+PY
+
+    # The drive lamps: three mounted disks must light more of the bar than one
+    # does. Nothing else differs between the two runs.
+    SDL_VIDEODRIVER=dummy ./p2500-gui --disk "$DISK" --disk-b "$DISK" --disk-c "$DISK" \
+        --frames 200 --shot-window "$TMP/threedisks.ppm" >>"$TMP/gui.log" 2>&1
+    SDL_VIDEODRIVER=dummy ./p2500-gui --disk "$DISK" \
+        --frames 200 --shot-window "$TMP/onedisk.ppm" >>"$TMP/gui.log" 2>&1
+    python3 - "$TMP/onedisk.ppm" "$TMP/threedisks.ppm" <<'PY' && pass "drive lamps follow mounted media" || fail "drive lamps did not follow mounted media"
+import sys
+def load(p):
+    d = open(p, 'rb').read()
+    hdr = d.split(b'\n', 3)
+    w, h = (int(v) for v in hdr[1].split())
+    return w, h, d[len(b'\n'.join(hdr[:3])) + 1:]
+w, h, one = load(sys.argv[1])
+_, _, three = load(sys.argv[2])
+def ink(px):
+    return sum(1 for y in range(3, 21) for x in range(w - 100, w - 55)
+               if px[((y * w) + x) * 3 + 1] > 0x80)
+a, b = ink(one), ink(three)
+if b <= a:
+    print("    lamps unchanged: one disk %d lit px, three %d" % (a, b)); sys.exit(1)
+sys.exit(0)
+PY
 else
     echo "== 7. SDL3 front-end - skipped (run 'make gui' to build it)"
 fi
+
+echo "== 8. The shared debug core (TODO.md T39)"
+# --disasm and --state are the headless half of the GUI's panels: they print
+# the same lines core/debug.c hands ImGui, so a panel's claims can be checked
+# without a display - and so the two cannot silently drift apart.
+./p2500-emu --max-steps 0 --disasm 0:3 >"$TMP/disasm.log" 2>/dev/null
+if grep -q 'C3 00 01     jp \$0100' "$TMP/disasm.log" &&
+   grep -q 'C3 DA 02     jp \$02DA' "$TMP/disasm.log"; then
+    pass "--disasm decodes the ROM's reset vectors"
+else fail "--disasm output wrong"; fi
+
+./p2500-emu --disk "$DISK" --max-steps 900000 --state >"$TMP/state.log" 2>/dev/null
+missing=""
+for topic in CPU Interrupts CTC PIO DMA FDC CRTC Video Misc; do
+    grep -q "^\[$topic\]" "$TMP/state.log" || missing="$missing $topic"
+done
+if [ -z "$missing" ]; then pass "--state reports every device topic"
+else fail "--state missing topic(s):$missing"; fi
+# A boot that got as far as CP/M must show the daisy chain having done work.
+if grep -qE '^  0\. DMA +vec \$[0-9A-F]{2} +[1-9][0-9]* req' "$TMP/state.log"; then
+    pass "--state shows live interrupt counts"
+else fail "--state interrupt counts look dead"; fi
+
+# The disassembler is cross-checked against z80dasm over the ROM, every
+# opcode page and random byte streams. Both walk the same bytes, so a length
+# disagreement desynchronises them and shows up loudly.
+if command -v z80dasm >/dev/null 2>&1; then
+    if python3 tools/disasm_crosscheck.py --rounds 2 >"$TMP/crosscheck.log" 2>&1; then
+        pass "disassembler agrees with z80dasm ($(tail -1 "$TMP/crosscheck.log"))"
+    else
+        fail "disassembler disagrees with z80dasm"
+        head -12 "$TMP/crosscheck.log" | sed 's/^/    /'
+    fi
+else
+    echo "   (z80dasm not installed - disassembler cross-check skipped)"
+fi
+
+# Breakpoints survived being lifted out of the CLI into core/debug.c.
+./p2500-emu --disk "$DISK" --max-steps 900000 --break 0333 --count 0333 \
+    >"$TMP/break.out" 2>/dev/null
+if grep -q -- '--break reached' "$TMP/break.out" &&
+   grep -qE 'Final: PC=\$0333' "$TMP/break.out"; then
+    pass "--break stops with PC on the breakpoint"
+else fail "--break did not stop at \$0333"; fi
 
 echo
 if [ "$fails" -eq 0 ]; then echo "All checks passed."; exit 0; fi

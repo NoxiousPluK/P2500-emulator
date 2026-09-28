@@ -38,7 +38,10 @@
 #include "backends/imgui_impl_sdlrenderer3.h"
 
 #include "core/machine.h"
+#include "core/debug.h"
 #include "core/video.h"
+
+#include "panels.h"
 
 #define SCALE_DEFAULT 2
 #define MAX_PUSHES 8
@@ -72,6 +75,11 @@ typedef struct {
      * keystrokes. Checked means the machine behaves as shipped. */
     bool caps_lock;
     bool quit;
+    /* Watches, counters and breakpoints, shared with the CLI (TODO.md T39).
+     * Empty by default, which is what lets the run loop keep its
+     * whole-frame fast path until the user actually asks for something. */
+    P2500Debug dbg;
+    P2500Panels panels;
     bool has_ui;                 /* false only if ImGui failed to initialise */
     float menu_h;                /* measured each frame, offsets the screen */
     SDL_AtomicInt disk_pending;  /* set by the file-dialog callback */
@@ -258,22 +266,56 @@ static void apply_style()
     const ImVec4 green_dim  = ImVec4(0.16f, 0.55f, 0.00f, 1.00f);
     const ImVec4 bezel      = ImVec4(0.031f, 0.047f, 0.031f, 1.00f);
     const ImVec4 bar        = ImVec4(0.055f, 0.086f, 0.055f, 1.00f);
+    const ImVec4 edge       = ImVec4(0.12f, 0.35f, 0.08f, 1.00f);
 
-    c[ImGuiCol_Text]           = green;
-    c[ImGuiCol_TextDisabled]   = green_dim;
-    c[ImGuiCol_WindowBg]       = bezel;
-    c[ImGuiCol_PopupBg]        = bezel;
-    c[ImGuiCol_MenuBarBg]      = bar;
-    c[ImGuiCol_Border]         = ImVec4(0.12f, 0.35f, 0.08f, 1.00f);
-    c[ImGuiCol_BorderShadow]   = ImVec4(0.00f, 0.00f, 0.00f, 0.00f);
-    c[ImGuiCol_Header]         = ImVec4(0.16f, 0.55f, 0.00f, 0.55f);
-    c[ImGuiCol_HeaderHovered]  = ImVec4(0.27f, 1.00f, 0.00f, 0.35f);
-    c[ImGuiCol_HeaderActive]   = ImVec4(0.27f, 1.00f, 0.00f, 0.55f);
-    c[ImGuiCol_FrameBg]        = ImVec4(0.08f, 0.16f, 0.08f, 1.00f);
-    c[ImGuiCol_FrameBgHovered] = ImVec4(0.12f, 0.28f, 0.10f, 1.00f);
-    c[ImGuiCol_FrameBgActive]  = ImVec4(0.16f, 0.40f, 0.12f, 1.00f);
-    c[ImGuiCol_Separator]      = ImVec4(0.12f, 0.35f, 0.08f, 1.00f);
-    c[ImGuiCol_CheckMark]      = green;
+    c[ImGuiCol_Text]            = green;
+    c[ImGuiCol_TextDisabled]    = green_dim;
+    c[ImGuiCol_WindowBg]        = bezel;
+    c[ImGuiCol_ChildBg]         = ImVec4(0.02f, 0.031f, 0.02f, 1.00f);
+    c[ImGuiCol_PopupBg]         = bezel;
+    c[ImGuiCol_MenuBarBg]       = bar;
+    c[ImGuiCol_Border]          = edge;
+    c[ImGuiCol_BorderShadow]    = ImVec4(0.00f, 0.00f, 0.00f, 0.00f);
+    /* Section bands, not highlights: bright enough to group, dark enough
+     * that the green text on top of them stays the brightest thing. */
+    c[ImGuiCol_Header]          = ImVec4(0.08f, 0.22f, 0.06f, 1.00f);
+    c[ImGuiCol_HeaderHovered]   = ImVec4(0.13f, 0.34f, 0.09f, 1.00f);
+    c[ImGuiCol_HeaderActive]    = ImVec4(0.18f, 0.46f, 0.12f, 1.00f);
+    c[ImGuiCol_FrameBg]         = ImVec4(0.08f, 0.16f, 0.08f, 1.00f);
+    c[ImGuiCol_FrameBgHovered]  = ImVec4(0.12f, 0.28f, 0.10f, 1.00f);
+    c[ImGuiCol_FrameBgActive]   = ImVec4(0.16f, 0.40f, 0.12f, 1.00f);
+    c[ImGuiCol_Separator]       = edge;
+    c[ImGuiCol_SeparatorHovered]= ImVec4(0.20f, 0.60f, 0.14f, 1.00f);
+    c[ImGuiCol_SeparatorActive] = green;
+    c[ImGuiCol_CheckMark]       = green;
+    /* The debugger panels are ordinary ImGui windows, so every remaining
+     * default - title bars, buttons, scrollbars, tabs - would arrive in
+     * ImGui's blue. Set the whole palette rather than the handful the menu
+     * bar happened to need. */
+    c[ImGuiCol_TitleBg]         = ImVec4(0.043f, 0.071f, 0.043f, 1.00f);
+    c[ImGuiCol_TitleBgActive]   = ImVec4(0.075f, 0.16f, 0.06f, 1.00f);
+    c[ImGuiCol_TitleBgCollapsed]= ImVec4(0.043f, 0.071f, 0.043f, 0.85f);
+    c[ImGuiCol_Button]          = ImVec4(0.09f, 0.22f, 0.07f, 1.00f);
+    c[ImGuiCol_ButtonHovered]   = ImVec4(0.14f, 0.36f, 0.10f, 1.00f);
+    c[ImGuiCol_ButtonActive]    = ImVec4(0.20f, 0.52f, 0.14f, 1.00f);
+    c[ImGuiCol_ScrollbarBg]     = ImVec4(0.02f, 0.031f, 0.02f, 1.00f);
+    c[ImGuiCol_ScrollbarGrab]   = ImVec4(0.10f, 0.26f, 0.08f, 1.00f);
+    c[ImGuiCol_ScrollbarGrabHovered] = ImVec4(0.16f, 0.40f, 0.12f, 1.00f);
+    c[ImGuiCol_ScrollbarGrabActive]  = ImVec4(0.22f, 0.58f, 0.16f, 1.00f);
+    c[ImGuiCol_SliderGrab]      = green_dim;
+    c[ImGuiCol_SliderGrabActive]= green;
+    c[ImGuiCol_ResizeGrip]      = ImVec4(0.12f, 0.35f, 0.08f, 0.60f);
+    c[ImGuiCol_ResizeGripHovered] = ImVec4(0.20f, 0.60f, 0.14f, 0.80f);
+    c[ImGuiCol_ResizeGripActive]  = green;
+    c[ImGuiCol_Tab]             = ImVec4(0.06f, 0.13f, 0.05f, 1.00f);
+    c[ImGuiCol_TabHovered]      = ImVec4(0.16f, 0.40f, 0.12f, 1.00f);
+    c[ImGuiCol_TableHeaderBg]   = ImVec4(0.06f, 0.13f, 0.05f, 1.00f);
+    c[ImGuiCol_TableBorderStrong] = edge;
+    c[ImGuiCol_TableBorderLight]  = ImVec4(0.08f, 0.20f, 0.06f, 1.00f);
+    c[ImGuiCol_TableRowBg]      = ImVec4(0.00f, 0.00f, 0.00f, 0.00f);
+    c[ImGuiCol_TableRowBgAlt]   = ImVec4(0.27f, 1.00f, 0.00f, 0.035f);
+    c[ImGuiCol_NavCursor]       = green;
+    c[ImGuiCol_DragDropTarget]  = green;
 }
 
 /*
@@ -297,6 +339,38 @@ static void draw_caps_glyph(ImDrawList *dl, ImVec2 centre, float h, ImU32 col)
     dl->AddPolyline(pts, 6, col, 0, t);
 }
 
+/*
+ * Run state. Both states are real, so both are legible; brightness marks the
+ * one worth noticing. Paused is the state you can forget you are in - a
+ * machine that has quietly stopped looks exactly like one that has hung - so
+ * the bars are bright and the running triangle is not.
+ */
+static void draw_run_glyph(ImDrawList *dl, ImVec2 centre, float h, bool paused, ImU32 col)
+{
+    const float w = h * 0.72f;
+    if (paused) {
+        const float bw = w * 0.32f;
+        dl->AddRectFilled(ImVec2(centre.x - w * 0.5f, centre.y - h * 0.5f),
+                          ImVec2(centre.x - w * 0.5f + bw, centre.y + h * 0.5f), col);
+        dl->AddRectFilled(ImVec2(centre.x + w * 0.5f - bw, centre.y - h * 0.5f),
+                          ImVec2(centre.x + w * 0.5f, centre.y + h * 0.5f), col);
+    } else {
+        dl->AddTriangleFilled(ImVec2(centre.x - w * 0.42f, centre.y - h * 0.5f),
+                              ImVec2(centre.x + w * 0.58f, centre.y),
+                              ImVec2(centre.x - w * 0.42f, centre.y + h * 0.5f), col);
+    }
+}
+
+/* The dim half of every indicator: drawn, not hidden, so nothing in the bar
+ * ever moves and each position always means the same thing. */
+static ImU32 indicator_colour(bool lit)
+{
+    if (lit) return ImGui::GetColorU32(ImGuiCol_Text);
+    ImVec4 off = ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled);
+    off.w = 0.45f;
+    return ImGui::GetColorU32(off);
+}
+
 static void draw_menu_bar(App *app)
 {
     if (!ImGui::BeginMainMenuBar()) return;
@@ -309,6 +383,7 @@ static void draw_menu_bar(App *app)
         ImGui::Separator();
         if (ImGui::MenuItem("Reset", "Ctrl+R")) {
             p2500_reset(&app->m);
+            p2500_debug_baseline(&app->dbg, &app->m);
             set_status(app, "reset - media still attached");
         }
         if (ImGui::MenuItem(app->paused ? "Unpause" : "Pause", "F12")) {
@@ -330,48 +405,137 @@ static void draw_menu_bar(App *app)
         ImGui::EndMenu();
     }
 
-    /* Right-aligned, in a fixed order: the last action, a hairline, then the
-     * capitals-lock indicator pinned to the far right. The indicator is
-     * always drawn - bright when engaged, faint when not - so its position
-     * never moves and the state reads at a glance. */
+    if (ImGui::BeginMenu("Debug")) {
+        p2500_panels_menu(app->panels);
+        ImGui::EndMenu();
+    }
+
+    /* Right-aligned, laid out from the right edge inwards and in a fixed
+     * order, so no indicator ever moves as the status text changes:
+     *
+     *   status text | A B C | run/pause | capitals lock
+     *
+     * Each indicator is always drawn - bright when it applies, faint when it
+     * does not - because a lamp that disappears is a lamp you cannot read
+     * the absence of. */
     {
         ImDrawList *dl = ImGui::GetWindowDrawList();
+        const float bar_x = ImGui::GetWindowPos().x;
         const float bar_y = ImGui::GetWindowPos().y;
         const float bar_h = ImGui::GetWindowSize().y;
-        const float bar_x = ImGui::GetWindowPos().x;
         const float width = ImGui::GetWindowWidth();
+        const float mid_y = bar_y + bar_h * 0.5f;
 
-        /* Sized off the bar, not the font: it has to read as a keycap
-         * symbol at a glance, and three strokes merge into a blob if it is
+        /* Sized off the bar, not the font: the capitals-lock keycap has to
+         * read as a symbol at a glance, and its strokes merge into a blob
          * much under half the bar height. */
         const float gh = bar_h * 0.56f;
-        const float gw = gh * 0.78f;
-        const float pad = 12.0f, gap = 9.0f;
-        const float text_w = app->status[0] ? ImGui::CalcTextSize(app->status).x : 0.0f;
-        const float block = text_w + gap + 1.0f + gap + gw + pad;
+        const float caps_w = gh * 0.78f;
+        const float run_w = gh * 0.72f;
+        const float letter_w = ImGui::CalcTextSize("A").x;
+        const float font_h = ImGui::GetFontSize();
+        const float pad = 12.0f, gap = 9.0f, letter_gap = 5.0f;
+        const float drives_w = letter_w * 3.0f + letter_gap * 2.0f;
 
-        if (width - block > ImGui::GetCursorPosX()) {
+        float x = bar_x + width - pad;
+
+        const float caps_centre = x - caps_w * 0.5f;
+        x -= caps_w + gap;
+        dl->AddLine(ImVec2(x + 0.5f, bar_y + 3.0f), ImVec2(x + 0.5f, bar_y + bar_h - 3.0f),
+                    ImGui::GetColorU32(ImGuiCol_Separator), 1.0f);
+        x -= gap;
+
+        const float run_centre = x - run_w * 0.5f;
+        x -= run_w + gap;
+        dl->AddLine(ImVec2(x + 0.5f, bar_y + 3.0f), ImVec2(x + 0.5f, bar_y + bar_h - 3.0f),
+                    ImGui::GetColorU32(ImGuiCol_Separator), 1.0f);
+        x -= gap;
+
+        const float drives_left = x - drives_w;
+        x = drives_left - gap;
+        dl->AddLine(ImVec2(x + 0.5f, bar_y + 3.0f), ImVec2(x + 0.5f, bar_y + bar_h - 3.0f),
+                    ImGui::GetColorU32(ImGuiCol_Separator), 1.0f);
+        const float status_right = x - gap;
+
+        /* Only draw once there is room left of the menus, so a narrow window
+         * clips the indicators instead of scribbling over "File". */
+        if (status_right - bar_x > ImGui::GetCursorPosX()) {
+            draw_caps_glyph(dl, ImVec2(caps_centre, mid_y), gh,
+                            indicator_colour(app->caps_lock));
+            draw_run_glyph(dl, ImVec2(run_centre, mid_y), gh * 0.86f, app->paused,
+                           indicator_colour(app->paused));
+            /* A:, B: and C: - the three drives CBIOS actually supports
+             * (TODO.md T44). Lit means media is attached, which is not the
+             * same as the guest having logged the drive in. */
+            for (unsigned u = 0; u < 3; u++) {
+                const char letter[2] = { (char)('A' + u), '\0' };
+                dl->AddText(ImVec2(drives_left + u * (letter_w + letter_gap),
+                                   mid_y - font_h * 0.5f),
+                            indicator_colour(app->m.fdc.disk[u] != NULL), letter);
+            }
             if (app->status[0]) {
-                ImGui::SetCursorPosX(width - block);
+                const float text_w = ImGui::CalcTextSize(app->status).x;
+                ImGui::SetCursorPosX(status_right - bar_x - text_w);
                 ImGui::TextDisabled("%s", app->status);
             }
-            const float sep_x = bar_x + width - pad - gw - gap + 0.5f;
-            dl->AddLine(ImVec2(sep_x, bar_y + 3.0f), ImVec2(sep_x, bar_y + bar_h - 3.0f),
-                        ImGui::GetColorU32(ImGuiCol_Separator), 1.0f);
-
-            ImU32 col;
-            if (app->caps_lock) {
-                col = ImGui::GetColorU32(ImGuiCol_Text);
-            } else {
-                ImVec4 off = ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled);
-                off.w = 0.45f;
-                col = ImGui::GetColorU32(off);
-            }
-            draw_caps_glyph(dl, ImVec2(bar_x + width - pad - gw * 0.5f,
-                                       bar_y + bar_h * 0.5f), gh, col);
         }
     }
     ImGui::EndMainMenuBar();
+}
+
+/* Watch reports are formatted in core/debug.c, so the panel shows the same
+ * line the CLI writes to stderr. */
+static void gui_watch(void *userdata, uint16_t, uint8_t, uint8_t, const char *text)
+{
+    p2500_panels_log(*(P2500Panels *)userdata, "%s", text);
+}
+
+static void hit_breakpoint(App *app)
+{
+    app->paused = true;
+    set_status(app, "stopped at breakpoint $%04X", app->m.cpu.pc);
+    p2500_panels_log(app->panels, "[step %lu] breakpoint $%04X reached",
+                     app->m.total_instructions, app->m.cpu.pc);
+    /* Also to the log the harness reads, so a headless run can assert that
+     * the breakpoint fired rather than inferring it from pixels. */
+    SDL_Log("breakpoint: stopped at $%04X after %lu instructions",
+            app->m.cpu.pc, app->m.total_instructions);
+    app->panels.show_disasm = true;
+}
+
+/* Run for a budget of T-states. With nothing instrumented this is the
+ * original whole-frame call, so the common case pays nothing for the
+ * debugger existing; a single watch or breakpoint drops it to a per-
+ * instruction loop, which is about an order of magnitude slower and still
+ * comfortably faster than the real machine. */
+static void run_machine(App *app, unsigned long tstates)
+{
+    if (!app->dbg.breaks && !app->dbg.watches && !app->dbg.counts) {
+        p2500_run_tstates(&app->m, tstates);
+        return;
+    }
+    const unsigned long start = app->m.cpu.cyc;
+    while (app->m.cpu.cyc - start < tstates) {
+        if (p2500_debug_before_step(&app->dbg, &app->m, app->m.total_instructions)) {
+            hit_breakpoint(app);
+            return;
+        }
+        p2500_step(&app->m);
+    }
+}
+
+/* Single-stepping starts with a resume so the first step leaves an address
+ * the machine is already stopped on, rather than re-triggering on it. */
+static void step_instructions(App *app, unsigned long n)
+{
+    p2500_debug_resume(&app->dbg);
+    for (unsigned long i = 0; i < n; i++) {
+        if (p2500_debug_before_step(&app->dbg, &app->m, app->m.total_instructions)) {
+            hit_breakpoint(app);
+            return;
+        }
+        p2500_step(&app->m);
+    }
 }
 
 static bool make_screen_texture(App *app)
@@ -405,6 +569,11 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[])
     unsigned long push_at[MAX_PUSHES] = {0};
     const char *push_text[MAX_PUSHES] = {0};
     int npush = 0;
+    const char *panels_arg = NULL;
+    uint16_t break_at[MAX_PUSHES] = {0};
+    int nbreak = 0;
+    uint16_t watch_at[MAX_PUSHES] = {0};
+    int nwatch = 0;
 
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--rom") && i + 1 < argc) rom = argv[++i];
@@ -417,6 +586,14 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[])
         else if (!strcmp(argv[i], "--screenshot") && i + 1 < argc) shot_path = argv[++i];
         else if (!strcmp(argv[i], "--shot-window") && i + 1 < argc) win_shot_path = argv[++i];
         else if (!strcmp(argv[i], "--no-caps-lock")) caps_lock = false;
+        /* The debug flags exist so the panels can be driven - and captured -
+         * with no display, the same way --frames/--shot-window already let
+         * the screen be checked headlessly. */
+        else if (!strcmp(argv[i], "--panels") && i + 1 < argc) panels_arg = argv[++i];
+        else if (!strcmp(argv[i], "--break") && i + 1 < argc && nbreak < MAX_PUSHES)
+            break_at[nbreak++] = (uint16_t)strtoul(argv[++i], NULL, 16);
+        else if (!strcmp(argv[i], "--watch") && i + 1 < argc && nwatch < MAX_PUSHES)
+            watch_at[nwatch++] = (uint16_t)strtoul(argv[++i], NULL, 16);
         else if (!strcmp(argv[i], "--push-at") && i + 1 < argc && npush < MAX_PUSHES) {
             char *arg = argv[++i], *colon = strchr(arg, ':');
             if (!colon) { SDL_Log("bad --push-at, want MS:STRING"); return SDL_APP_FAILURE; }
@@ -429,14 +606,17 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[])
             SDL_Log("usage: p2500-gui [--rom path] [--charrom path] [--scale N]\n"
                     "                 [--disk path] [--disk-b path] [--disk-c path]\n"
                     "                 [--frames N] [--screenshot out.ppm] [--shot-window out.ppm]\n"
-                    "                 [--push-at MS:STRING ...] [--no-caps-lock]");
+                    "                 [--push-at MS:STRING ...] [--no-caps-lock]\n"
+                    "                 [--panels devices,memory,disasm,log]\n"
+                    "                 [--break ADDR ...] [--watch ADDR ...]");
             return SDL_APP_FAILURE;
         }
     }
     if (scale < 1 || scale > 8) scale = SCALE_DEFAULT;
 
-    App *app = (App *)calloc(1, sizeof(App));
-    if (!app) return SDL_APP_FAILURE;
+    /* new, not calloc: App now holds a C++ member (P2500Panels) whose
+     * default member initialisers have to actually run. */
+    App *app = new App();
     *appstate = app;
 
     app->frame_limit = frame_limit;
@@ -494,6 +674,19 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[])
                   ImGui_ImplSDLRenderer3_Init(app->renderer);
     if (!app->has_ui) SDL_Log("ImGui backend init failed; running without a UI");
 
+    p2500_debug_init(&app->dbg);
+    app->dbg.on_watch = gui_watch;
+    app->dbg.userdata = &app->panels;
+    for (int b = 0; b < nbreak; b++) p2500_debug_add_break(&app->dbg, break_at[b]);
+    for (int w = 0; w < nwatch; w++) p2500_debug_add_watch(&app->dbg, watch_at[w], 1);
+    p2500_debug_baseline(&app->dbg, &app->m);
+    if (panels_arg) {
+        app->panels.show_devices = strstr(panels_arg, "devices") != NULL;
+        app->panels.show_memory = strstr(panels_arg, "memory") != NULL;
+        app->panels.show_disasm = strstr(panels_arg, "disasm") != NULL;
+        app->panels.show_log = strstr(panels_arg, "log") != NULL;
+    }
+
     SDL_StartTextInput(app->window);
     set_status(app, disks[0] ? "ready" : "no disk - File > Load Disk A...");
     return SDL_APP_CONTINUE;
@@ -528,11 +721,15 @@ SDL_AppResult SDL_AppEvent(void *appstate, SDL_Event *event)
         /* Menu accelerators win over the guest, which is why Ctrl-C still
          * reaches CP/M: it is deliberately not one of them. */
         if (ctrl && k == SDLK_O) { open_disk_dialog(app, 0); return SDL_APP_CONTINUE; }
-        if (ctrl && k == SDLK_R) { p2500_reset(&app->m); set_status(app, "reset - media still attached"); return SDL_APP_CONTINUE; }
+        if (ctrl && k == SDLK_R) { p2500_reset(&app->m); p2500_debug_baseline(&app->dbg, &app->m); set_status(app, "reset - media still attached"); return SDL_APP_CONTINUE; }
         if (ctrl && k == SDLK_Q) return SDL_APP_SUCCESS;
         if (k == SDLK_F10) { save_screenshot(app); return SDL_APP_CONTINUE; }
         if (k == SDLK_F12) { app->paused = !app->paused; set_status(app, app->paused ? "paused" : "running"); return SDL_APP_CONTINUE; }
         if (k == SDLK_F11) { app->turbo = !app->turbo; set_status(app, app->turbo ? "turbo" : "running"); return SDL_APP_CONTINUE; }
+        if (k == SDLK_F1) { app->panels.show_devices = !app->panels.show_devices; return SDL_APP_CONTINUE; }
+        if (k == SDLK_F2) { app->panels.show_memory = !app->panels.show_memory; return SDL_APP_CONTINUE; }
+        if (k == SDLK_F3) { app->panels.show_disasm = !app->panels.show_disasm; return SDL_APP_CONTINUE; }
+        if (k == SDLK_F4) { app->panels.show_log = !app->panels.show_log; return SDL_APP_CONTINUE; }
         if (ui_has_keyboard) return SDL_APP_CONTINUE;
         int b = key_to_byte(k, event->key.mod);
         if (b >= 0) p2500_keyboard_push(&app->m.keyboard, (uint8_t)b);
@@ -569,7 +766,7 @@ SDL_AppResult SDL_AppIterate(void *appstate)
     if (!app->paused) {
         unsigned long budget = P2500_TSTATES_PER_FRAME;
         if (app->turbo) budget *= 8;
-        p2500_run_tstates(&app->m, budget);
+        run_machine(app, budget);
     }
     app->frames++;
 
@@ -592,7 +789,24 @@ SDL_AppResult SDL_AppIterate(void *appstate)
         ImGui_ImplSDL3_NewFrame();
         ImGui::NewFrame();
         draw_menu_bar(app);
+        bool toggle_pause = false;
+        P2500PanelActions act = p2500_panels_draw(app->panels, app->m, app->dbg,
+                                                  app->paused, &toggle_pause);
         ImGui::Render();
+        if (toggle_pause) {
+            app->paused = !app->paused;
+            if (!app->paused) p2500_debug_resume(&app->dbg);
+            set_status(app, app->paused ? "paused" : "running");
+        }
+        /* Stepping runs after the frame is composed, so the listing the user
+         * clicked is the state the step started from. ~0 means "one 50 Hz
+         * field", the same budget the free-running loop uses. */
+        if (act.steps == ~0UL) {
+            p2500_debug_resume(&app->dbg);
+            run_machine(app, P2500_TSTATES_PER_FRAME);
+        } else if (act.steps) {
+            step_instructions(app, act.steps);
+        }
     }
 
     /* Integer-scale the screen into whatever is left below the menu bar and
@@ -659,5 +873,5 @@ void SDL_AppQuit(void *appstate, SDL_AppResult)
     if (app->window) SDL_DestroyWindow(app->window);
     free(app->fb);
     for (unsigned u = 0; u < P2500_FDC_MAX_DRIVES; u++) free(app->disk[u]);
-    free(app);
+    delete app;
 }

@@ -37,7 +37,7 @@ make test   # the regression suite
 
 `make` needs a C11 compiler; the GUI additionally needs SDL3 (`extra/sdl3`
 on Arch) and a C++17 compiler, and Dear ImGui is vendored. The core stays
-dependency-free so `make test` runs with no display at all: **31 checks**,
+dependency-free so `make test` runs with no display at all: **40 checks**,
 exit 1 on any failure. The GUI checks skip themselves if SDL3 is absent.
 
 ## Running it as a machine
@@ -59,22 +59,55 @@ programs.
 | Ctrl+letter | `^A`–`^Z`, so Ctrl-C warm-boots CP/M |
 | Ctrl+O / Ctrl+R / Ctrl+Q | load disk / reset / quit |
 | F10 / F11 / F12 | screenshot (BMP) / turbo / pause |
+| F1 / F2 / F3 / F4 | device state / memory / disassembly / event log |
 
 **File** menu: Load Disk A/B/C, Reset, Pause, Screenshot, Quit. **Machine**
-menu: capitals lock. Both are drawn by Dear ImGui and styled on the
-emulator's own phosphor palette rather than being a native menu bar — see
-`TODO.md` for why a native one is not viable on Wayland. "Load Disk" uses
-`SDL_ShowOpenFileDialog`, so on Linux it is the desktop's own portal dialog.
+menu: capitals lock. **Debug** menu: the four panels below. All drawn by Dear
+ImGui and styled on the emulator's own phosphor palette rather than being a
+native menu bar — see `TODO.md` for why a native one is not viable on
+Wayland. "Load Disk" uses `SDL_ShowOpenFileDialog`, so on Linux it is the
+desktop's own portal dialog.
+
+At the right of the bar, four indicators in fixed positions — each always
+drawn, bright when it applies and faint when it does not, so nothing moves
+and an unlit lamp is still readable:
+
+| | |
+|---|---|
+| `A B C` | a disk is attached in that drive |
+| ▶ / ⏸ | running (dim) or paused (bright — it is the state you can forget you are in) |
+| ⊓⊔ | capitals lock, the P2219 manual's own keycap symbol, drawn rather than typed because no Unicode character matches it |
 
 The machine boots with **capitals lock engaged**, which is how these disks
-are configured — unshifted keys produce capitals. The indicator at the right
-of the menu bar is the P2219 manual's own keycap symbol, drawn rather than
-typed because no Unicode character matches it.
+are configured — unshifted keys produce capitals.
 
 `--scale N` sets the initial zoom; the window is resizable and letterboxes
-with integer scaling. `--frames N --screenshot f.ppm`, `--shot-window f.ppm`
-and `--push-at MS:STRING` let the front-end be driven and captured with no
-display, which is how `make test` checks it.
+with integer scaling. `--frames N --screenshot f.ppm`, `--shot-window f.ppm`,
+`--push-at MS:STRING`, `--panels LIST`, `--break ADDR` and `--watch ADDR` let
+the front-end and its panels be driven and captured with no display, which is
+how `make test` checks them.
+
+## The debugger
+
+The reason the GUI exists. Everything the panels show comes out of
+`core/debug.c`, which `p2500-emu` prints from too, so a panel cannot drift
+away from what the harness reports.
+
+- **Device state** (F1) — every device at once: the IM2 daisy chain with each
+  source's vector, request/acknowledge counts and in-service flag; the four
+  CTC channels with live down-counters and CLK/TRG levels; PIO mode and
+  masks; DMA direction, length and address; FDC phase, unit and command and
+  result bytes; the CRTC registers and the geometry they imply; the attribute
+  latch. "Copy all" puts the same text `--state` prints on the clipboard.
+- **Memory** (F2) — bank-aware through `p2500_peek`, with the video
+  character and attribute planes as separate views, and watches that report
+  to the event log when they change.
+- **Disassembly** (F3) — around PC, with a clickable breakpoint gutter and
+  Step / Step 100 / Step field. Forwards from an anchor only: a Z80 stream
+  cannot be decoded backwards, and guessing would show confident nonsense.
+- **Event log** (F4) — watch hits and breakpoint stops. It becomes the
+  port/IRQ log once the core's `stderr` writes are behind a callback
+  (`TODO.md` T34).
 
 ## The headless harness
 
@@ -94,6 +127,8 @@ project has used.
 | `--dump-screen f.ppm` | render through the core's own renderer — the same call the GUI makes |
 | `--peek ADDR:LEN` / `--poke ADDR:HEX` | inspect / patch memory |
 | `--watch ADDR[:LEN]` / `--count ADDR` / `--break ADDR` | trace writes, count executions, stop |
+| `--state` | every device's live state — the same lines the GUI's device panel draws |
+| `--disasm ADDR[:COUNT]` | disassemble, bank-aware, through the same decoder the GUI uses |
 | `--verbose-io` | log every I/O port access (very noisy) |
 | `--no-stuck-detect` | disable the state-hash cycle detector |
 
@@ -124,6 +159,20 @@ cost this project the most time was a *silent* interrupt drop.
 **The rendered frame is checked as pixels**: 640×288, ink below the `p` of
 "Philips" (proving the 8×12 cell rather than 8×8), a solid cursor block
 where R14/R15 point, and the menu bar drawn with the screen offset below it.
+The UI's own state is checked the same way — the panels must add ink, the
+run/pause lamp must change when a breakpoint fires, and three mounted disks
+must light more of the bar than one. Each of those was confirmed to fail when
+the behaviour it guards is removed.
+
+**The disassembler is cross-checked against `z80dasm`** over the IPL ROM,
+every opcode page and random byte streams — about 34,000 instructions per
+`make test` run, zero mismatches. Both walk the same bytes, so a single
+length disagreement desynchronises them and shows up immediately; that makes
+it a test of decoding rather than of spelling. The two differ by design on
+one point, counted and reported separately: z80dasm renders bytes it will not
+decode as a lone `defb`, while this decoder reports what the CPU really does
+— a DD/FD prefix on an opcode with no index form, or an undefined `ED`, is a
+two-byte instruction, and the PC has to follow it.
 
 ## Why this exists, and the projects that informed it
 
@@ -169,10 +218,13 @@ either front-end.**
   cells from the character ROM's 16-byte stride, cursor from R14/R15 with
   shape from R10/R11, and the 4-bit attribute plane the CPU fills by
   latching a nibble in port `$0A`
+- `debug.{c,h}` — a Z80 disassembler, the watch/counter/breakpoint tables
+  both front-ends drive, and the live-state lines both of them print
 - `ctc` / `pio` / `dma` / `fdc` / `keyboard` / `sesam` — the devices
 - `vendor/superzazu_z80/` — the vendored CPU core
 
-**`src/cli/` → `p2500-emu`**, **`src/gui/` → `p2500-gui`**
+**`src/cli/` → `p2500-emu`**, **`src/gui/` → `p2500-gui`** (`main.cpp` is the
+window, pacing, input and menu bar; `panels.cpp` is the debugger)
 
 **Tools**
 
@@ -188,3 +240,5 @@ either front-end.**
   image is a complete dump
 - `ocr_manual.py` — OCRs a scanned manual, trying three orientations per
   page so sideways tables are found
+- `disasm_crosscheck.py` — checks `core/debug.c`'s disassembler against
+  `z80dasm` over generated and real byte streams

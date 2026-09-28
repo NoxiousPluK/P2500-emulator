@@ -51,10 +51,13 @@ Corollaries, each paid for:
   dumps. The proof was the `.IMD` cylinder maps, which split the nine images
   perfectly along the boot/no-boot line. The inverse also holds — `P25K_G`
   is clean, so its failure *is* ours.
-- **A test that cannot fail is worse than no test.** Twice now: a stale GUI
-  binary passed the whole front-end section for hours, and a pixel probe for
-  the screen offset passed with the offset deleted. Negative-test anything
-  that guards a behaviour you care about.
+- **A test that cannot fail is worse than no test.** Three times now: a
+  stale GUI binary passed the whole front-end section for hours; a pixel
+  probe for the screen offset passed with the offset deleted; and that same
+  probe went on passing after a third menu was added moved the labels
+  underneath the strip it was watching. Negative-test anything that guards a
+  behaviour you care about — and where a probe depends on a layout, make it
+  assert its own discriminating power, as that one now does.
 
 ---
 
@@ -91,11 +94,15 @@ entry.
 Four things stand between "boots and runs software" and "emulates the
 machine". In `TODO.md` order:
 
-**The debugger panels (P1).** The GUI exists because instrumentation is what
-has moved this project every single time. The menu bar is scaffolding; the
-panels are the point. Device state first — the daisy chain, the CTC
-channels, DMA registers, FDC phase — because that is the panel that would
-have turned two multi-session chases into single glances.
+**The debugger panels (P1).** *Mostly done.* The GUI exists because
+instrumentation is what has moved this project every single time. Device
+state, memory and disassembly are in, and the machinery behind them —
+`core/debug.{c,h}` — is shared with the harness, so `p2500-emu --state` and
+`--disasm` print exactly what the panels draw. That was deliberate: a panel
+no headless run can contradict is a panel that can quietly start lying. What
+remains is the port/IRQ log, which is really T34 — the core still writes 63
+diagnostics straight to `stderr`, and a core that writes to `stderr` cannot
+feed a GUI, a MAME `logerror()`, or a browser console.
 
 **Graphics mode (P2).** The character path is complete and the graphics path
 is entirely absent. It is fully specified now — 512 × 256 dots, one bit

@@ -4,3 +4,4 @@ shots/
 libp2500.a
 *.o
 *.d
+p2500-gui

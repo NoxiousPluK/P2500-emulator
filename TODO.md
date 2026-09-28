@@ -19,7 +19,7 @@ SuperCalc2 (an OEM build whose splash reads `PHILIPS P2000`) loads from
 `P25K_S` and opens files; MBASIC-80 runs from `P25TEST`; `VALLEY.BAS` runs
 off drive B with working screen attributes. Three of nine disk images boot.
 
-`make test` is the proof and the guard: 31 checks, exit 1 on any failure.
+`make test` is the proof and the guard: 40 checks, exit 1 on any failure.
 
 ```
 make                 # libp2500.a, p2500-emu, and p2500-gui if SDL3 is present
@@ -31,10 +31,12 @@ make test
 What is modelled and working: the full IPL and CP/M boot, three floppy
 drives, the IM2 daisy chain, CTC/PIO/DMA/µPD765, the MC6845 with a
 CRTC-driven renderer, the video attribute plane, keyboard and serial input,
-and a styled ImGui menu bar.
+a styled ImGui menu bar, and the debugger panels behind it.
 
-The two biggest gaps are the **debugger panels** — the actual reason for
-having a GUI — and **writing to disk**.
+The biggest gap is now **writing to disk** (P3): nothing in CP/M's read-only
+path needed it, which is why the prompt was reachable without it, and it is
+what stands between this emulator and `CONFIG`, `PIP` copies and SESAM
+initialization.
 
 ---
 
@@ -87,10 +89,17 @@ statically — see T50.
 The GUI's purpose is instrumentation. Every advance this project has made
 came from it: `--peek`, `--count`, `--watch`, `--dump-ram`, the layout
 report. A live device-state panel would have made several multi-session
-chases into single glances.
+chases into single glances — so it exists now, and so does its headless
+twin, because a panel nothing can assert against is decoration.
 
-- [ ] **T39. The ImGui debugger panels.** ImGui 1.92.1 is vendored and the
-  menu bar is up; the panels are what is missing.
+What is left in this phase is T34, which is also the fourth panel.
+
+- [x] **T39. The ImGui debugger panels.** Three of the four are in, plus the
+  headless half; the fourth waits on T34. The shared code is
+  `src/core/debug.{c,h}` — a Z80 disassembler, the watch/counter/breakpoint
+  tables, and the live-state lines — which both front-ends drive, so
+  `p2500-emu --state` and the GUI's device panel cannot report different
+  things.
 
   *(Settled, so it is not re-litigated: the menu bar is drawn by ImGui
   rather than being native. [SDL PR #13752](https://github.com/libsdl-org/SDL/pull/13752)
@@ -99,21 +108,33 @@ chases into single glances.
   wires Win32 only in its SDL example and its GTK backend needs a
   `GtkWindow`. The blocker under both is Wayland: no foreign-window
   reparenting, and KDE exports no global app menu. `SDL_ShowOpenFileDialog`
-  **is** properly native and is used. Keep the menu model as data so a
-  native backend could be swapped in later.)* In the order they would
-  have paid for themselves historically:
-  1. **Device state** — the IM2 daisy chain (`requested` / `under_service` /
-     vector per source, live), the four CTC channels with down-counters and
-     CLK/TRG levels, DMA registers, FDC phase and selected unit.
-  2. **Memory viewer** with live watches, bank-aware (`p2500_peek`), and a
-     toggle between the character plane and the attribute plane.
-  3. **Disassembly around PC** with breakpoints. `tools/disasm_ram.sh`
-     proves z80dasm gives usable output; inline an equivalent.
-  4. **Port/IRQ log**, fed by T34's callback.
+  **is** properly native and is used.)*
 
-  `--watch` / `--count` / `--break` already exist as CLI concepts. Lift them
-  into a small `core/debug.h` both front-ends drive rather than
-  reimplementing against ImGui.
+  Done:
+  1. **Device state** (F1) — the daisy chain live, the four CTC channels
+     with down-counters and CLK/TRG, PIO masks, DMA registers, FDC phase
+     and unit and its command/result bytes, CRTC registers and geometry,
+     the attribute latch. "Copy all" emits exactly what `--state` prints.
+  2. **Memory** (F2) — bank-aware, with the character and attribute planes
+     as separate views, and watches.
+  3. **Disassembly** (F3) — around PC, clickable breakpoint gutter,
+     Step / Step 100 / Step field. Forwards from an anchor only: a Z80
+     stream cannot be decoded backwards, and a guess would look confident.
+  4. **Port/IRQ log** — *not done, needs T34.* F4 opens an event log today,
+     fed by the watch and breakpoint reports; T34 turns it into the real
+     thing.
+
+  The disassembler is cross-checked against `z80dasm` by
+  `tools/disasm_crosscheck.py` — ~34,000 instructions per `make test` run,
+  zero mismatches. Worth knowing when reading its output: where z80dasm
+  renders an undecodable byte as a lone `defb`, this decoder reports what
+  the CPU really does, so a DD/FD prefix on an opcode with no index form,
+  and an undefined `ED`, are **two-byte instructions**. That matches
+  `exec_opcode_ddfd`'s default case and is what the PC actually follows.
+
+  Still worth adding when a chase calls for it: run-to-cursor, a
+  step-over that runs past a `CALL`, and symbol names from the CBIOS tables
+  so the listing reads `SELDSK` rather than `$E620`.
 
 - [ ] **T34. A log callback in the core.** The reset half is done
   (`p2500_reset()`). What is left: **63 `fprintf(stderr, …)` calls in the
@@ -126,6 +147,11 @@ chases into single glances.
 
   The core has **no non-const file-scope state at all** — the expensive
   property to retrofit, already correct. Keep it that way.
+
+  **This is now the only thing between the GUI and its fourth panel.** F4
+  opens an event log fed by `core/debug.c`'s watch and breakpoint reports;
+  a `p2500_log_fn` is what turns it into the port/IRQ log that would have
+  paid for itself in T42 and T43.
 
 ---
 
