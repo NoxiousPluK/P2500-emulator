@@ -357,6 +357,69 @@ if b <= a:
     print("    lamps unchanged: one disk %d lit px, three %d" % (a, b)); sys.exit(1)
 sys.exit(0)
 PY
+
+    # --- the lamps are controls (clickable, inverted on hover) -------------
+    # The lamp columns come out of the front-end's own report rather than
+    # being hardcoded: a test that pins these pixel columns stops testing
+    # anything the moment a menu is added or the font changes.
+    LAMPROW=$(sed -n 's/.*lamps: caps \([0-9]*\) run \([0-9]*\) drives \([0-9]*\) [0-9]* [0-9]* rows \([0-9]*\)-\([0-9]*\).*/\1 \2 \3 \4 \5/p' "$TMP/gui.log" | head -1)
+    if [ -n "$LAMPROW" ]; then
+        # shellcheck disable=SC2086
+        set -- $LAMPROW
+        L_CAPS=$1; L_RUN=$2; L_DRA=$3; L_Y0=$4; L_Y1=$5
+        SDL_VIDEODRIVER=dummy ./p2500-gui --disk "$DISK" --frames 30 \
+            --mouse "$L_CAPS,11" --shot-window "$TMP/hover.ppm" >"$TMP/hover.log" 2>&1
+        python3 - "$TMP/win.ppm" "$TMP/hover.ppm" "$L_CAPS" "$L_Y0" "$L_Y1" <<'PY' && pass "hovering a lamp inverts it" || fail "hovering a lamp did nothing"
+import sys
+def load(p):
+    d = open(p, 'rb').read()
+    hdr = d.split(b'\n', 3)
+    w, h = (int(v) for v in hdr[1].split())
+    return w, h, d[len(b'\n'.join(hdr[:3])) + 1:]
+w, h, plain = load(sys.argv[1])
+_, _, hover = load(sys.argv[2])
+cx, y0, y1 = (int(v) for v in sys.argv[3:6])
+# "Inverted" means the ground fills and the glyph goes dark, so state the
+# check that way rather than as a ratio: most of the cell must be lit when
+# hovered and a minority of it when not. A hover that merely tinted the
+# glyph would leave both fractions where they started.
+cells = [(x, y) for y in range(y0, y1 + 1) for x in range(cx - 8, cx + 9)]
+def frac(px):
+    return sum(1 for x, y in cells if px[((y * w) + x) * 3 + 1] > 0x80) / float(len(cells))
+a, b = frac(plain), frac(hover)
+if not (a < 0.55 and b > 0.65):
+    print("    not inverted: %.2f of the cell lit plain, %.2f hovered" % (a, b))
+    sys.exit(1)
+sys.exit(0)
+PY
+        # Hovering must not activate anything - a lamp that fires on hover
+        # would pause the machine just by the pointer resting on it.
+        if grep -q 'run state:' "$TMP/hover.log"; then
+            fail "hovering a lamp activated it"
+        else pass "hovering a lamp does not activate it"; fi
+
+        # Left click on the run lamp, right click to eject drive A, left
+        # click on the capitals-lock keycap.
+        SDL_VIDEODRIVER=dummy ./p2500-gui --disk "$DISK" --frames 30 \
+            --mouse "$L_RUN,11,left" >"$TMP/click-run.log" 2>&1
+        if grep -q 'run state: paused' "$TMP/click-run.log"; then
+            pass "clicking the run lamp pauses the machine"
+        else fail "clicking the run lamp did nothing"; fi
+
+        SDL_VIDEODRIVER=dummy ./p2500-gui --disk "$DISK" --frames 30 \
+            --mouse "$L_DRA,11,right" >"$TMP/click-eject.log" 2>&1
+        if grep -q 'drive A: ejected' "$TMP/click-eject.log"; then
+            pass "right-clicking a drive lamp ejects the disk"
+        else fail "right-clicking a drive lamp did not eject"; fi
+
+        SDL_VIDEODRIVER=dummy ./p2500-gui --disk "$DISK" --frames 30 \
+            --mouse "$L_CAPS,11,left" >"$TMP/click-caps.log" 2>&1
+        if grep -q 'capitals lock: off' "$TMP/click-caps.log"; then
+            pass "clicking the capitals-lock lamp toggles it"
+        else fail "clicking the capitals-lock lamp did nothing"; fi
+    else
+        fail "the front-end did not report its lamp geometry"
+    fi
 else
     echo "== 7. SDL3 front-end - skipped (run 'make gui' to build it)"
 fi

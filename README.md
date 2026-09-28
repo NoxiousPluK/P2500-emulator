@@ -37,7 +37,7 @@ make test   # the regression suite
 
 `make` needs a C11 compiler; the GUI additionally needs SDL3 (`extra/sdl3`
 on Arch) and a C++17 compiler, and Dear ImGui is vendored. The core stays
-dependency-free so `make test` runs with no display at all: **42 checks**,
+dependency-free so `make test` runs with no display at all: **47 checks**,
 exit 1 on any failure. The GUI checks skip themselves if SDL3 is absent.
 
 ## Running it as a machine
@@ -68,15 +68,17 @@ native menu bar — see `TODO.md` for why a native one is not viable on
 Wayland. "Load Disk" uses `SDL_ShowOpenFileDialog`, so on Linux it is the
 desktop's own portal dialog.
 
-At the right of the bar, four indicators in fixed positions — each always
-drawn, bright when it applies and faint when it does not, so nothing moves
-and an unlit lamp is still readable:
+At the right of the bar, lamps in fixed positions — each always drawn,
+bright when it applies and faint when it does not, so nothing moves and an
+unlit lamp is still readable. **Each one is also a button**, and hovering
+inverts it (bright ground, dark glyph) to say so; the ground keeps the
+lamp's own brightness, so the state stays readable under the pointer.
 
-| | |
-|---|---|
-| `A B C` | a disk is attached in that drive |
-| ▶ / ⏸ | running (dim) or paused (bright — it is the state you can forget you are in) |
-| ⊓⊔ | capitals lock, the P2219 manual's own keycap symbol, drawn rather than typed because no Unicode character matches it |
+| | shows | click |
+|---|---|---|
+| `A B C` | a disk is attached in that drive | load a disk; right-click ejects |
+| ▶ / ⏸ | running (dim) or paused (bright — it is the state you can forget you are in) | toggle |
+| ⊓⊔ | capitals lock, the P2219 manual's own keycap symbol, drawn rather than typed because no Unicode character matches it | toggle |
 
 The machine boots with **capitals lock engaged**, which is how these disks
 are configured — unshifted keys produce capitals.
@@ -85,7 +87,10 @@ are configured — unshifted keys produce capitals.
 with integer scaling. `--frames N --screenshot f.ppm`, `--shot-window f.ppm`,
 `--push-at MS:STRING`, `--panels LIST`, `--verbose-io`, `--break ADDR` and
 `--watch ADDR` let the front-end and its panels be driven and captured with no
-display, which is how `make test` checks them.
+display, which is how `make test` checks them. `--mouse X,Y[,left|right]`
+parks and clicks a synthetic pointer, so the menu-bar lamps are covered too
+— the front-end reports its own lamp geometry to the log rather than the
+suite hardcoding pixel columns that a new menu would quietly invalidate.
 
 ## The debugger
 
@@ -164,9 +169,10 @@ cost this project the most time was a *silent* interrupt drop.
 "Philips" (proving the 8×12 cell rather than 8×8), a solid cursor block
 where R14/R15 point, and the menu bar drawn with the screen offset below it.
 The UI's own state is checked the same way — the panels must add ink, the
-run/pause lamp must change when a breakpoint fires, and three mounted disks
-must light more of the bar than one. Each of those was confirmed to fail when
-the behaviour it guards is removed.
+run/pause lamp must change when a breakpoint fires, three mounted disks must
+light more of the bar than one, hovering a lamp must fill most of its cell
+while not activating it, and clicking must pause, eject and toggle. Each of
+those was confirmed to fail when the behaviour it guards is removed.
 
 **The disassembler is cross-checked against `z80dasm`** over the IPL ROM,
 every opcode page and random byte streams — about 34,000 instructions per

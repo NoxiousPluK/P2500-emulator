@@ -19,7 +19,7 @@ SuperCalc2 (an OEM build whose splash reads `PHILIPS P2000`) loads from
 `P25K_S` and opens files; MBASIC-80 runs from `P25TEST`; `VALLEY.BAS` runs
 off drive B with working screen attributes. Three of nine disk images boot.
 
-`make test` is the proof and the guard: 42 checks, exit 1 on any failure.
+`make test` is the proof and the guard: 47 checks, exit 1 on any failure.
 
 ```
 make                 # libp2500.a, p2500-emu, and p2500-gui if SDL3 is present
@@ -135,6 +135,13 @@ What is left in this phase is T34, which is also the fourth panel.
   the CPU really does, so a DD/FD prefix on an opcode with no index form,
   and an undefined `ED`, are **two-byte instructions**. That matches
   `exec_opcode_ddfd`'s default case and is what the PC actually follows.
+
+  The menu bar's lamps are controls as well as indicators: click to load a
+  disk (right-click ejects), to pause, or to toggle capitals lock, with an
+  inverted cell on hover to say they are clickable. `--mouse X,Y[,left|right]`
+  drives a synthetic pointer so `make test` covers them, and the front-end
+  reports its own lamp columns to the log rather than the suite pinning pixel
+  positions a fourth menu would invalidate.
 
   Still worth adding when a chase calls for it: run-to-cursor, a
   step-over that runs past a `CALL`, and symbol names from the CBIOS tables

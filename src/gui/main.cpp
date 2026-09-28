@@ -46,7 +46,10 @@
 #define SCALE_DEFAULT 2
 #define MAX_PUSHES 8
 
-typedef struct {
+/* Named rather than an anonymous typedef: it holds C++ members with
+ * default initialisers now, which an anonymous struct cannot carry across a
+ * typedef without tripping -Wnon-c-typedef-for-linkage. */
+struct App {
     P2500Machine m;
     SDL_Window *window;
     SDL_Renderer *renderer;
@@ -54,6 +57,7 @@ typedef struct {
     P2500VideoInfo info;
     uint32_t *fb;
     uint8_t *disk[P2500_FDC_MAX_DRIVES];
+    char disk_name[P2500_FDC_MAX_DRIVES][64]; /* basename, for the drive lamps */
     unsigned long frames;
     unsigned long frame_limit;   /* 0 = run until the user quits */
     const char *shot_path;       /* emulated screen only, for the CLI comparison */
@@ -82,11 +86,16 @@ typedef struct {
     P2500Panels panels;
     bool has_ui;                 /* false only if ImGui failed to initialise */
     float menu_h;                /* measured each frame, offsets the screen */
+    /* Scripted pointer, for the same reason --push-at exists: the lamps in
+     * the menu bar are controls now, and a control that can only be checked
+     * by a person looking at it is a control nothing guards. -1 disables. */
+    int mouse_x = -1, mouse_y = -1;
+    int mouse_button = 0;        /* 0 none, 1 left, 2 right */
     SDL_AtomicInt disk_pending;  /* set by the file-dialog callback */
     char disk_path[1024];
     unsigned pending_unit;       /* which drive the dialog was opened for */
     char status[160];            /* last action, shown at the right of the bar */
-} App;
+};
 
 static const P2500Palette PALETTE = {
     0xFF46FF00u,     /* fg: green phosphor, matching tools/render_vram.py */
@@ -230,8 +239,31 @@ static void mount_disk(App *app, unsigned unit, const char *path)
     app->disk[unit] = buf;
     p2500_fdc_attach(&app->m.fdc, unit, buf, n);
     const char *base = SDL_strrchr(path, '/');
+    SDL_strlcpy(app->disk_name[unit], base ? base + 1 : path, sizeof app->disk_name[unit]);
     set_status(app, "%c: %s - Ctrl-C at the prompt to log it in",
-               'A' + (int)unit, base ? base + 1 : path);
+               'A' + (int)unit, app->disk_name[unit]);
+}
+
+static void eject_disk(App *app, unsigned unit)
+{
+    if (unit >= P2500_FDC_MAX_DRIVES || !app->disk[unit]) return;
+    p2500_fdc_attach(&app->m.fdc, unit, NULL, 0);
+    free(app->disk[unit]);
+    app->disk[unit] = NULL;
+    app->disk_name[unit][0] = '\0';
+    set_status(app, "%c: empty", 'A' + (int)unit);
+    SDL_Log("drive %c: ejected", 'A' + (int)unit);
+}
+
+/* One place, because three things reach it: the File menu, F12, and the
+ * run/pause lamp. Resuming clears any breakpoint stop, or Run would trip
+ * straight back over the address it is standing on. */
+static void toggle_pause(App *app)
+{
+    app->paused = !app->paused;
+    if (!app->paused) p2500_debug_resume(&app->dbg);
+    set_status(app, app->paused ? "paused" : "running");
+    SDL_Log("run state: %s", app->paused ? "paused" : "running");
 }
 
 /* CBIOS supports A:, B: and C: (TODO.md T44), so the dialog is opened per
@@ -371,6 +403,54 @@ static ImU32 indicator_colour(bool lit)
     return ImGui::GetColorU32(off);
 }
 
+/*
+ * A lamp is also a button.
+ *
+ * These are not ImGui widgets: they are drawn into the menu bar's draw list
+ * at computed positions, because the bar's layout has to stay fixed as the
+ * status text changes. So the click target is an InvisibleButton placed over
+ * the same rectangle, and the "pressed" look is painted by hand.
+ *
+ * Hovering inverts the cell - bright ground, dark glyph - which is both the
+ * clearest way to say "this is a control" and the one that costs no extra
+ * room in a 23-pixel bar. The ground keeps the lamp's own brightness, so the
+ * lit/unlit state stays readable while the pointer is over it.
+ */
+struct Lamp {
+    ImVec2 min, max;
+    bool hovered;
+    bool clicked;        /* left button */
+    bool alt_clicked;    /* right button */
+};
+
+static Lamp lamp_button(const char *id, float centre_x, float w,
+                        float bar_y, float bar_h)
+{
+    const float padx = 3.0f;
+    Lamp l;
+    l.min = ImVec2(centre_x - w * 0.5f - padx, bar_y + 2.0f);
+    l.max = ImVec2(centre_x + w * 0.5f + padx, bar_y + bar_h - 2.0f);
+    ImGui::SetCursorScreenPos(l.min);
+    l.clicked = ImGui::InvisibleButton(id, ImVec2(l.max.x - l.min.x, l.max.y - l.min.y),
+                                       ImGuiButtonFlags_MouseButtonLeft |
+                                       ImGuiButtonFlags_MouseButtonRight);
+    l.hovered = ImGui::IsItemHovered();
+    l.alt_clicked = l.clicked && ImGui::IsMouseReleased(ImGuiMouseButton_Right);
+    if (l.alt_clicked) l.clicked = false;
+    return l;
+}
+
+/* Paints the inverted ground and returns the colour the glyph must be drawn
+ * in: the bar's own background when inverted, the lamp's normal ink when
+ * not. */
+static ImU32 lamp_paint(ImDrawList *dl, const Lamp &l, bool lit)
+{
+    if (!l.hovered) return indicator_colour(lit);
+    ImVec4 ground = ImGui::GetStyleColorVec4(lit ? ImGuiCol_Text : ImGuiCol_TextDisabled);
+    dl->AddRectFilled(l.min, l.max, ImGui::GetColorU32(ground));
+    return ImGui::GetColorU32(ImGuiCol_MenuBarBg);
+}
+
 static void draw_menu_bar(App *app)
 {
     if (!ImGui::BeginMainMenuBar()) return;
@@ -386,10 +466,7 @@ static void draw_menu_bar(App *app)
             p2500_debug_baseline(&app->dbg, &app->m);
             set_status(app, "reset - media still attached");
         }
-        if (ImGui::MenuItem(app->paused ? "Unpause" : "Pause", "F12")) {
-            app->paused = !app->paused;
-            set_status(app, app->paused ? "paused" : "running");
-        }
+        if (ImGui::MenuItem(app->paused ? "Unpause" : "Pause", "F12")) toggle_pause(app);
         ImGui::Separator();
         if (ImGui::MenuItem("Screenshot", "F10")) save_screenshot(app);
         ImGui::Separator();
@@ -434,7 +511,11 @@ static void draw_menu_bar(App *app)
         const float run_w = gh * 0.72f;
         const float letter_w = ImGui::CalcTextSize("A").x;
         const float font_h = ImGui::GetFontSize();
-        const float pad = 12.0f, gap = 9.0f, letter_gap = 5.0f;
+        /* letter_gap is wider than it needs to look right: each drive letter
+         * is a click target now, and three 7-pixel letters five pixels apart
+         * are adjacent enough to mis-hit. */
+        const float pad = 12.0f, gap = 9.0f, letter_gap = 9.0f;
+        const float drive_cell = letter_w + letter_gap;
         const float drives_w = letter_w * 3.0f + letter_gap * 2.0f;
 
         float x = bar_x + width - pad;
@@ -460,23 +541,68 @@ static void draw_menu_bar(App *app)
         /* Only draw once there is room left of the menus, so a narrow window
          * clips the indicators instead of scribbling over "File". */
         if (status_right - bar_x > ImGui::GetCursorPosX()) {
-            draw_caps_glyph(dl, ImVec2(caps_centre, mid_y), gh,
-                            indicator_colour(app->caps_lock));
-            draw_run_glyph(dl, ImVec2(run_centre, mid_y), gh * 0.86f, app->paused,
-                           indicator_colour(app->paused));
-            /* A:, B: and C: - the three drives CBIOS actually supports
-             * (TODO.md T44). Lit means media is attached, which is not the
-             * same as the guest having logged the drive in. */
-            for (unsigned u = 0; u < 3; u++) {
-                const char letter[2] = { (char)('A' + u), '\0' };
-                dl->AddText(ImVec2(drives_left + u * (letter_w + letter_gap),
-                                   mid_y - font_h * 0.5f),
-                            indicator_colour(app->m.fdc.disk[u] != NULL), letter);
-            }
+            /* The status text first: it is the only one of these that uses
+             * the layout cursor, and the lamps below move that cursor to
+             * absolute positions. */
             if (app->status[0]) {
                 const float text_w = ImGui::CalcTextSize(app->status).x;
                 ImGui::SetCursorPosX(status_right - bar_x - text_w);
                 ImGui::TextDisabled("%s", app->status);
+            }
+
+            /* Reported once, for the same reason the layout line is: a test
+             * that hardcodes these pixel columns silently stops testing the
+             * lamps the moment a menu is added or the font changes. */
+            if (app->win_shot_path && app->frames == 2)
+                SDL_Log("lamps: caps %.0f run %.0f drives %.0f %.0f %.0f rows %.0f-%.0f",
+                        caps_centre, run_centre,
+                        drives_left + letter_w * 0.5f,
+                        drives_left + drive_cell + letter_w * 0.5f,
+                        drives_left + 2 * drive_cell + letter_w * 0.5f,
+                        bar_y + 2.0f, bar_y + bar_h - 2.0f);
+
+            Lamp caps = lamp_button("##caps", caps_centre, caps_w, bar_y, bar_h);
+            if (caps.clicked || caps.alt_clicked) {
+                app->caps_lock = !app->caps_lock;
+                set_status(app, "capitals lock %s",
+                           app->caps_lock ? "on (as shipped)" : "off");
+                SDL_Log("capitals lock: %s", app->caps_lock ? "on" : "off");
+            }
+            ImGui::SetItemTooltip("Capitals lock: %s\nThe disks ship with it engaged,"
+                                  " so unshifted keys give capitals.",
+                                  app->caps_lock ? "on" : "off");
+            draw_caps_glyph(dl, ImVec2(caps_centre, mid_y), gh,
+                            lamp_paint(dl, caps, app->caps_lock));
+
+            Lamp run = lamp_button("##run", run_centre, run_w, bar_y, bar_h);
+            if (run.clicked || run.alt_clicked) toggle_pause(app);
+            ImGui::SetItemTooltip("%s  (F12)", app->paused ? "Paused - click to run"
+                                                           : "Running - click to pause");
+            draw_run_glyph(dl, ImVec2(run_centre, mid_y), gh * 0.86f, app->paused,
+                           lamp_paint(dl, run, app->paused));
+
+            /* A:, B: and C: - the three drives CBIOS actually supports
+             * (TODO.md T44). Lit means media is attached, which is not the
+             * same as the guest having logged the drive in, which is why the
+             * tooltip says so. Left click loads, right click ejects. */
+            for (unsigned u = 0; u < 3; u++) {
+                const bool loaded = app->m.fdc.disk[u] != NULL;
+                const float cx = drives_left + u * drive_cell + letter_w * 0.5f;
+                char id[8];
+                snprintf(id, sizeof id, "##dr%u", u);
+                Lamp d = lamp_button(id, cx, letter_w, bar_y, bar_h);
+                if (d.clicked) open_disk_dialog(app, u);
+                if (d.alt_clicked) eject_disk(app, u);
+                if (loaded)
+                    ImGui::SetItemTooltip("%c: %s\nClick to change, right-click to eject.\n"
+                                          "CP/M caches the directory - Ctrl-C at the prompt"
+                                          " after a swap.",
+                                          'A' + (int)u, app->disk_name[u]);
+                else
+                    ImGui::SetItemTooltip("%c: empty\nClick to load a disk.", 'A' + (int)u);
+                const ImU32 ink = lamp_paint(dl, d, loaded);
+                const char letter[2] = { (char)('A' + u), '\0' };
+                dl->AddText(ImVec2(cx - letter_w * 0.5f, mid_y - font_h * 0.5f), ink, letter);
             }
         }
     }
@@ -572,6 +698,7 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[])
     int npush = 0;
     const char *panels_arg = NULL;
     bool verbose_devices = false;
+    int mouse_x = -1, mouse_y = -1, mouse_button = 0;
     uint16_t break_at[MAX_PUSHES] = {0};
     int nbreak = 0;
     uint16_t watch_at[MAX_PUSHES] = {0};
@@ -593,6 +720,14 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[])
          * the screen be checked headlessly. */
         else if (!strcmp(argv[i], "--panels") && i + 1 < argc) panels_arg = argv[++i];
         else if (!strcmp(argv[i], "--verbose-io")) verbose_devices = true;
+        else if (!strcmp(argv[i], "--mouse") && i + 1 < argc) {
+            char *arg = argv[++i];
+            mouse_x = atoi(arg);
+            char *c1 = strchr(arg, ',');
+            mouse_y = c1 ? atoi(c1 + 1) : 0;
+            char *c2 = c1 ? strchr(c1 + 1, ',') : NULL;
+            if (c2) mouse_button = (c2[1] == 'r' || c2[1] == 'R') ? 2 : 1;
+        }
         else if (!strcmp(argv[i], "--break") && i + 1 < argc && nbreak < MAX_PUSHES)
             break_at[nbreak++] = (uint16_t)strtoul(argv[++i], NULL, 16);
         else if (!strcmp(argv[i], "--watch") && i + 1 < argc && nwatch < MAX_PUSHES)
@@ -611,6 +746,7 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[])
                     "                 [--frames N] [--screenshot out.ppm] [--shot-window out.ppm]\n"
                     "                 [--push-at MS:STRING ...] [--no-caps-lock]\n"
                     "                 [--panels devices,memory,disasm,log] [--verbose-io]\n"
+                    "                 [--mouse X,Y[,left|right]]\n"
                     "                 [--break ADDR ...] [--watch ADDR ...]");
             return SDL_APP_FAILURE;
         }
@@ -650,6 +786,8 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[])
             return SDL_APP_FAILURE;
         }
         p2500_fdc_attach(&app->m.fdc, u, app->disk[u], n);
+        const char *base = SDL_strrchr(disks[u], '/');
+        SDL_strlcpy(app->disk_name[u], base ? base + 1 : disks[u], sizeof app->disk_name[u]);
         SDL_Log("attached %c: %s (%zu bytes)", 'A' + (int)u, disks[u], n);
     }
 
@@ -691,6 +829,9 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[])
         app->panels.show_log = strstr(panels_arg, "log") != NULL;
     }
     app->panels.verbose_devices = verbose_devices;
+    app->mouse_x = mouse_x;
+    app->mouse_y = mouse_y;
+    app->mouse_button = mouse_button;
 
     SDL_StartTextInput(app->window);
     set_status(app, disks[0] ? "ready" : "no disk - File > Load Disk A...");
@@ -729,7 +870,7 @@ SDL_AppResult SDL_AppEvent(void *appstate, SDL_Event *event)
         if (ctrl && k == SDLK_R) { p2500_reset(&app->m); p2500_debug_baseline(&app->dbg, &app->m); set_status(app, "reset - media still attached"); return SDL_APP_CONTINUE; }
         if (ctrl && k == SDLK_Q) return SDL_APP_SUCCESS;
         if (k == SDLK_F10) { save_screenshot(app); return SDL_APP_CONTINUE; }
-        if (k == SDLK_F12) { app->paused = !app->paused; set_status(app, app->paused ? "paused" : "running"); return SDL_APP_CONTINUE; }
+        if (k == SDLK_F12) { toggle_pause(app); return SDL_APP_CONTINUE; }
         if (k == SDLK_F11) { app->turbo = !app->turbo; set_status(app, app->turbo ? "turbo" : "running"); return SDL_APP_CONTINUE; }
         if (k == SDLK_F1) { app->panels.show_devices = !app->panels.show_devices; return SDL_APP_CONTINUE; }
         if (k == SDLK_F2) { app->panels.show_memory = !app->panels.show_memory; return SDL_APP_CONTINUE; }
@@ -806,17 +947,27 @@ SDL_AppResult SDL_AppIterate(void *appstate)
     if (app->has_ui) {
         ImGui_ImplSDLRenderer3_NewFrame();
         ImGui_ImplSDL3_NewFrame();
+        /* After the backend's own NewFrame, so this position is the one
+         * ImGui::NewFrame() ends up with - the backend would otherwise
+         * overwrite it with whatever the platform reports, which under the
+         * dummy video driver is nothing useful. The click is delivered as a
+         * press and a release on consecutive frames because that is what a
+         * real one is; a same-frame pair never registers. */
+        if (app->mouse_x >= 0) {
+            ImGuiIO &io = ImGui::GetIO();
+            io.AddMousePosEvent((float)app->mouse_x, (float)app->mouse_y);
+            if (app->mouse_button && app->frames == 4)
+                io.AddMouseButtonEvent(app->mouse_button - 1, true);
+            if (app->mouse_button && app->frames == 5)
+                io.AddMouseButtonEvent(app->mouse_button - 1, false);
+        }
         ImGui::NewFrame();
         draw_menu_bar(app);
-        bool toggle_pause = false;
+        bool want_pause_toggle = false;
         P2500PanelActions act = p2500_panels_draw(app->panels, app->m, app->dbg,
-                                                  app->paused, &toggle_pause);
+                                                  app->paused, &want_pause_toggle);
         ImGui::Render();
-        if (toggle_pause) {
-            app->paused = !app->paused;
-            if (!app->paused) p2500_debug_resume(&app->dbg);
-            set_status(app, app->paused ? "paused" : "running");
-        }
+        if (want_pause_toggle) toggle_pause(app);
         /* Stepping runs after the frame is composed, so the listing the user
          * clicked is the state the step started from. ~0 means "one 50 Hz
          * field", the same budget the free-running loop uses. */
