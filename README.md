@@ -272,8 +272,10 @@ about what the machine is doing.
 - **UI**: [Dear ImGui](https://github.com/ocornut/imgui) 1.92.1 (MIT),
   vendored in `src/gui/vendor/imgui/` with the `sdl3` + `sdlrenderer3`
   backends.
-- **FDC design informed by [`ifilot/p2000m-emulator`](https://github.com/ifilot/p2000m-emulator)**,
+- **Rendering and input handling**: [SDL3](https://libsdl.org/) (zlib).
+- **FDC design** informed by [`ifilot/p2000m-emulator`](https://github.com/ifilot/p2000m-emulator),
   which emulates the sibling P2000M machine and ships a primary-source
   reference for its floppy controller. Not reused verbatim — the P2500's
   ports, control bits and disk geometry all differ — but it independently
   confirmed this project's own ROM-derived command decode.
+- **Disk images** by [Home Computer Museum](https://download.homecomputer.museum/#Files%2FPhilips%2FP2500).
