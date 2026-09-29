@@ -23,6 +23,10 @@ Named "P2500-emulator" for brevity and to stay distinct from the unrelated
 P2000T/P2000M/P2000C machines — the P2000B and P2500 are the same hardware
 in slightly different case designs, so one name covers both.
 
+**Note:** This emulator is far from complete, and likely contains a sizable
+amount of wrong assumptions, missing features or other errors. This is very
+much a work in progress, and real hardware needs to be used to verify against.
+
 During research and implementation, LLMs were used to speed up the process
 and make informed decisions. I could not have done it without the utility
 that LLMs provide, and it doesn't look like anyone else had plans to build
