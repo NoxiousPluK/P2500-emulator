@@ -23,6 +23,11 @@ Named "P2500-emulator" for brevity and to stay distinct from the unrelated
 P2000T/P2000M/P2000C machines — the P2000B and P2500 are the same hardware
 in slightly different case designs, so one name covers both.
 
+During research and implementation, LLMs were used to speed up the process
+and make informed decisions. I could not have done it without the utility
+that LLMs provide, and it doesn't look like anyone else had plans to build
+this software or do this research.
+
 ## Features
 
 - Full Z80 CPU emulation with a real IM2 interrupt daisy chain (CTC, PIO,
