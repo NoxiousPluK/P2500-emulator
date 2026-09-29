@@ -8,16 +8,7 @@ Manages to run CP/M seemingly without big issues.
 Not yet tested with UCSD p-System (for lack of media) and properly SESAM-
 protected files.
 
-```
-Philips P2500
-58K CP/M Ver. 2.2
-
-A>DIR
-A: PIP      COM : SYSGEN   COM : SYSCBI   PHI : SYSLOAD  PHI
-A: SYSPBI   PHI : SYSCPM   PHI
-
-A>
-```
+![Screenshot of the P2500 emulator booted into CP/M and showing a directory listing](docs/screenshot.png?raw=true)
 
 Named "P2500-emulator" for brevity and to stay distinct from the unrelated
 P2000T/P2000M/P2000C machines — the P2000B and P2500 are the same hardware
