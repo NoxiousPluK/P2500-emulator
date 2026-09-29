@@ -9,3 +9,7 @@ tools/__pycache__/
 assets/
 demos/*.COM
 demos/*.raw
+.claude/
+publish/
+*.exe
+*.dll
