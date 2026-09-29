@@ -17,10 +17,9 @@ NSTARS  equ 48
 REC     equ 8                ; bytes per star, a power of two so indexing shifts
 CX      equ 256
 CY      equ 128
-; Distance gained per field, 8.8. 160/256 is about five eighths of a unit,
-; which is roughly a third slower than the whole unit it used to be - and
-; being fractional it still moves something every field rather than
-; stepping at half the frame rate.
+; Distance gained per field, 8.8. 160/256 is five eighths of a unit; being
+; fractional it still moves something every field rather than stepping at
+; half the frame rate.
 ZSTEP   equ 160
 
 ; record layout

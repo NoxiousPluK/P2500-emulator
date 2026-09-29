@@ -3,10 +3,12 @@
 Three small programs for the P2500's 512 × 256 high-resolution mode, written
 to exercise it with something harder than a test pattern.
 
+Also a small benchmark application.
+
 ```
 make demos                       # assembles, verifies, and builds the disk
 ./p2500-gui --disk demos/P2500DEMO.raw
-A>LOGO          A>STARS          A>SPIRO
+A>LOGO          A>STARS          A>SPIRO          A>BENCH
 ```
 
 Any key returns to CP/M. `make demos` needs a bootable P2500 image to take
@@ -22,34 +24,17 @@ the CP/M system files from; it defaults to `P25K_B` and takes
 
 ## Drawing a mover without flicker
 
-LOGO writes each byte exactly once. It used to erase the old position and
-then draw the new one, and for the length of that erase the logo was simply
-not on screen — which is what the flicker was.
-
-Instead the sprite carries its own background: `mk_sprite --halo` surrounds it
-with one byte of blank margin left and right and one blank row top and
-bottom. A plain store then covers wherever the sprite just was, so there is no
-erase pass, nothing is briefly blank, and the work halves.
+LOGO writes each byte exactly once per frame rather than erasing the old
+position and then drawing the new one — an erase pass would leave the logo
+off-screen for the length of it. Instead the sprite carries its own
+background: `mk_sprite --halo` surrounds it with one byte of blank margin
+left and right and one blank row top and bottom, so a plain store covers
+wherever the sprite just was and there is no erase pass.
 
 The catch is that the step has to stay inside that margin, and that is what
 bounds the movement: eight pixels horizontally, and `--halo-rows` vertically
 (two here, which is why `|dy|` is 1 or 2). Go further and the sprite leaves a
 trail, because nothing else clears the screen.
-
-Three bugs came out of removing the erase, all of which it had been hiding:
-
-- a leftover `dx = -2` on the right-hand bounce, twice what the margin
-  covered at the time;
-- `jr c` where `jr nc` was meant on the vertical bounce — and then `jr nc`
-  where neither works. `add a,dy` with a two's-complement `dy` is a subtract
-  in disguise, so carry *set* means no borrow; with a positive `dy` the carry
-  is simply never set at these magnitudes. One test cannot serve both, so
-  `move_y` branches on the sign of `dy` first;
-- the second of those pinned the logo to `y = 0`, where it travelled purely
-  horizontally. Every assertion in `make test` passed while it did, because
-  45 contiguous rows at the top of the screen look exactly like 45 contiguous
-  rows anywhere else. The check now also requires the vertical position to
-  differ between samples.
 
 ## BENCH
 
@@ -101,11 +86,11 @@ plotting — a plain character costs *more* per byte than a graphics command
 byte does. It is why the demos bypass CBIOS, and why anything drawing through
 the documented set-point call will feel glacial.
 
-## How they draw
+## How the demos draw
 
 Not through CBIOS. Its set-point call takes four bytes through BDOS and the
-screen driver per dot — fine for the probes that measured the layout
-(`TODO.md` T47), about four hundred times too slow to animate anything.
+screen driver per dot — fine for probing, about four hundred times too slow
+to animate anything.
 
 Instead they map the video card's own DRAM over `$8000`–`$BFFF` with port
 `$05` and write to it directly, which is certainly what any real P2500
@@ -134,7 +119,7 @@ addr = $8000 + (y & 3) * 4096 + (y >> 2) * 64 + x / 8     bit = 7 - (x & 7)
 ```
 
 which is why stepping down one pixel row is `+$1000` three times and then
-`-12224`. See `TODO.md` T47 for how that was established.
+`-12224`.
 
 ## Keeping time
 
@@ -143,12 +128,6 @@ register is not wired anywhere the CPU can see it. But **CBIOS keeps a 16-bit
 counter at `$F436`** that its CTC channel-2 interrupt advances once per field,
 and measured against the emulator's own clock it runs at 50.00 Hz exactly. So
 `wait_field` watches its low byte change, which is a true field sync.
-
-That matters more than it sounds. Counting T-states in a delay loop — the
-first attempt here — only works if you know how long the drawing took, and
-LOGO's erase-and-blit of 51 rows takes most of a field on its own. A demo
-whose work overruns simply lands on the next boundary instead of drifting,
-and the speed constants mean what they say.
 
 Interrupts have to be on for it, so `wait_field` is called after `vid_out`.
 The address belongs to this CP/M build; a disk built from a different donor
@@ -169,6 +148,6 @@ constant silently overwritten by a same-named routine label.
 `tools/mk_sprite.py` turns an image into the eight pre-shifted copies LOGO
 uses. `--invert` picks which of light and dark is ink — for this wordmark the
 inverted reading is much the clearer, because the stripes then break up the
-background rather than the letters. `--halo` adds the margin described above, with `--halo-rows` setting how many
-blank rows above and below — i.e. the largest vertical step the sprite can
-cover on its own.
+background rather than the letters. `--halo` adds the margin described above,
+with `--halo-rows` setting how many blank rows above and below — i.e. the
+largest vertical step the sprite can cover on its own.

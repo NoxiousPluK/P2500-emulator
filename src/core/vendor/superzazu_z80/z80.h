@@ -11,7 +11,7 @@ struct z80 {
   void (*write_byte)(void*, uint16_t, uint8_t);
   uint8_t (*port_in)(z80*, uint8_t);
   void (*port_out)(z80*, uint8_t, uint8_t);
-  /* LOCAL ADDITION to the vendored core (P2500 TODO.md T17), optional -
+  /* LOCAL ADDITION to the vendored core, optional -
    * leave NULL for upstream behaviour. Called when RETI (ED 4D) executes.
    * On a real Z80 system RETI is decoded off the bus by the interrupt
    * daisy chain, which is how a peripheral learns its handler has

@@ -22,10 +22,9 @@ extern "C" {
  * channel 3's CLK/TRG to announce it - see machine.c's
  * advance_keyboard_strobe.
  *
- * The bit-banging that TODO.md's HWTEST-derived note refers to is a
- * *different* path, now identified: the serial port. CBIOS bit-bangs that
- * one against CTC channels 0 and 1, transmitting on port $04 and sampling
- * port $05 bit 7 on receive (see ctc.h). It is not this port.
+ * Serial bit-banging is a *different* path: the serial port. CBIOS bit-bangs
+ * that one against CTC channels 0 and 1, transmitting on port $04 and
+ * sampling port $05 bit 7 on receive (see ctc.h). It is not this port.
  *
  * Modeled here as a queue of bytes to "type", delivered one per port $06
  * read, with $FF ("nothing plugged in") the rest of the time.
@@ -62,7 +61,7 @@ typedef struct {
     uint8_t ring_head, ring_tail;
 
     /* Diagnostics sink, pointed at the machine's own by p2500_init().
-     * NULL is fine - the messages are simply discarded (TODO.md T34). */
+     * NULL is fine - the messages are simply discarded. */
     const P2500Log *log;
     bool verbose;
 } P2500Keyboard;
@@ -80,7 +79,7 @@ void p2500_keyboard_push(P2500Keyboard *kb, uint8_t byte);
 
 typedef struct {
     /* Diagnostics sink, pointed at the machine's own by p2500_init().
-     * NULL is fine - the messages are simply discarded (TODO.md T34). */
+     * NULL is fine - the messages are simply discarded. */
     const P2500Log *log;
     bool verbose; /* echo each transmitted byte as it is sent */
 } P2500Serial;

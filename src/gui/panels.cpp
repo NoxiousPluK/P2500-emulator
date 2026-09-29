@@ -89,9 +89,8 @@ static bool addr_input(const char *label, char *buf, size_t buflen, uint16_t *ou
  *
  *  Every topic in core/debug.h, one collapsible section each, in daisy-chain
  *  and bus order rather than alphabetically: the order the questions get
- *  asked in. "Copy all" exists because the answer usually belongs in
- *  TODO.md, and retyping a register dump is how transcription errors get
- *  into notes.
+ *  asked in. "Copy all" exists because retyping a register dump is how
+ *  transcription errors get into notes.
  * ------------------------------------------------------------------------ */
 static void draw_devices(P2500Panels &p, const P2500Machine &m)
 {
@@ -385,8 +384,7 @@ static void draw_log(P2500Panels &p)
             if (lvl < 3 && !p.log_show[lvl]) continue;
             if (p.log_filter[0] && !strstr(p.log[slot], p.log_filter)) continue;
             /* Amber for a warning, deliberately off the phosphor palette:
-             * these are the lines saying the emulator declined to act, and
-             * this project's most expensive bugs were all silent drops. */
+             * these are the lines saying the emulator declined to act. */
             if (lvl == P2500_LOG_WARN)
                 ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(255, 176, 64, 255));
             else if (lvl == P2500_LOG_TRACE)

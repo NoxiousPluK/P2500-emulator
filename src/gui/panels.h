@@ -2,7 +2,7 @@
 #define P2500_GUI_PANELS_H
 
 /*
- * The debugger panels (TODO.md T39). Separate from main.cpp because the
+ * The debugger panels. Separate from main.cpp because the
  * front-end's job - window, pacing, input, screen - is already a file's
  * worth, and because the panels only ever read the machine plus the shared
  * P2500Debug: keeping them in their own translation unit is what makes that
@@ -46,7 +46,7 @@ struct P2500Panels {
     char break_entry[8] = "";
     char watch_entry[12] = "";
 
-    /* The log: every diagnostic the core produces (TODO.md T34), plus the
+    /* The log: every diagnostic the core produces, plus the
      * watch hits and breakpoint stops core/debug.c reports. A ring, so a
      * long run cannot grow without bound - and one deep enough to hold a
      * whole disk operation's worth of the firehose, which is the point of

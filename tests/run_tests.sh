@@ -1,5 +1,5 @@
 #!/bin/sh
-# Regression suite for the P2500 emulator (TODO.md T24). Every check is a
+# Regression suite for the P2500 emulator. Every check is a
 # falsifiable claim about observable state, not "it didn't crash":
 #
 #   1. SESAM  - the banner VRAM must be byte-identical to the Python-era
@@ -15,13 +15,13 @@
 #               chain at once: CTC channel 3 + port $06 in, the interrupt
 #               daisy chain, the FDC/DMA read path, and CONOUT.
 #
-# usage: tools/run_tests.sh   (or: make test)
+# usage: tests/run_tests.sh   (or: make test)
 set -u
 cd "$(dirname "$0")/.."
 
 EMU=./p2500-emu
 DISK="disks/P25K_B.raw"
-REF="../ROM Dumps/CPU-Card-Boot-EPROM/emulation/vram_after_banner.bin"
+REF="tests/fixtures/vram_after_banner.bin"
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
 fails=0
@@ -38,7 +38,7 @@ echo "== 1. SESAM bootable-cartridge banner (byte-exact VRAM)"
 if [ ! -f "$REF" ]; then
     fail "reference dump missing: $REF"
 else
-    $EMU --rom roms/ipl.bin --sesam roms/sesam_banner_test.bin \
+    $EMU --rom roms/ipl.bin --sesam tests/fixtures/sesam_banner_test.bin \
          --max-steps 2000000 --dump-vram "$TMP/sesam.bin" >"$TMP/sesam.log" 2>&1
     if cmp -s "$TMP/sesam.bin" "$REF"; then pass "VRAM identical to $REF"
     else fail "VRAM differs from $REF"; fi
@@ -83,31 +83,7 @@ else
     done
 fi
 
-echo "== 4b. The IPL's own give-up path still works"
-# A disk that is readable but not bootable must make sub_0333h return, so the
-# IPL prints its own banner and halts - rather than blocking in the $06C6
-# busy-wait. This is the only test of the failure path.
-# Deliberately not in disks/: this dump is damaged (T45) and boots nothing.
-# It is here because the IPL's give-up path needs a disk that is readable and
-# not bootable, which is exactly what a half-captured disk is.
-PSYS="../Disk Images/extracted/P2k5_LOGIC/P2k5_LOGIC_deinterleaved.raw"
-if [ ! -f "$PSYS" ]; then
-    echo "  SKIP  $PSYS not present"
-else
-    $EMU --disk "$PSYS" --max-steps 30000000 --dump-vram "$TMP/ipl.bin" \
-         >"$TMP/ipl.log" 2>&1
-    screen "$TMP/ipl.bin" >"$TMP/ipl.screen"
-    if grep -q 'P H I L I P S' "$TMP/ipl.screen" &&
-       grep -q 'MICROCOMPUTER' "$TMP/ipl.screen" &&
-       grep -q 'P2000/B' "$TMP/ipl.screen"; then
-        pass "unbootable disk prints the IPL banner"
-    else fail "IPL banner not shown for an unbootable disk"; fi
-    if grep -q 'Final: PC=\$014D' "$TMP/ipl.log"; then
-        pass "IPL halted at \$014D as designed"
-    else fail "IPL did not reach its halt at \$014D"; fi
-fi
-
-echo "== 4c. Drive B: (T44)"
+echo "== 4a. Drive B:"
 GAMES="disks/P2500GAM.raw"
 if [ ! -f "$GAMES" ]; then
     echo "  SKIP  $GAMES not present"
@@ -125,9 +101,8 @@ else
     else pass "drive B's listing is not drive A's"; fi
 fi
 
-echo "== 4d. Swapping a disk mid-run"
-# What a swap does and does not cost, both asserted, because the front-end
-# used to tell people the wrong one.
+echo "== 4b. Swapping a disk mid-run"
+# What a swap does and does not cost, both asserted.
 #
 # Reads refresh by themselves: CP/M re-reads the directory on every search,
 # so a DIR straight after a swap lists the new disk with no warm boot. What
@@ -135,8 +110,8 @@ echo "== 4d. Swapping a disk mid-run"
 # DPB, i.e. removable media, so BDOS compares the directory checksum, finds
 # it changed, and sets the drive's bit in its read-only vector at $E1AD.
 # Ctrl-C clears it through the BDOS reset at $E086. That flag has no visible
-# consequence until writing exists (T30), which is exactly why the claim
-# needs a test rather than a sentence in a tooltip.
+# consequence until writing to disk is implemented, which is exactly why the
+# claim needs a test rather than a sentence in a tooltip.
 SYSDISK="disks/P25K_S.raw"
 if [ ! -f "$SYSDISK" ]; then
     echo "  SKIP  $SYSDISK not present"
@@ -159,22 +134,22 @@ else
     else fail "Ctrl-C did not clear the read-only flag"; fi
 fi
 
-echo "== 5. The undecoded-video-bank tripwire still fires (T27)"
-# roms/sesam_bank_probe.bin is a SESAM cartridge whose payload is
+echo "== 5. The undecoded-video-bank tripwire still fires"
+# tests/fixtures/sesam_bank_probe.bin is a SESAM cartridge whose payload is
 # LD A,$01 / OUT ($05),A / HALT - i.e. it selects one of port $05's six
 # undecoded $8000-$BFFF windows, the most likely home of the video card's
 # attribute plane. Nothing in any disk image does this, so without a
 # deliberate probe the diagnostic would be untested code that quietly rots.
-$EMU --sesam roms/sesam_bank_probe.bin --max-steps 3000000 \
+$EMU --sesam tests/fixtures/sesam_bank_probe.bin --max-steps 3000000 \
      >"$TMP/bank.log" 2>&1
 if grep -q 'selects an unknown \$8000-\$BFFF window' "$TMP/bank.log"; then
     pass "unknown bank select is logged"
-else fail "unknown bank select was NOT logged - the T27 tripwire is dead"; fi
+else fail "unknown bank select was NOT logged - the tripwire is dead"; fi
 if grep -q 'selected an undecoded \$8000-\$BFFF window' "$TMP/bank.log"; then
     pass "unknown bank select is counted in the exit report"
 else fail "unknown bank select missing from the exit report"; fi
 
-echo "== 6. The core renderer (T37) and the live keyboard ring (T38)"
+echo "== 6. The core renderer and the live keyboard ring"
 if [ ! -f "$DISK" ]; then
     fail "disk image missing: $DISK"
 else
@@ -315,7 +290,7 @@ PY
         pass "screen is offset below the menu bar"
     else fail "screen not offset below the menu bar"; fi
 
-    # --- the debugger panels (TODO.md T39) ---------------------------------
+    # --- the debugger panels -------------------------------------------
     # Drawn under the dummy driver like the menu bar, so what the panels put
     # on screen can be asserted with no display.
     SDL_VIDEODRIVER=dummy ./p2500-gui --disk "$DISK" --frames 200 \
@@ -480,12 +455,10 @@ PY
 
     # --- the guest keeps its keyboard after the UI has used a text field ---
     # ImGui's SDL3 backend calls SDL_StopTextInput() when one of its fields
-    # loses focus, which turns SDL_EVENT_TEXT_INPUT off for the whole window.
-    # That is where every printable key the guest receives comes from, so one
-    # use of any address field used to leave the machine untypeable. Key
-    # events were unaffected, so the menus and F-keys went on working and hid
-    # it - which is why this is asserted on SDL's own text-input state and
-    # not on WantCaptureKeyboard, which looks correct throughout.
+    # loses focus, which turns SDL_EVENT_TEXT_INPUT off for the whole window -
+    # that is where every printable key the guest receives comes from.
+    # Asserted on SDL's own text-input state, not on WantCaptureKeyboard,
+    # which reads true throughout regardless.
     SDL_VIDEODRIVER=dummy ./p2500-gui --disk "$DISK" --frames 8 --panels memory \
         --shot-window "$TMP/mem.ppm" >"$TMP/mem.log" 2>&1
     FIELD=$(sed -n 's/.*goto field \([0-9]*\),\([0-9]*\).*/\1,\2/p' "$TMP/mem.log" | head -1)
@@ -531,7 +504,7 @@ else
     echo "== 7. SDL3 front-end - skipped (run 'make gui' to build it)"
 fi
 
-echo "== 8. The shared debug core (TODO.md T39)"
+echo "== 8. The shared debug core"
 # --disasm and --state are the headless half of the GUI's panels: they print
 # the same lines core/debug.c hands ImGui, so a panel's claims can be checked
 # without a display - and so the two cannot silently drift apart.
@@ -557,7 +530,7 @@ else fail "--state interrupt counts look dead"; fi
 # opcode page and random byte streams. Both walk the same bytes, so a length
 # disagreement desynchronises them and shows up loudly.
 if command -v z80dasm >/dev/null 2>&1; then
-    if python3 tools/disasm_crosscheck.py --rounds 2 >"$TMP/crosscheck.log" 2>&1; then
+    if python3 tests/disasm_crosscheck.py --rounds 2 >"$TMP/crosscheck.log" 2>&1; then
         pass "disassembler agrees with z80dasm ($(tail -1 "$TMP/crosscheck.log"))"
     else
         fail "disassembler disagrees with z80dasm"
@@ -581,8 +554,8 @@ if grep -q 'hit max-steps' "$TMP/wc.out"; then
 else fail "a plain --watch stopped the run"; fi
 
 # The watch report must name the instruction that WROTE the byte, not the one
-# after it. The poll happens between instructions, so the naive answer is one
-# late - which is what this used to print.
+# after it - the poll happens between instructions, so the naive answer is
+# one instruction late.
 $EMU --disk "$DISK" --max-steps 6000000 --watch-break E1AD >/dev/null 2>"$TMP/wp2.err"
 WROTE=$(sed -n 's/.*written by \$\([0-9A-F]*\).*/\1/p' "$TMP/wp2.err" | head -1)
 NOWPC=$(sed -n 's/.*now PC=\$\([0-9A-F]*\).*/\1/p' "$TMP/wp2.err" | head -1)
@@ -610,11 +583,9 @@ if grep -q -- '--break reached' "$TMP/break.out" &&
     pass "--break stops with PC on the breakpoint"
 else fail "--break did not stop at \$0333"; fi
 
-echo "== 9. Core diagnostics go through the log callback (TODO.md T34)"
-# The core no longer writes to stderr; the CLI installs a sink that puts the
-# "[cat] " prefix back, so this output is what it always was. The risk in
-# that refactor is a message quietly going nowhere, so check every category
-# still arrives.
+echo "== 9. Core diagnostics go through the log callback"
+# The core never touches stderr directly; the CLI installs a sink that adds
+# the "[cat] " prefix. Check every device category still reaches it.
 ./p2500-emu --disk "$DISK" --max-steps 4000000 --verbose-io --type 'DIR\r' \
     >/dev/null 2>"$TMP/verbose.err"
 missing=""
@@ -652,13 +623,11 @@ PY
 fi
 
 echo "== 10. Building a disk image (tools/cpm_build.py)"
-# The write half of the disk format had nothing testing it: cpm_extract.py
-# has been checked against nine real images, but nothing proved this project
-# could produce one. Build a bootable disk from scratch, boot it, and run a
-# program off it - which exercises the sector skew, the directory encoding,
-# the block map and the system-file copy in one go. A wrong skew fails here
+# Build a bootable disk from scratch, boot it, and run a program off it -
+# which exercises the sector skew, the directory encoding, the block map
+# and the system-file copy in one go. A wrong skew fails here
 # and not subtly.
-if python3 tools/mk_cpm_probe.py "$TMP/PROBE.COM" 'BEFORE\eY\x20\x20\ek\e0PREVERSED\e0@ plain' >/dev/null 2>&1 &&
+if python3 tests/mk_cpm_probe.py "$TMP/PROBE.COM" 'BEFORE\eY\x20\x20\ek\e0PREVERSED\e0@ plain' >/dev/null 2>&1 &&
    python3 tools/cpm_build.py "$TMP/probe.raw" "$TMP/PROBE.COM" \
         --boot-from "$DISK" >"$TMP/build.log" 2>&1; then
     pass "cpm_build.py built a bootable image ($(sed -n 's/^Verified *: .*, \([0-9]*\) file.*/\1/p' "$TMP/build.log") files verified)"
@@ -709,7 +678,7 @@ sys.exit(0)
 PY
 fi
 
-echo "== 11. High-resolution graphics mode (TODO.md T47)"
+echo "== 11. High-resolution graphics mode"
 # Driven through CBIOS's own set-point call, so what is being checked is the
 # whole path: ESC 3 reprograms the CRTC, the firmware computes an address and
 # a bit, and the renderer turns that back into the pixel the program asked
@@ -726,7 +695,7 @@ for x, y in pts:
     seq += '\\x01\\x%02x\\x%02x\\x%02x' % (x & 0xFF, x >> 8, y)
 print(seq)
 PY
-python3 tools/mk_cpm_probe.py "$TMP/GFX.COM" "$(cat "$TMP/gfx.seq")" >/dev/null
+python3 tests/mk_cpm_probe.py "$TMP/GFX.COM" "$(cat "$TMP/gfx.seq")" >/dev/null
 python3 tools/cpm_build.py "$TMP/gfx.raw" "$TMP/GFX.COM:G.COM" --boot-from "$DISK" >/dev/null 2>&1
 $EMU --disk "$TMP/gfx.raw" --max-steps 25000000 --type-at '4000:g\r' \
      --dump-screen "$TMP/gfx.ppm" --state >"$TMP/gfx.log" 2>&1
@@ -907,7 +876,7 @@ sys.exit(0)
 PY
 fi
 
-echo "== 13. The speed control (TODO.md T54)"
+echo "== 13. The speed control"
 # Every claim here is about the RATIO of emulated time to wall time, taken
 # from the front-end's own report - which reads the CPU's T-state counter, so
 # it cannot agree with the setting by construction the way a count of

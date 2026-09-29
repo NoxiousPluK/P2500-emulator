@@ -15,34 +15,27 @@ extern "C" {
  * Z80A-DMA (Z8410) model for port $16 - the FDD card's data path between
  * the uPD765 (fixed I/O address $15) and RAM.
  *
- * An earlier version of this model assumed the IPL always sends one fixed
- * 20-byte register-load template at fixed byte positions. That assumption
- * broke on the READ DATA path (TODO.md ISSUE-2), which legitimately sends
- * a shorter, different stream - and reading the real datasheet (see
- * below) showed why: the Z80-DMA's register-load protocol was never
- * positional to begin with. Every byte the chip receives at the "top
- * level" (i.e. not already expected as a follow-up data byte for a
- * register group already in progress) is self-describing: specific bits
- * in that byte identify which of the seven write-register groups
- * (WR0-WR6) it belongs to, and other bits in that same byte say how many
- * of the following bytes carry more data for that group, and in what
- * order. This lets real firmware send short, incremental "only
- * reprogram what changed" streams instead of always resending
- * everything - an intentional, documented Z80-DMA feature ("Next-
- * operation loading without disturbing current operations", per the
- * Zilog Component Data Book's product summary for the Z8410).
+ * The Z80-DMA's register-load protocol is not a fixed-position template:
+ * every byte the chip receives at the "top level" (i.e. not already
+ * expected as a follow-up data byte for a register group already in
+ * progress) is self-describing. Specific bits in that byte identify which
+ * of the seven write-register groups (WR0-WR6) it belongs to, and other
+ * bits in that same byte say how many of the following bytes carry more
+ * data for that group, and in what order. This lets real firmware send
+ * short, incremental "only reprogram what changed" streams instead of
+ * always resending everything - an intentional, documented Z80-DMA
+ * feature ("Next-operation loading without disturbing current
+ * operations", per the Zilog Component Data Book's product summary for
+ * the Z8410).
  *
  * This model implements that real, general, self-describing protocol -
  * not a position-based template - based on:
  *   "Zilog Z80 Family CPU Peripherals User Manual" (UM008101-0601),
  *   chapter "Direct Memory Access", section "Write Registers"
- *   (Figures 39-46, manual pp. 92-107) - a clean, modern, typeset
- *   document. Trusted here, unlike an earlier OCR'd scan this project
- *   had already flagged as unreliable for this same chip (see TODO.md
- *   T5's original caveat about the WR0 bit layout).
+ *   (Figures 39-46, manual pp. 92-107).
  * Every group's identification bits and follow-byte rules below were
  * additionally cross-checked, byte by byte, against two independent,
- * real, captured streams from this ROM (see TODO.md ISSUE-2) and matched
+ * real, captured streams from this ROM and matched
  * exactly - including two standalone WR6 "RESET AND DISABLE INTERRUPTS"
  * ($A3) commands sent *in the middle* of the register stream, which only
  * makes sense under a self-describing reading, never a fixed template.
@@ -56,15 +49,13 @@ extern "C" {
  *   WR1: D7,D2,D1,D0 = 0,1,0,0                   - Port A device/timing
  *   WR2: D7,D2,D1,D0 = 0,0,0,0                   - Port B device/timing
  *   WR3: D7,D1,D0 = 1,0,0                        - match/mask, fast enables
- *        This project first decoded WR3 as D7=0, which made the branch
- *        dead code (every such byte is claimed by WR1 or WR2 above it) and
- *        was blamed on an irreducible ambiguity in the manual. It is not
- *        ambiguous, it is an erratum: UM008101's Figure 43 prints D7=0, but
- *        the Zilog Component Data Book (1985) WR3 bit map - the figure
- *        carrying DMA ENABLE / INTERRUPT ENABLE / STOP ON MATCH - shows
- *        D7=1, which is the only value that decodes at all against WR1/WR2
- *        and is what every other Z80-DMA implementation uses. See TODO.md
- *        T21. WR3's D6 is DMA Enable and D5 is Interrupt Enable, the
+ *        UM008101's Figure 43 prints D7=0 for WR3, but that value is
+ *        unreachable (every such byte is already claimed by WR1 or WR2
+ *        above it): it is a manual erratum. The Zilog Component Data Book
+ *        (1985) WR3 bit map - the figure carrying DMA ENABLE / INTERRUPT
+ *        ENABLE / STOP ON MATCH - shows D7=1, which is the only value that
+ *        decodes at all against WR1/WR2 and is what every other Z80-DMA
+ *        implementation uses. WR3's D6 is DMA Enable and D5 is Interrupt Enable, the
  *        documented one-byte alternative to WR6 $87/$AB.
  *   WR4: D7,D1,D0 = 1,0,1                        - mode, Port B addr, ints
  *   WR5: D7,D6,D2,D1,D0 = 1,0,0,1,0               - Ready/CE/EOB behavior
@@ -143,7 +134,7 @@ typedef struct {
     bool dma_enabled;        /* WR6 $87 seen, cleared by $83 (or WR3 D6) */
 
     /* Diagnostics sink, pointed at the machine's own by p2500_init().
-     * NULL is fine - the messages are simply discarded (TODO.md T34). */
+     * NULL is fine - the messages are simply discarded. */
     const P2500Log *log;
     P2500DmaInterruptCallback on_interrupt;
     /* Called when a command resets the chip or disables its interrupts -

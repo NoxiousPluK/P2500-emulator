@@ -9,14 +9,13 @@ extern "C" {
 #endif
 
 /*
- * Diagnostics out of the core, through the caller (TODO.md T34).
+ * Diagnostics out of the core, through the caller.
  *
- * The core used to write its 63 diagnostics straight to stderr. That is fine
- * for one front-end and useless for every other: a GUI log panel, a MAME
- * `logerror()`, a browser console and a test harness all want the same
- * messages and none of them is stderr. The message text is unchanged - the
- * `[cat]` prefix each line used to carry is now the `category` argument, and
- * the CLI's sink puts it back, so output is byte-for-byte what it was.
+ * Writing diagnostics straight to stderr would be fine for one front-end
+ * and useless for every other: a GUI log panel, a MAME `logerror()`, a
+ * browser console and a test harness all want the same messages and none
+ * of them is stderr. Each message carries a `category` argument (a short
+ * tag such as `[cat]`) so a sink can format it however it needs to.
  *
  * Levels do not gate anything here. Each device keeps its own `verbose`
  * switch, which is what decides whether a message is produced at all; the
@@ -48,7 +47,12 @@ typedef struct {
  * one is the sink's business, because a GUI list does not want it. */
 void p2500_logf(const P2500Log *log, P2500LogLevel level, const char *category,
                 const char *fmt, ...)
-#ifdef __GNUC__
+#if defined(__MINGW32__)
+    /* mingw's own runtime supports the C99 length modifiers (%zu etc.);
+     * only GCC's format-checker needs telling, since its default "printf"
+     * checking there means MSVCRT's, not the runtime actually in use. */
+    __attribute__((format(gnu_printf, 4, 5)))
+#elif defined(__GNUC__)
     __attribute__((format(printf, 4, 5)))
 #endif
     ;

@@ -13,13 +13,9 @@ extern "C" {
 
 /*
  * SESAM port ($0F) model - the copy-protection dongle / bootable-cartridge
- * slot. Protocol confirmed both from community reverse-engineering of the
- * real Philips SESAM dongle (Information from the internet/
- * 20260920-Research/findings.md in the parent research project) and from
- * this project's own ROM-level decode (ROM Dumps/CPU-Card-Boot-EPROM/
- * emulation/findings.md): OUT 15,1 (power on) / delay / OUT 15,3 (reset
- * internal read-address counter) / repeated IN 15 (auto-incrementing,
- * no re-addressing) / OUT 15,0 (power off).
+ * slot. Protocol: OUT 15,1 (power on) / delay / OUT 15,3 (reset internal
+ * read-address counter) / repeated IN 15 (auto-incrementing, no
+ * re-addressing) / OUT 15,0 (power off).
  *
  * With no stream loaded, every read returns $FF - "nothing plugged in",
  * matching the ROM's own presence check (byte 0 must be $00 for the
@@ -34,7 +30,7 @@ typedef struct {
     unsigned long reads;  /* statistics - a protection check shows up here */
     unsigned long writes;
     /* Diagnostics sink, pointed at the machine's own by p2500_init().
-     * NULL is fine - the messages are simply discarded (TODO.md T34). */
+     * NULL is fine - the messages are simply discarded. */
     const P2500Log *log;
     bool verbose;
 } P2500Sesam;

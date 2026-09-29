@@ -6,8 +6,8 @@ void p2500_ctc_init(P2500Ctc *ctc) {
     /* Re-initialising a device must not silently take its diagnostics
      * away with it: a caller that swaps a keystroke queue in, as the
      * CLI does, would otherwise lose every message the device had to
-     * make from then on - a silent drop, which is the failure mode
-     * this project has paid for most often (TODO.md T34). */
+     * make from then on - a silent drop, which is a failure mode worth
+     * guarding against explicitly. */
     const P2500Log *log = ctc->log;
     memset(ctc, 0, sizeof(*ctc));
     ctc->log = log;
@@ -99,8 +99,8 @@ void p2500_ctc_write(P2500Ctc *ctc, int channel, uint8_t value) {
 uint8_t p2500_ctc_read(P2500Ctc *ctc, int channel) {
     if (channel < 0 || channel >= P2500_CTC_CHANNELS) return 0xFF;
     /* Reading a channel returns the live down-counter. It is a true
-     * 8-bit value now that the prescaler is a real clock divider rather
-     * than folded into the count (TODO.md T18), so no rescaling. */
+     * 8-bit value since the prescaler is a real clock divider rather
+     * than folded into the count, so no rescaling. */
     return (uint8_t)(ctc->counter[channel] & 0xFF);
 }
 

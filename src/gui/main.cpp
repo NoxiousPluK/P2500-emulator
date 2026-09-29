@@ -1,37 +1,36 @@
 /*
- * p2500-gui - SDL3 + Dear ImGui front-end (TODO.md T36-T39).
+ * p2500-gui - SDL3 + Dear ImGui front-end.
  *
  * The only C++ in the tree, and it stays that way: libp2500.a is C11 with
  * no dependencies and nothing outside src/gui/ may include ImGui.
  *
  * Uses SDL3's callback app model (SDL_AppInit/Iterate/Event) rather than a
  * hand-rolled main loop: it is the shape SDL3 is designed around and it is
- * what makes an Emscripten build (T40) nearly free.
+ * what makes an Emscripten build nearly free.
  *
  * Single-threaded on purpose. The machine runs about ten times faster than
  * real time, so one frame's worth of emulation per presented frame has
  * comfortable headroom, and one thread is what lets the debugger panels be
  * written without a single lock.
  *
- * Pacing (T35): one video field is P2500_TSTATES_PER_FRAME T-states, which
+ * Pacing: one video field is P2500_TSTATES_PER_FRAME T-states, which
  * is the same event as the machine's own 50 Hz clock strobe. That makes one
  * field per iteration the right unit of work - but it says nothing about
  * how often an iteration happens, and SDL_AppIterate is called as fast as
- * the host allows. Without a throttle the guest ran at whatever rate that
- * was, tens of times too fast; the comment that used to sit here claimed
- * the two clocks matched "by construction" and was simply wrong. They match
- * because pace_field() makes them, against the wall clock - so the speed
+ * the host allows. Without a throttle the guest would run at whatever rate
+ * that is, tens of times too fast. The two clocks match because
+ * pace_field() makes them, against the wall clock - so the speed
  * does not depend on the monitor's refresh rate either.
  *
- * The speed setting (T54) does not change that period. It changes how much
+ * The speed setting does not change that period. It changes how much
  * emulated time one iteration covers: half a field at 0.5x, two fields at
  * 2x. Keeping the period fixed is what holds the picture at 50 Hz however
  * slowly the guest is running, and it is also the only way up - the
  * presented frame rate is capped by vsync, so a 4x speed cannot come from
  * presenting four times as often.
  *
- * The menu bar is drawn by ImGui rather than being a native one. See
- * TODO.md T39 for why: the native options cover Windows and macOS, and on
+ * The menu bar is drawn by ImGui rather than being a native one: the
+ * native options cover Windows and macOS, and on
  * Wayland there is no way to attach a GTK menu to an SDL window nor a
  * global menu to export to.
  */
@@ -81,7 +80,7 @@ struct App {
     struct { unsigned long at_ms; const char *text; bool done; } push[MAX_PUSHES];
     int pushes;
     bool paused;
-    /* Speed (T54): a multiplier on how fast emulated time runs against the
+    /* Speed: a multiplier on how fast emulated time runs against the
      * wall clock. 1 is the real machine; 0 means unlimited, i.e. whatever
      * this host manages. */
     float speed = 1.0f;
@@ -104,7 +103,7 @@ struct App {
      * keystrokes. Checked means the machine behaves as shipped. */
     bool caps_lock;
     bool quit;
-    /* Watches, counters and breakpoints, shared with the CLI (TODO.md T39).
+    /* Watches, counters and breakpoints, shared with the CLI.
      * Empty by default, which is what lets the run loop keep its
      * whole-frame fast path until the user actually asks for something. */
     P2500Debug dbg;
@@ -137,7 +136,7 @@ struct App {
 };
 
 static const P2500Palette PALETTE = {
-    0xFF46FF00u,     /* fg: green phosphor, matching tools/render_vram.py */
+    0xFF46FF00u,     /* fg: green phosphor, matching tests/render_vram.py */
     0xFF080C08u,     /* bg */
     0xFF288C00u,     /* fg_dim */
 };
@@ -166,7 +165,7 @@ static uint8_t *read_whole_file(const char *path, size_t *out_size)
 }
 
 /*
- * Keyboard encoding, per TODO.md T38. Printable characters come from
+ * Keyboard encoding. Printable characters come from
  * SDL_EVENT_TEXT_INPUT rather than from keysyms, because this machine's
  * keyboard is a multilingual European one and a naive keysym mapping gets
  * the shifted and accented characters wrong. Only the keys that have no
@@ -403,7 +402,7 @@ static void speed_menu_items(App *app)
     }
 }
 
-/* CBIOS supports A:, B: and C: (TODO.md T44), so the dialog is opened per
+/* CBIOS supports A:, B: and C:, so the dialog is opened per
  * drive and the chosen unit travels with the pending path. */
 static void open_disk_dialog(App *app, unsigned unit)
 {
@@ -734,8 +733,8 @@ static void draw_menu_bar(App *app)
             draw_run_glyph(dl, ImVec2(run_centre, mid_y), gh * 0.86f, app->paused,
                            lamp_paint(dl, run, app->paused));
 
-            /* A:, B: and C: - the three drives CBIOS actually supports
-             * (TODO.md T44). Lit means media is attached, which is not the
+            /* A:, B: and C: - the three drives CBIOS actually supports.
+             * Lit means media is attached, which is not the
              * same as the guest having logged the drive in, which is why the
              * tooltip says so. Left click loads, right click ejects. */
             for (unsigned u = 0; u < 3; u++) {
@@ -1064,7 +1063,7 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[])
         p2500_fdc_attach(&app->m.fdc, u, app->disk[u], n);
         const char *base = SDL_strrchr(disks[u], '/');
         SDL_strlcpy(app->disk_name[u], base ? base + 1 : disks[u], sizeof app->disk_name[u]);
-        SDL_Log("attached %c: %s (%zu bytes)", 'A' + (int)u, disks[u], n);
+        SDL_Log("attached %c: %s (%lu bytes)", 'A' + (int)u, disks[u], (unsigned long)n);
     }
 
     if (!SDL_Init(SDL_INIT_VIDEO)) {
@@ -1142,7 +1141,7 @@ SDL_AppResult SDL_AppEvent(void *appstate, SDL_Event *event)
     case SDL_EVENT_TEXT_INPUT:
         if (ui_has_keyboard) return SDL_APP_CONTINUE;
         /* One byte per character the platform produced. Anything outside
-         * 7-bit ASCII needs the $E274 dead-key table decoded first (T38), so
+         * 7-bit ASCII needs the $E274 dead-key table decoded first, so
          * it is dropped rather than guessed at. */
         for (const char *c = event->text.text; *c; c++) {
             unsigned char b = (unsigned char)*c;
@@ -1306,21 +1305,14 @@ SDL_AppResult SDL_AppIterate(void *appstate)
             SDL_Log("ui keyboard: %s", captured ? "captured by a panel"
                                                 : "released to the P2500");
         }
-        /* Re-arm the guest's keyboard.
-         *
-         * ImGui's SDL3 backend calls SDL_StopTextInput() when one of its
-         * text fields loses focus (imgui_impl_sdl3.cpp, PlatformSetImeData),
-         * and that switches SDL_EVENT_TEXT_INPUT off for the whole window.
-         * Nothing turns it back on: as far as the backend is concerned
-         * nobody wants text any more. But the guest always does - that event
-         * is where every printable key it receives comes from - so one use
-         * of any debugger address field left the machine untypeable until
-         * restart. Key events were unaffected, which is why the menus, the
-         * F-keys and the cursor keys went on working and hid it.
-         *
-         * Checked every frame rather than on a transition: the backend can
-         * stop text input at moments we do not model, and asking SDL what
-         * the state actually is costs nothing. */
+        /* Re-arm the guest's keyboard. ImGui's SDL3 backend calls
+         * SDL_StopTextInput() when one of its text fields loses focus, which
+         * switches SDL_EVENT_TEXT_INPUT off for the whole window and leaves
+         * it off - that event is where every printable key the guest
+         * receives comes from, so it must be re-enabled once a panel field
+         * is done with it. Checked every frame rather than on a transition:
+         * the backend can stop text input at moments we do not model, and
+         * asking SDL what the state actually is costs nothing. */
         if (!captured && !SDL_TextInputActive(app->window))
             SDL_StartTextInput(app->window);
         if (app->dbg.watches != app->watches_was) {
@@ -1394,7 +1386,7 @@ SDL_AppResult SDL_AppIterate(void *appstate)
 
     /* Headless self-check: run a fixed number of fields, save what is on
      * screen, and exit. This is what lets the front-end be tested with no
-     * display - see tools/run_tests.sh. */
+     * display - see tests/run_tests.sh. */
     if (app->frame_limit && app->frames >= app->frame_limit) {
         if (app->shot_path) write_ppm(app);
         if (app->win_shot_path) write_window_ppm(app);

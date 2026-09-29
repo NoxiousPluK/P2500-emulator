@@ -6,8 +6,8 @@ void p2500_pio_init(P2500Pio *pio) {
     /* Re-initialising a device must not silently take its diagnostics
      * away with it: a caller that swaps a keystroke queue in, as the
      * CLI does, would otherwise lose every message the device had to
-     * make from then on - a silent drop, which is the failure mode
-     * this project has paid for most often (TODO.md T34). */
+     * make from then on - a silent drop, which is a failure mode worth
+     * guarding against explicitly. */
     const P2500Log *log = pio->log;
     memset(pio, 0, sizeof(*pio));
     pio->log = log;

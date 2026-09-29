@@ -11,7 +11,7 @@ extern "C" {
 #endif
 
 /*
- * Z80 IM2 interrupt controller - the daisy chain (TODO.md T17).
+ * Z80 IM2 interrupt controller - the daisy chain.
  *
  * Why this exists: the vendored CPU core (src/vendor/superzazu_z80/z80.c)
  * has a *single* pending-interrupt slot (`int_pending` / `int_data`), so
@@ -37,8 +37,8 @@ extern "C" {
  *    why RETI, uniquely, has side effects outside the CPU.
  *  - A device is also released when it is reset or has its interrupts
  *    disabled by a command written to it. This matters here: the IPL's own
- *    handlers exit via "LD SP,($FF26)" + JP and never execute RETI (see
- *    TODO.md's RAM address table), so on real hardware the FDD card's PIO
+ *    handlers exit via "LD SP,($FF26)" + JP and never execute RETI, so on
+ *    real hardware the FDD card's PIO
  *    and DMA must be released some other way - and they are, by the
  *    interrupt-disable control words the floppy driver writes around every
  *    critical section ($73/$F3 to the PIO, WR6 $A3 "reset and disable
@@ -71,7 +71,7 @@ extern "C" {
  * Where the CTC sits relative to the FDD card is still genuinely open: the
  * IPL never programs the CTC at all, so nothing from that era constrains
  * it, and it is only observable when a CTC channel and a disk interrupt
- * collide. It stays on ROADMAP.md's hardware measurement list. The order
+ * collide. It remains unverified pending hardware measurement. The order
  * below puts it last, which is the conservative reading - a CTC tick then
  * cannot pre-empt a disk handler that has released itself early with the
  * same EI/RETI trick.
@@ -99,7 +99,7 @@ typedef struct {
     unsigned long requests[P2500_INT_SOURCES];      /* statistics, for the harness */
     unsigned long acknowledged[P2500_INT_SOURCES];
     /* Diagnostics sink, pointed at the machine's own by p2500_init().
-     * NULL is fine - the messages are simply discarded (TODO.md T34). */
+     * NULL is fine - the messages are simply discarded. */
     const P2500Log *log;
     bool verbose;
 } P2500IntCtl;

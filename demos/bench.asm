@@ -1,5 +1,5 @@
 ; ---------------------------------------------------------------------------
-; BENCH.COM - what this machine's memory and firmware actually cost.
+; BENCH.COM - small P2500/P2000B benchmark.
 ;
 ; Every figure here is a wall-clock measurement against CBIOS's 50 Hz tick
 ; counter, so the same binary gives comparable numbers on the emulator and on
@@ -21,7 +21,7 @@
 org $0100
 
 BDOS      equ $0005
-TICKS     equ $F436          ; CBIOS's 50 Hz counter; see TODO.md T47
+TICKS     equ $F436          ; CBIOS's 50 Hz counter
 PORT_BANK equ $05
 BANK_VID  equ $08
 BANK_MAIN equ $0F

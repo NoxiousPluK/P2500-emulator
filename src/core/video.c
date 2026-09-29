@@ -71,7 +71,7 @@ void p2500_video_render(const P2500Machine *m, const P2500Palette *pal,
          *     bit  = 7 - (x % 8)
          *
          * Derived by driving CBIOS's own set-point call and reading back
-         * where it wrote (TODO.md T47), at both ends of both axes and for
+         * where it wrote, at both ends of both axes and for
          * every raster address - not from the manual, which gives the
          * resolution but not the layout.
          */

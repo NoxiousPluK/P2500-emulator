@@ -10,8 +10,8 @@ Syntax is normalised away on both sides - hex literals become #<decimal>,
 z80dasm's `$+n` relative form becomes the absolute target - so what is left
 to compare is the mnemonic, the operands and the boundaries.
 
-    tools/disasm_crosscheck.py            # the IPL ROM plus generated blobs
-    tools/disasm_crosscheck.py --rounds 8 # more random coverage
+    tests/disasm_crosscheck.py            # the IPL ROM plus generated blobs
+    tests/disasm_crosscheck.py --rounds 8 # more random coverage
 """
 import argparse, os, random, re, shutil, subprocess, sys, tempfile
 

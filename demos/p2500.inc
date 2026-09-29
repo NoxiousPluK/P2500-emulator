@@ -9,7 +9,7 @@
 ;     addr = VRAM + (y & 3) * 4096 + (y >> 2) * 64 + x / 8
 ;
 ; That is why row_addr looks the way it does, and why next_row adds $1000
-; three times and then steps back by 12224. See TODO.md T47 - the layout was
+; three times and then steps back by 12224. The layout was
 ; measured by driving CBIOS's own set-point call, not taken from a manual.
 ;
 ; Drawing goes straight into video memory rather than through CBIOS: one

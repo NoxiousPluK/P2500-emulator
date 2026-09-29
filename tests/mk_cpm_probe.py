@@ -28,11 +28,11 @@ not much of a probe.
     msg: ...
 
 usage:
-    tools/mk_cpm_probe.py OUT.COM 'text with \\e and \\xHH escapes'
+    tests/mk_cpm_probe.py OUT.COM 'text with \\e and \\xHH escapes'
                           [--pad-records N]
 
 example (does ESC 0 P really mean reverse video?):
-    tools/mk_cpm_probe.py /tmp/ATTR.COM '\\e0PREVERSED\\e0@ plain'
+    tests/mk_cpm_probe.py /tmp/ATTR.COM '\\e0PREVERSED\\e0@ plain'
 """
 
 import sys

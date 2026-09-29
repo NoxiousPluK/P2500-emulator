@@ -20,13 +20,13 @@ extern "C" {
 
 /*
  * P2500 CPU-card machine model. Port $05 bank-switches the low 4KB between
- * the IPL EPROM and RAM (see TODO.md T1): the EPROM image lives in its own
+ * the IPL EPROM and RAM: the EPROM image lives in its own
  * 4KB array and is selected on read only; writes to $0000-$0FFF always
  * land in the 64K RAM image, so the ROM's own RAM test (which banks the
  * EPROM out first) works without erasing it.
  *
- * Port dispatch, reverse-engineered from the ROM itself (see ../TODO.md):
- *   $00-$03  Z80A-CTC, one channel per port (HWTEST V100; TODO.md T16) -
+ * Port dispatch, reverse-engineered from the ROM itself:
+ *   $00-$03  Z80A-CTC, one channel per port (HWTEST V100) -
  *            not touched by the IPL, needed once CP/M's CBIOS starts
  *            bit-banging the keyboard/printer serial lines against it
  *   $04      serial TX data bit (write; CBIOS bit-bangs it against CTC
@@ -35,32 +35,26 @@ extern "C" {
  *            strobe - see keyboard.h)
  *   $05      write: bank select ($07 normal, $0F EPROM-out/RAM-in, $00
  *            video RAM window at $8000-$BFFF - the video-bank distinction
- *            isn't modeled yet, see TODO.md T1 "Extra")
+ *            isn't modeled yet)
  *            read:  serial input lines. Bit 7 is RXD, sampled once per bit
  *            cell by the CTC channel-1 receive ISR; bit 6 is a transmit
  *            handshake/ready input the channel-0 transmit ISR waits on
- *            before shifting a byte out. See TODO.md T20 and ctc.h.
+ *            before shifting a byte out. See ctc.h.
  *   $08/$09  MC6845 CRTC (index/data)
  *   $0F      SESAM port (dongle / bootable-cartridge probe)
  *   $10/$11  Z80A-PIO data registers (Port A/B)
  *   $12/$13  Z80A-PIO control registers (Port A/B)
  *   $14/$15  uPD765 FDC (main status / data)
  *   $16      Z80A-DMA register-load stream
- *   $0A      diagnostic/POST latch, logged only (TODO.md T15)
- *
- * See ../README.md and ROM Dumps/CPU-Card-Boot-EPROM/emulation/findings.md
- * (in the parent research project) for the reverse-engineering this is
- * built on.
+ *   $0A      diagnostic/POST latch, logged only
  */
 
 #define P2500_RAM_SIZE 0x10000
 #define P2500_EPROM_SIZE 0x1000
 
 /* The video card carries its own DRAM bank, and the port $05 latch gates
- * $8000-$BFFF between it and main DRAM (TODO.md T1 "Extra", and
- * ../Tracing/P2500-predicted-wiring-from-firmware.md C3: "latch bits 0-2
- * gate the $8000-$BFFF window between main DRAM and the video card's DRAM,
- * all-clear = video").
+ * $8000-$BFFF between it and main DRAM: bits 0-2 all clear selects video
+ * DRAM, all set selects main DRAM.
  *
  * The four values ever written agree with that reading exactly:
  *   $07  bits 0-2 set   -> main DRAM, EPROM in    (IPL normal)
@@ -76,11 +70,11 @@ extern "C" {
 #define P2500_VRAM_BASE 0x8000
 #define P2500_BANK_VIDEO_MASK 0x07 /* all clear selects the video card's DRAM */
 
-/* The video card's DRAM is 16K words x 12 bits, not a flat 16 KB byte bank
- * (TODO.md T27). Four independent facts agree:
+/* The video card's DRAM is 16K words x 12 bits, not a flat 16 KB byte bank.
+ * Four independent facts agree:
  *
  *   - The card carries exactly 12 MB8116E (16 Kbit x 1) parts, i.e. 12
- *     one-bit planes 16K deep (../Actual P2500 hardware/P2500 Video Card/).
+ *     one-bit planes 16K deep.
  *   - The $8000-$BFFF window is 16 KB, which is 16K addresses - one per
  *     word. Eight of the twelve planes are the byte the CPU sees.
  *   - The P2219 CP/M manual documents exactly four screen attributes:
@@ -96,7 +90,7 @@ extern "C" {
  * $8000-$BFFF window is stored as one 12-bit word, eight bits from the data
  * bus and four from the latch. Decoded from CBIOS's screen driver, which
  * builds the write as executable code and runs it - the 4-byte template at
- * $F454 is literally "LD A,<nibble> / OUT ($0A),A" (TODO.md T27).
+ * $F454 is literally "LD A,<nibble> / OUT ($0A),A".
  *
  * That resolves several things at once: why port $05's six spare bits-0-2
  * combinations are never used, why a CGA-style char/attribute interleave
@@ -106,10 +100,10 @@ extern "C" {
  * before anything is printed. */
 #define P2500_VRAM_ATTR_MASK 0x0F
 
-/* Z8400A (Z80A) at 4 MHz - confirmed from the real CPU card's silicon, see
- * ../P2500-general-findings.md. Everything time-based in this emulator is
- * derived from this one number and the CPU core's T-state counter; there
- * are no independent timing constants. */
+/* Z8400A (Z80A) at 4 MHz - confirmed from the real CPU card's silicon.
+ * Everything time-based in this emulator is derived from this one number
+ * and the CPU core's T-state counter; there are no independent timing
+ * constants. */
 #define P2500_CPU_HZ 4000000u
 
 /* CTC channel 2's CLK/TRG source: a periodic external strobe that CBIOS's
@@ -117,8 +111,8 @@ extern "C" {
  * ctc.h). WHAT ACTUALLY DRIVES IT IS NOT KNOWN - on a Philips machine the
  * two candidates are a 50 Hz mains-derived pulse and the video card's frame
  * rate, and both are 50 Hz, which is why that is the value used here. It is
- * an assumption, named in one place, and on ROADMAP.md's hardware
- * measurement list; nothing else in the model depends on it. */
+ * an assumption, named in one place and pending hardware measurement;
+ * nothing else in the model depends on it. */
 #define P2500_CLOCK_TICK_HZ 50u
 
 /* How often a queued --type byte is offered to CTC channel 3 (see
@@ -129,7 +123,7 @@ extern "C" {
  * needing to know when the machine started listening. */
 #define P2500_KEYSTROKE_HZ 100u
 
-/* Which bits of port $05 read back as what (TODO.md T20). */
+/* Which bits of port $05 read back as what. */
 #define P2500_PORT05_RXD_BIT 7
 #define P2500_PORT05_TX_READY_BIT 6
 
@@ -140,7 +134,7 @@ extern "C" {
 #define P2500_CTC_KEYBOARD_CHANNEL 3
 
 /* Which Z80A-PIO Port A bit the FDD card's uPD765 INT line is wired to -
- * not yet confirmed by hardware tracing (TODO.md T4), kept as a single
+ * not yet confirmed by hardware tracing, kept as a single
  * named constant so it can be flipped in one place. */
 #define P2500_FDC_PIO_PORT P2500_PIO_PORT_A
 #define P2500_FDC_PIO_BIT 0
@@ -158,9 +152,8 @@ typedef struct {
     uint8_t bank; /* last value written to port $05 */
     unsigned long unknown_bank_writes; /* OUT ($05) values we cannot decode */
     /* Ports this emulator has no model for. Counted unconditionally, not
-     * just under --verbose-io: an unhandled port is a silent drop, and a
-     * silent drop is how this project has lost the most time. The exit
-     * report prints any that are non-zero. */
+     * just under --verbose-io, so an unhandled port shows up rather than
+     * being a silent drop. The exit report prints any that are non-zero. */
     unsigned long unhandled_out[256];
     unsigned long unhandled_in[256];
 
@@ -173,19 +166,19 @@ typedef struct {
     P2500Serial serial;
 
     /* MC6845 CRTC: 18 8-bit registers R0-R17, selected by $08, read/written
-     * via $09. It really is 18, not 16 (TODO.md T26): masking the index to
+     * via $09. It really is 18, not 16: masking the index to
      * 4 bits aliased R16/R17, the light-pen registers, onto R0/R1, the
      * horizontal total and displayed counts that the geometry depends on. */
     uint8_t crtc_regs[18];
     uint8_t crtc_index;
 
-    /* IM2 daisy chain (TODO.md T17). `int_offered` is the source whose
+    /* IM2 daisy chain. `int_offered` is the source whose
      * vector is currently sitting in the CPU core's single pending slot, or
      * -1; the core clearing int_pending is how we learn it was taken. */
     P2500IntCtl intctl;
     int int_offered;
 
-    /* Serial input lines read back on port $05 (TODO.md T20). Idle high:
+    /* Serial input lines read back on port $05. Idle high:
      * RXD marking, and the transmit handshake asserting "ready", which is
      * what an unplugged line with a pull-up looks like. */
     bool serial_rxd;
@@ -216,7 +209,7 @@ void p2500_set_log(P2500Machine *m, P2500LogFn fn, void *userdata);
 
 /* Power-cycle the machine while KEEPING everything a front-end attached:
  * the boot EPROM and character ROM images, the mounted disk, the SESAM
- * stream and any scripted keystrokes (TODO.md T34). Everything else - CPU,
+ * stream and any scripted keystrokes. Everything else - CPU,
  * RAM, video memory, every device, every counter - is cleared.
  *
  * Implemented as "copy the attachments aside, p2500_init(), put them back",
@@ -226,7 +219,7 @@ void p2500_reset(P2500Machine *m);
 
 /* T-states in one 50 Hz field. The machine's own clock strobe and a
  * front-end's frame boundary are the same event, so a GUI paces itself by
- * running one of these per presented frame (TODO.md T35). */
+ * running one of these per presented frame. */
 #define P2500_TSTATES_PER_FRAME (P2500_CPU_HZ / P2500_CLOCK_TICK_HZ)
 
 /* Step until the CPU's T-state counter has advanced by at least `tstates`.
@@ -247,7 +240,7 @@ bool p2500_video_window_selected(const P2500Machine *m);
  * select the $8000-$BFFF window and only "all set" (main DRAM) and "all
  * clear" (video DRAM) have ever been observed; the other six combinations
  * are unaccounted for and are where the video card's attribute plane most
- * likely lives (TODO.md T27). Such a write is currently routed to main DRAM,
+ * likely lives. Such a write is currently routed to main DRAM,
  * which would be silently wrong - so it is counted and logged instead. */
 bool p2500_bank_is_unknown(const P2500Machine *m);
 

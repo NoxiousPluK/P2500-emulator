@@ -1556,7 +1556,7 @@ void exec_opcode_ed(z80* const z, uint8_t opcode) {
     ret(z);
     break; // retn
   case 0x4D: // reti
-    /* LOCAL ADDITION (P2500 TODO.md T17): let the interrupt daisy chain
+    /* LOCAL ADDITION to the vendored core: let the interrupt daisy chain
      * see the RETI, exactly as real peripherals do by watching the bus. */
     if (z->on_reti) z->on_reti(z);
     ret(z);

@@ -4,7 +4,7 @@
 
 /* Port $05 bank latch, bit 3: set (as in $0F) banks the EPROM out and
  * exposes RAM at $0000-$0FFF instead; clear (as in $07, $00) exposes the
- * EPROM. See TODO.md T1. */
+ * EPROM. */
 #define P2500_BANK_RAM_LOW_BIT 0x08
 
 bool p2500_video_window_selected(const P2500Machine *m) {
@@ -34,7 +34,7 @@ static void mem_write(void *userdata, uint16_t addr, uint8_t value) {
     P2500Machine *m = (P2500Machine *)userdata;
     /* Writes to $0000-$0FFF always land in RAM - the EPROM is read-only and
      * selected on read only, which is what lets the ROM's own RAM test run
-     * over its own address range without erasing itself (TODO.md T1). */
+     * over its own address range without erasing itself. */
     if (addr >= P2500_VRAM_BASE && addr < P2500_VRAM_BASE + P2500_VRAM_SIZE &&
         p2500_video_window_selected(m)) {
         m->vram[addr - P2500_VRAM_BASE] = value;
@@ -49,18 +49,14 @@ static void mem_write(void *userdata, uint16_t addr, uint8_t value) {
 /* IM2 CALLs the word stored at (I<<8)|vector - here that word is usually
  * the address of a small fixed "JP nn" trampoline (e.g. $FE04/$FE07 for
  * the IPL's own table at page $FE), whose *operand* is the real,
- * sometimes runtime-patched destination (see ../README.md and
- * ../../ROM Dumps/CPU-Card-Boot-EPROM/disassembly/findings.md).
+ * sometimes runtime-patched destination.
  *
  * The table page is NOT a fixed constant: the IPL sets I=$FE, but once
- * control passes into CP/M's own CBIOS (Phase 2, TODO.md ISSUE-4's
- * postscript) it sets up its own IM2 table at I=$FF instead - confirmed
- * live (SYSPBI.PHI's own RECALIBRATE interrupt was being silently
- * suppressed here when this was still hardcoded to $FE). So this reads
- * I live off the CPU on every delivery instead of assuming one program's
- * choice of page.
+ * control passes into CP/M's own CBIOS, it sets up its own IM2 table at
+ * I=$FF instead. So this reads I live off the CPU on every delivery instead
+ * of assuming one program's choice of page.
  *
- * The only remaining gate (TODO.md T11): I must be genuinely initialized
+ * The only remaining gate: I must be genuinely initialized
  * to *some* real table page, not the z80 core's power-on reset value of
  * $00. Until whichever program is running executes "LD A,nn / LD I,A",
  * I is still $00, so (I<<8)|vector points into whatever happens to be at
@@ -68,14 +64,10 @@ static void mem_write(void *userdata, uint16_t addr, uint8_t value) {
  * etc. Delivering there hijacks flow into memory that was never meant to
  * be an interrupt handler at all.
  *
- * Earlier versions of this function also suppressed delivery into the
- * ROM's $03DB no-op stub or into unpatched/zeroed memory ($FF/$00) - a
- * workaround for the phantom CTC model over-firing before T3/T4 replaced
- * it with real PIO/DMA models. Now that interrupts only fire from real,
- * edge-triggered hardware conditions (pio.c's evaluate_interrupt, dma.c's
- * command completion), that workaround is gone; if a target still looks
- * wrong it means an upstream model is wrong, not something to paper over
- * here. */
+ * Interrupts only fire from real, edge-triggered hardware conditions
+ * (pio.c's evaluate_interrupt, dma.c's command completion); if a target
+ * still looks wrong it means an upstream model is wrong, not something to
+ * paper over here. */
 static bool resolve_im2_target(P2500Machine *m, uint8_t vector, uint16_t *call_target_out,
                                 uint16_t *final_dest_out) {
     *call_target_out = 0;
@@ -95,9 +87,9 @@ static bool resolve_im2_target(P2500Machine *m, uint8_t vector, uint16_t *call_t
 }
 
 /* The uPD765's own INT line doesn't drive the CPU directly - it's wired
- * into a Z80A-PIO input bit (TODO.md T4), and the PIO decides whether that
- * becomes a CPU interrupt. `fdc.int_line` is the real, held pin level
- * (TODO.md T9); p2500_step() samples it into the PIO input bit every step,
+ * into a Z80A-PIO input bit, and the PIO decides whether that
+ * becomes a CPU interrupt. `fdc.int_line` is the real, held pin level;
+ * p2500_step() samples it into the PIO input bit every step,
  * so both interrupt-driven delivery (PIO fires on the false->true edge)
  * and direct polling (e.g. the ROM's own "IN A,($10)/RRA" at $0832) see
  * the same level a real driver would. This callback is just an edge log. */
@@ -120,10 +112,10 @@ static void log_request(P2500Machine *m, int source, uint8_t vector) {
 }
 
 /* Every peripheral routes its interrupt request through the daisy chain in
- * intctl.c now, instead of calling z80_gen_int() directly (TODO.md T17). A
- * request is *held* until the CPU acknowledges it, so two devices asking in
- * the same instruction no longer overwrite each other - which they did,
- * constantly and silently. p2500_step() below does the arbitration. */
+ * intctl.c, instead of calling z80_gen_int() directly. A request is *held*
+ * until the CPU acknowledges it, so two devices asking in the same
+ * instruction cannot overwrite each other. p2500_step() below does the
+ * arbitration. */
 static void ctc_interrupt_trampoline(void *userdata, int channel, uint8_t vector) {
     P2500Machine *m = (P2500Machine *)userdata;
     int source = P2500_INT_CTC0 + channel;
@@ -140,7 +132,7 @@ static void pio_interrupt_trampoline(void *userdata, uint8_t vector) {
     P2500Machine *m = (P2500Machine *)userdata;
     /* pio.c fires per port, but its callback predates needing to know
      * which; port A is the only one this machine arms interrupts on (the
-     * FDC INT line, TODO.md T4) and port B's I/O mask makes it inputs
+     * FDC INT line) and port B's I/O mask makes it inputs
      * only. Distinguish on the vector, which the two ports program
      * separately. */
     int source = (m->pio.vector_set[P2500_PIO_PORT_B] &&
@@ -181,13 +173,11 @@ static uint8_t port_in(z80 *cpu, uint8_t port) {
     case 0x00: case 0x01: case 0x02: case 0x03:
         return p2500_ctc_read(&m->ctc, port);
     case 0x05: {
-        /* Serial input lines (TODO.md T20). CBIOS's CTC channel-1 receive
+        /* Serial input lines. CBIOS's CTC channel-1 receive
          * ISR samples bit 7 once per bit cell ($F6A9: IN A,($05) / RLA),
          * and its channel-0 transmit ISR gates on bit 6 ($F5AD: IN A,($05)
          * / BIT 6,A). Everything else reads back as a pulled-up 1 until
-         * something is traced reading it - see ../Tracing/
-         * P2500-predicted-wiring-from-firmware.md C4, which predicted this
-         * port was readable before any code that reads it had been found. */
+         * something is traced reading it. */
         uint8_t v = 0xFF;
         if (!m->serial_rxd) v &= (uint8_t)~(1u << P2500_PORT05_RXD_BIT);
         if (!m->serial_tx_ready) v &= (uint8_t)~(1u << P2500_PORT05_TX_READY_BIT);
@@ -242,10 +232,10 @@ static void port_out(z80 *cpu, uint8_t port, uint8_t value) {
         if (p2500_bank_is_unknown(m)) {
             /* Never seen in any traced run or anywhere in the disk corpus.
              * If this ever fires, it is the single best lead on how the CPU
-             * reaches the video card's attribute plane - TODO.md T27. */
+             * reaches the video card's attribute plane. */
             m->unknown_bank_writes++;
             p2500_logf(&m->log, P2500_LOG_TRACE, "bank", "OUT ($05) <- $%02X selects an unknown $8000-$BFFF "
-                       "window (bits 0-2 = %u); routed to main DRAM. See TODO.md T27.",
+                       "window (bits 0-2 = %u); routed to main DRAM.",
                        value, (unsigned)(value & P2500_BANK_VIDEO_MASK));
         } else if (m->verbose_unknown_ports) {
             p2500_logf(&m->log, P2500_LOG_TRACE, "io", "OUT ($05) <- $%02X (bank select)", value);
@@ -270,17 +260,17 @@ static void port_out(z80 *cpu, uint8_t port, uint8_t value) {
         p2500_pio_write_data(&m->pio, P2500_PIO_PORT_B, value);
         break;
     case 0x12: {
-        /* TODO.md ISSUE-1 fix 2 / ISSUE-3: the first two times this ROM
+        /* The first two times this ROM
          * arms PIO port A (the FDC's INT line) interrupts, stand in for
          * the real uPD765's post-reset unsolicited interrupts - see
          * p2500_fdc_raise_startup_interrupt's doc comment.
          *
          * Delivered as a one-shot pulse here, deliberately NOT via
-         * fdc->int_line's normal held-level path (T9): that path assumes
+         * fdc->int_line's normal held-level path: that path assumes
          * whatever ISR runs will read a SENSE INTERRUPT STATUS result to
          * clear it, which is true for the first synthetic interrupt's
-         * handler but not the second's (confirmed by tracing both ISRs -
-         * see ISSUE-3) - holding the level for a consumer that never
+         * handler but not the second's (confirmed by tracing both ISRs) -
+         * holding the level for a consumer that never
          * clears it left it stuck asserted, spuriously re-firing the next
          * time PIO interrupts happened to be re-armed for something else
          * entirely. A synthetic "the interrupt was already pending"
@@ -305,7 +295,7 @@ static void port_out(z80 *cpu, uint8_t port, uint8_t value) {
         p2500_dma_write(&m->dma, value);
         break;
     case 0x0A:
-        /* The video card's attribute latch (TODO.md T27). The low nibble is
+        /* The video card's attribute latch. The low nibble is
          * the 4-bit attribute every subsequent write into the video window
          * stores alongside the character code. CBIOS's ESC 0 handler reaches
          * this port through generated code: the template at $F454 is
@@ -366,8 +356,8 @@ void p2500_init(P2500Machine *m) {
     p2500_keyboard_init(&m->keyboard, NULL, 0);
     p2500_serial_init(&m->serial);
 
-    /* Every device writes its diagnostics through the machine's one sink
-     * (TODO.md T34). Pointed here rather than copied so p2500_set_log()
+    /* Every device writes its diagnostics through the machine's one sink.
+     * Pointed here rather than copied so p2500_set_log()
      * stays a single assignment; it is why P2500Machine must not be moved
      * after init, as m->fdc.ram already required. */
     m->intctl.log = &m->log;

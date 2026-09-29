@@ -36,8 +36,8 @@ void p2500_fdc_init(P2500Fdc *fdc, const uint8_t *disk, size_t disk_size) {
     /* Re-initialising a device must not silently take its diagnostics
      * away with it: a caller that swaps a keystroke queue in, as the
      * CLI does, would otherwise lose every message the device had to
-     * make from then on - a silent drop, which is the failure mode
-     * this project has paid for most often (TODO.md T34). */
+     * make from then on - a silent drop, which is a failure mode worth
+     * guarding against explicitly. */
     const P2500Log *log = fdc->log;
     memset(fdc, 0, sizeof(*fdc));
     fdc->log = log;
@@ -59,7 +59,7 @@ uint8_t p2500_fdc_read_status(P2500Fdc *fdc) {
      * transfer in progress") is not modeled: this FDC's READ DATA hands
      * its whole block to the DMA in one memcpy (dma.c) rather than
      * byte-at-a-time through port $15, so there is no CPU-visible window
-     * where EXM would read 1 (TODO.md T10). */
+     * where EXM would read 1. */
     uint8_t cb = (fdc->phase != P2500_FDC_IDLE) ? 1 : 0;
     return (uint8_t)((rqm << 7) | (dio << 6) | (cb << 4));
 }
@@ -74,12 +74,12 @@ bool p2500_fdc_raise_startup_interrupt(P2500Fdc *fdc) {
     fdc->startup_interrupts_remaining--;
     fdc->seek_int_pending = true;
     if (fdc->verbose)
-        p2500_logf(fdc->log, P2500_LOG_TRACE, "fdc", "post-reset unsolicited interrupt (ISSUE-1 fix 2, %d remaining)",
+        p2500_logf(fdc->log, P2500_LOG_TRACE, "fdc", "post-reset unsolicited interrupt (%d remaining)",
                    fdc->startup_interrupts_remaining);
     /* Deliberately doesn't call fire_interrupt()/touch int_line - the
      * caller (machine.c) delivers this as a one-shot pulse instead of
      * the held level real completions use. See machine.c's port $12
-     * handler and TODO.md ISSUE-3 for why. */
+     * handler for why. */
     return true;
 }
 
@@ -94,16 +94,11 @@ static void do_read_data(P2500Fdc *fdc) {
     /* command[0]=opcode, [1]=unit/head, [2]=C, [3]=H, [4]=R, [5]=N, ... */
     uint8_t c = fdc->command[2];
     uint8_t r = fdc->command[4];
-    /* Philips' own P2500/P2000M disk format writes the on-disk track ID
-     * one higher than the physical track (documented directly by a P2500
-     * owner debugging this exact mismatch against stock 22DISK: "Logische
-     * Tracknummer ist immer um 1 hoeher als die physische" - see
-     * "Information from the internet/...Diskettenhandling...VzEkC..." and
-     * TODO.md ISSUE-4). The ROM issues C matching what's recorded on the
-     * disk (the logical ID), so the physical track - and this flat .raw
-     * dump's own track order - is C-1, not C. Confirmed: C=1,R=1 (the
-     * IPL's real first read) resolves to byte offset 0, the disk's
-     * well-established, byte-exact boot sector content. */
+    /* The P2500/P2000M disk format writes the on-disk track ID one higher
+     * than the physical track. The ROM issues C matching what's recorded
+     * on the disk (the logical ID), so the physical track - and this flat
+     * .raw dump's own track order - is C-1, not C. C=1,R=1 (the IPL's
+     * first read) resolves to byte offset 0, the boot sector. */
     size_t physical_track = c > 0 ? (size_t)(c - 1) : 0;
     size_t lba = physical_track * P2500_FDC_SECTORS_PER_TRACK + (r - 1);
     size_t off = lba * P2500_FDC_SECTOR_SIZE;
@@ -176,7 +171,7 @@ static void finish_command(P2500Fdc *fdc) {
     }
 
     /* Once a real disk operation is under way, stop synthesizing startup
-     * interrupts (TODO.md ISSUE-1 fix 2) - they exist only to unblock the
+     * interrupts - they exist only to unblock the
      * driver's post-reset drain loop, not to stand in for real completions. */
     if (opcode == 0x07 || opcode == 0x0F || opcode == 0x06)
         fdc->real_operation_started = true;
@@ -202,11 +197,9 @@ static void finish_command(P2500Fdc *fdc) {
         /* Real uPD765: SENSE INTERRUPT STATUS reports (and clears) a
          * Recalibrate/Seek completion that's actually pending - ST0 +
          * PCN, 2 result bytes. Issued with nothing pending (this ROM
-         * does exactly that once, defensively, right after SPECIFY -
-         * see TODO.md ISSUE-1), it returns Invalid Command, 1 byte, not
-         * a fabricated "Seek End". Previously this always returned the
-         * 2-byte Seek End form regardless of whether anything was
-         * pending, which is what ISSUE-1's fix (1) targets. */
+         * does exactly that once, defensively, right after SPECIFY),
+         * it returns Invalid Command, 1 byte, not a fabricated "Seek
+         * End". */
         if (fdc->seek_int_pending) {
             uint8_t st0 = fdc->last_seek_ok ? 0x20 : 0x40;
             uint8_t res[2] = {st0, fdc->cylinder};
@@ -254,7 +247,7 @@ uint8_t p2500_fdc_read_data(P2500Fdc *fdc) {
         /* Real hardware clears /INT once the host has read through the
          * result phase - the same read that hands back SENSE INTERRUPT
          * STATUS's ST0/PCN for the seek/recalibrate case, or the READ
-         * DATA/etc. status bytes otherwise (see TODO.md T9). */
+         * DATA/etc. status bytes otherwise. */
         fdc->int_line = false;
     }
     return v;

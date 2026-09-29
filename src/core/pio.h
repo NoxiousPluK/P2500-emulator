@@ -13,8 +13,6 @@ extern "C" {
 /*
  * Z80A-PIO (Z8420A) model for the FDD card's ports $10 (Port A data) /
  * $11 (Port B data) / $12 (Port A control) / $13 (Port B control).
- * Replaces the earlier ctc.{c,h} misidentification - see ../TODO.md
- * "1. Ports $10-$13 are a Z80A-PIO, not a Z80-CTC" for the evidence.
  *
  * Only mode 3 (bit control) is exercised by any traced ROM code, so that's
  * the only mode this model makes functional; modes 0-2 just record the
@@ -63,7 +61,7 @@ typedef struct {
     bool condition_was_true[P2500_PIO_PORTS]; /* edge detection so a held level fires once */
 
     /* Diagnostics sink, pointed at the machine's own by p2500_init().
-     * NULL is fine - the messages are simply discarded (TODO.md T34). */
+     * NULL is fine - the messages are simply discarded. */
     const P2500Log *log;
     P2500PioInterruptCallback on_interrupt;
     /* Called with the port number when that port's interrupts are
@@ -82,8 +80,8 @@ void p2500_pio_write_control(P2500Pio *pio, int port, uint8_t value); /* $12/$13
 void p2500_pio_write_data(P2500Pio *pio, int port, uint8_t value);    /* $10/$11 out */
 uint8_t p2500_pio_read_data(P2500Pio *pio, int port);                 /* $10/$11 in */
 
-/* Drive one input bit (e.g. the FDC's INT line into PA0/PA1 - see TODO.md
- * T4). Evaluates the interrupt condition and fires on a low->true
+/* Drive one input bit (e.g. the FDC's INT line into PA0/PA1).
+ * Evaluates the interrupt condition and fires on a low->true
  * transition if the port is in mode 3 with interrupts enabled and a
  * vector has been programmed. */
 void p2500_pio_set_input_bit(P2500Pio *pio, int port, int bit, bool level);

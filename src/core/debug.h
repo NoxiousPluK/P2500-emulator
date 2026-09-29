@@ -8,7 +8,7 @@ extern "C" {
 #endif
 
 /*
- * Debug services for both front-ends (TODO.md T39).
+ * Debug services for both front-ends.
  *
  * The CLI grew --watch, --count and --break as private structs inside its
  * own step loop, and the GUI needs exactly the same three things. They live

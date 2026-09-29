@@ -6,8 +6,8 @@ void p2500_keyboard_init(P2500Keyboard *kb, const uint8_t *queue, size_t queue_l
     /* Re-initialising a device must not silently take its diagnostics
      * away with it: a caller that swaps a keystroke queue in, as the
      * CLI does, would otherwise lose every message the device had to
-     * make from then on - a silent drop, which is the failure mode
-     * this project has paid for most often (TODO.md T34). */
+     * make from then on - a silent drop, which is a failure mode worth
+     * guarding against explicitly. */
     const P2500Log *log = kb->log;
     memset(kb, 0, sizeof(*kb));
     kb->log = log;
@@ -55,8 +55,8 @@ void p2500_serial_init(P2500Serial *s) {
     /* Re-initialising a device must not silently take its diagnostics
      * away with it: a caller that swaps a keystroke queue in, as the
      * CLI does, would otherwise lose every message the device had to
-     * make from then on - a silent drop, which is the failure mode
-     * this project has paid for most often (TODO.md T34). */
+     * make from then on - a silent drop, which is a failure mode worth
+     * guarding against explicitly. */
     const P2500Log *log = s->log;
     memset(s, 0, sizeof(*s));
     s->log = log;

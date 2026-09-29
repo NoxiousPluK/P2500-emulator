@@ -15,22 +15,17 @@ extern "C" {
 /*
  * Behavioral uPD765 model for the P2500 CPU card's on-board floppy driver.
  *
- * Ground truth (see ROM Dumps/CPU-Card-Boot-EPROM/disassembly/findings.md
- * in the parent research project): command-construction tables read
- * directly out of the P2500 IPL ROM decode as real uPD765 commands -
- * $08=SENSE INTERRUPT STATUS, $04=SENSE DRIVE STATUS, $07=RECALIBRATE,
- * $0F=SEEK - with byte counts and result-phase shapes matching real
- * hardware conventions exactly. Independently cross-checked against a
- * real Philips Field Support Manual transcription for the sibling P2000M
- * machine (ifilot/p2000m-emulator), which documents the identical command
- * family and order (Sense Interrupt Status -> Specify -> Recalibrate,
- * then Seek) for its own uPD765-based floppy boot, though on different
- * I/O ports - same engineering team/convention, different wiring.
+ * Command-construction tables decoded from the P2500 IPL ROM as real
+ * uPD765 commands - $08=SENSE INTERRUPT STATUS, $04=SENSE DRIVE STATUS,
+ * $07=RECALIBRATE, $0F=SEEK - with byte counts and result-phase shapes
+ * matching real hardware conventions exactly. Cross-checked against the
+ * sibling P2000M machine's floppy boot (same command family and order:
+ * Sense Interrupt Status -> Specify -> Recalibrate -> Seek), though the
+ * P2500 uses different I/O ports.
  *
  * Ports $14 (Main Status Register, read-only) and $15 (Data Register,
- * read/write) are the real P2500 ports - confirmed independently against
- * the CP/M-era CBIOS disassembly (Disk Images/findings/
- * BIOS-disassembly-findings.md), which found the same pair.
+ * read/write) are the real P2500 ports, confirmed independently against
+ * the CP/M-era CBIOS disassembly.
  *
  * READ DATA's sector bytes are delivered via the real Z80A-DMA model
  * (dma.{c,h}, port $16) in one shot (the moment the command's parameter
@@ -80,15 +75,15 @@ typedef struct {
     /* Set by RECALIBRATE/SEEK completion, cleared by the SENSE INTERRUPT
      * STATUS that reports it - real uPD765 semantics: SIS returns Invalid
      * Command ($80, 1 byte) rather than a fabricated Seek End if nothing
-     * is actually pending (TODO.md ISSUE-1). */
+     * is actually pending. */
     bool seek_int_pending;
 
-    /* Budget for p2500_fdc_raise_startup_interrupt() (TODO.md ISSUE-1 fix
-     * 2). A real uPD765 generates one unsolicited post-reset interrupt
+    /* Budget for p2500_fdc_raise_startup_interrupt(). A real uPD765
+     * generates one unsolicited post-reset interrupt
      * *per configured drive* (the classic "issue N SENSE INTERRUPT STATUS
      * after reset" convention). Set to exactly 2 - not a cap "just in
      * case" but a value pinned down by directly tracing the ROM's own
-     * control flow (TODO.md ISSUE-3): the *third* PIO-arm event is
+     * control flow: the *third* PIO-arm event is
      * `$0786`'s "enable interrupt, then immediately stream the already-
      * built RECALIBRATE command" sequence - there's no `EI` between the
      * two, because real hardware can't possibly raise a completion
@@ -102,8 +97,8 @@ typedef struct {
     bool real_operation_started;
 
     /* Real uPD765 /INT is a held level, not a pulse: it stays asserted from
-     * command completion until the host reads through a result phase (see
-     * TODO.md T9). machine.c samples this every step to drive the PIO input
+     * command completion until the host reads through a result phase.
+     * machine.c samples this every step to drive the PIO input
      * bit, so polling code (e.g. the ROM's "IN A,($10)/RRA" at $0832) sees
      * it held, not just edge-triggered PIO delivery. */
     bool int_line;
@@ -126,7 +121,7 @@ typedef struct {
     P2500Dma *dma;
 
     /* Diagnostics sink, pointed at the machine's own by p2500_init().
-     * NULL is fine - the messages are simply discarded (TODO.md T34). */
+     * NULL is fine - the messages are simply discarded. */
     const P2500Log *log;
     P2500FdcInterruptCallback on_interrupt;
     void *interrupt_userdata;
@@ -140,7 +135,7 @@ void p2500_fdc_init(P2500Fdc *fdc, const uint8_t *disk, size_t disk_size);
 void p2500_fdc_attach(P2500Fdc *fdc, unsigned unit,
                       const uint8_t *data, size_t size);
 /* Fires one of the uPD765's real, well-documented post-reset unsolicited
- * interrupts (TODO.md ISSUE-1 fix 2) - a real chip generates one per
+ * interrupts - a real chip generates one per
  * configured drive shortly after coming out of reset, before any
  * Recalibrate/Seek has ever been issued, which is exactly what this ROM's
  * own defensive early SENSE INTERRUPT STATUS calls (see fix 1) are
@@ -154,9 +149,9 @@ void p2500_fdc_attach(P2500Fdc *fdc, unsigned unit,
  * (machine.c) only pulses the PIO input bit when this returns true. Note
  * this does NOT touch `int_line`/call the interrupt callback itself
  * (unlike a real FDC completion) - delivery is the caller's job, as a
- * one-shot pulse rather than a held level (see machine.c and TODO.md
- * ISSUE-3 for why: not every consumer of this synthetic interrupt reads
- * a SENSE INTERRUPT STATUS result to clear a held level). */
+ * one-shot pulse rather than a held level (see machine.c: not every
+ * consumer of this synthetic interrupt reads a SENSE INTERRUPT STATUS
+ * result to clear a held level). */
 bool p2500_fdc_raise_startup_interrupt(P2500Fdc *fdc);
 uint8_t p2500_fdc_read_status(P2500Fdc *fdc);   /* port $14 */
 uint8_t p2500_fdc_read_data(P2500Fdc *fdc);     /* port $15 read */

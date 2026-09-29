@@ -2,19 +2,11 @@
 """
 A small two-pass Z80 assembler, enough to write P2500 demos and probes.
 
-Why this exists rather than a dependency: nothing in this project needs an
-assembler until you want to put real code on a disk, and then it needs one
-badly - a graphics demo is thousands of instructions and hand-assembly is a
-guarantee of silent, invisible bugs. The subset here is what those programs
-use, not the whole instruction set; anything unsupported is an error rather
-than a wrong encoding.
+This does not support the full instruction set.
 
 It is checked, not trusted: `--verify` disassembles its own output with
 `p2500-emu --disasm` - a decoder cross-checked against z80dasm over ~34,000
-instructions (TODO.md T39) - and compares, instruction for instruction,
-against the source. An encoder and a decoder built from the same tables
-would agree with each other while both being wrong; these two were written
-from opposite directions, years of z80dasm apart.
+instructions - and compares against the source.
 
     tools/z80asm.py SOURCE.asm -o OUT.COM [--verify] [--listing]
 

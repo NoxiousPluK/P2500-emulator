@@ -12,14 +12,13 @@ extern "C" {
 
 /*
  * Text-mode renderer, driven by the MC6845's own registers rather than a
- * hardcoded 80x24 (TODO.md T37).
+ * hardcoded 80x24.
  *
  * The character cell is 8 pixels wide by (R9 + 1) scanlines - 12 on this
  * machine. The glyph is the WHOLE cell: the character ROM's stride is 16
  * bytes per code, of which rows 0-11 are the glyph and 12-15 are padding
- * that happens to hold packed Z80 code (TODO.md T27a). Reading only 8 rows
- * truncates every descender, which is what every render in this project did
- * until 2026-09-28 - the only printable codes with ink in rows 8-11 are
+ * that happens to hold packed Z80 code. Reading only 8 rows would truncate
+ * every descender - the only printable codes with ink in rows 8-11 are
  * "$ , ; @ f g j p q y", exactly the descender set.
  *
  * Attributes come from the card's separate 4-bit plane, and the assignment
@@ -36,7 +35,7 @@ extern "C" {
  * in port $0A - parameter bit 0 -> attribute bit 1, 1 -> 3, 4 -> 2, 5 -> 0
  * (verified by driving all 16 values through MBASIC and dumping the plane).
  * Composing the two gives the constants below. Keep them in step with
- * tools/render_vram.py, which carries the same four.
+ * tests/render_vram.py, which carries the same four.
  */
 
 #define P2500_CELL_W 8
@@ -48,7 +47,7 @@ extern "C" {
 #define P2500_ATTR_REVERSE   0x04 /* ESC 0 parameter bit 4 */
 #define P2500_ATTR_FLASH     0x08 /* ESC 0 parameter bit 1 */
 
-/* Port $0A bit 6 selects high-resolution graphics (TODO.md T47). */
+/* Port $0A bit 6 selects high-resolution graphics. */
 #define P2500_PORT0A_GRAPHICS 0x40
 
 typedef struct {

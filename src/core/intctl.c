@@ -22,8 +22,8 @@ void p2500_intctl_init(P2500IntCtl *ic) {
     /* Re-initialising a device must not silently take its diagnostics
      * away with it: a caller that swaps a keystroke queue in, as the
      * CLI does, would otherwise lose every message the device had to
-     * make from then on - a silent drop, which is the failure mode
-     * this project has paid for most often (TODO.md T34). */
+     * make from then on - a silent drop, which is a failure mode worth
+     * guarding against explicitly. */
     const P2500Log *log = ic->log;
     memset(ic, 0, sizeof(*ic));
     ic->log = log;

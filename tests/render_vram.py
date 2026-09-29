@@ -1,31 +1,26 @@
 #!/usr/bin/env python3
 """
-Render a video-RAM dump (as produced by ../p2000b-emu --dump-vram) as an
+Render a video-RAM dump (as produced by p2500-emu --dump-vram) as an
 actual image, using the real dumped character ROM and the CRTC geometry
 established for this platform: 80 columns x 24 rows, 8x12 character cells.
 
 The glyph is the full 8x12 cell, not an 8x8 bitmap. The character ROM's
-stride is 16 bytes per code (4096 bytes / 256 codes), of which rows 0-11
-are the glyph the CRTC clocks out (R9 = 11, i.e. 12 scanlines per row) and
-rows 12-15 are unused padding - which is where the character ROM's dump
-found packed Z80 code stuffed into the low code points. Reading only 8
-rows silently truncated every descender: 'p' has its descender at rows
-8-9, 'g' at rows 8-10.
+stride is 16 bytes per code (4096 bytes / 256 codes): rows 0-11 are the
+glyph the CRTC clocks out (R9 = 11, i.e. 12 scanlines per row) and rows
+12-15 are unused padding. Reading only 8 rows truncates every descender:
+'p' has its descender at rows 8-9, 'g' at rows 8-10.
 
-Video RAM layout: 1 byte per character cell, row-major,
-starting at $8000 (offset 0 in the 16KB video RAM dump) - matches the
-MC6845's R12/R13 "start address = 0" and is what the banner-print trace
-actually produced (all four table entries landed at exactly the addresses
-predicted by treating $8000+row*80+col as the addressing scheme). The card also carries a 4-bit attribute plane per cell (TODO.md T27) -
-pass its dump as --attr to render it. No software this project holds ever
+Video RAM layout: 1 byte per character cell, row-major, starting at $8000
+(offset 0 in the 16KB video RAM dump), matching the MC6845's R12/R13
+"start address = 0". The card also carries a 4-bit attribute plane per
+cell - pass its dump as --attr to render it. Surviving software never
 writes attributes, so a normal dump has none and the plain path is used.
 
 Usage: python3 render_vram.py <vram_dump.bin> [out.png] [--attr PLANE.bin]
        python3 render_vram.py <vram_dump.bin> out.png --demo-attrs
 
 --demo-attrs synthesises an attribute plane that applies one attribute per
-screen row. It exists because no software this project holds writes
-attributes, so it is the only way to exercise this path at all.
+screen row, since no surviving software exercises the attribute path.
 """
 
 import sys
@@ -46,7 +41,7 @@ FG_DIM = (0, 140, 40)
 # Established, not guessed: the P2219 CP/M manual defines the ESC 0 parameter
 # bits (0 low intensity, 1 flash, 4 reverse, 5 underline) and CBIOS's handler
 # at $F252 scatters them into the latched nibble (0->1, 1->3, 4->2, 5->0).
-# See TODO.md T27. Keep in step with src/core/video.h.
+# Keep in step with src/core/video.h.
 ATTR_UNDERLINE = 0x01
 ATTR_DIM       = 0x02
 ATTR_REVERSE   = 0x04
@@ -72,7 +67,7 @@ def demo_attribute_plane(vram: bytes) -> bytes:
 
 
 # High-resolution graphics: 512 x 256, one bit per pixel, out of the same
-# 16K (TODO.md T47). The layout is not a linear framebuffer - the CRTC's
+# 16K. The layout is not a linear framebuffer - the CRTC's
 # raster address is wired to address bits 12-13, so it picks one of four 4K
 # banks and the memory address indexes within a bank:
 #

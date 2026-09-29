@@ -21,14 +21,13 @@ typedef struct {
     int expected;    /* -1 = no known byte, just require nonzero; else the exact byte */
 } Landmark;
 
-/* TODO.md T8: a landmark should only count if the byte(s) actually there
+/* A landmark should only count if the byte(s) actually there
  * match what the ROM/sector is supposed to contain, not just "PC happened
- * to equal this address" - that's exactly how the old $1100/$1103/$1106
- * landmarks kept reporting hits from a NOP walk through zeroed RAM (see
- * TODO.md's "Where the boot sector actually goes" section). ROM-resident
+ * to equal this address" - a bare PC match can report hits from a NOP walk
+ * through zeroed RAM. ROM-resident
  * addresses get their expected byte read straight out of the loaded EPROM
  * at startup (gate_from_rom); the boot sector's first bytes are known
- * statically from disk (TODO.md: `00 00 FB 11 30 10 CD 03 00 ...` at
+ * statically from disk (`00 00 FB 11 30 10 CD 03 00 ...` at
  * $1000). Addresses whose real content isn't known yet ($4A00, the
  * runtime-built $FEC9 trampoline) fall back to "byte must be nonzero",
  * which is weaker but still catches the zeroed-RAM NOP-walk case. */
@@ -70,8 +69,7 @@ static void check_landmarks(const P2500Machine *m, uint16_t pc, unsigned long st
             /* Only interesting while the landmark has never legitimately
                hit. Once it has, a mismatch just means the address has been
                reused - which is correct behaviour for $1000's boot sector
-               once CP/M owns that memory, and was reported as a failure
-               every run (TODO.md T25). */
+               once CP/M owns that memory. */
             if (landmarks[i].hit_count == 0) landmarks[i].gated_count++;
             continue;
         }
@@ -82,10 +80,9 @@ static void check_landmarks(const P2500Machine *m, uint16_t pc, unsigned long st
     }
 }
 
-/* The core's diagnostics, put back exactly where they used to go. The
- * "[cat] " prefix each line carried is now a separate argument (TODO.md
- * T34), so this sink restores it and the output is byte-for-byte what it
- * was before the refactor - which is what lets make test verify it. */
+/* The core's diagnostics, formatted exactly as the sink expects: each
+ * message carries a `category` argument, restored here as a "[cat] "
+ * prefix so output is byte-for-byte what make test verifies. */
 static void cli_log(void *userdata, P2500LogLevel level, const char *category,
                     const char *message) {
     (void)userdata; (void)level;
@@ -101,9 +98,9 @@ static void cli_watch(void *userdata, uint16_t addr, uint8_t was, uint8_t now,
 }
 
 /* --state: every device's live state, through the same label/value lines the
- * GUI's device panel draws (TODO.md T39). Having it here is not duplication
+ * GUI's device panel draws. Having it here is not duplication
  * for its own sake - it is how a panel's claims get checked without a
- * display, and how run_tests.sh can assert on device state at all. */
+ * display, and how tests/run_tests.sh can assert on device state at all. */
 static void print_state(const P2500Machine *m) {
     printf("\nDevice state\n");
     for (int t = 0; t < P2500_DBG_TOPICS; t++) {
@@ -185,20 +182,18 @@ int main(int argc, char **argv) {
     struct { uint16_t addr; uint16_t len; } peeks[MAX_PEEKS];
     int num_peeks = 0;
     /* --poke ADDR:HEXBYTES - directly seed RAM before running, e.g. to
-     * test a synthetic request block the way ../roms/sesam_banner_test.bin
-     * did for the SESAM mechanism. See README.md "Reaching READ DATA". */
+     * plant a synthetic request block for testing a device in isolation. */
     #define MAX_POKES 8
     struct { uint16_t addr; uint8_t bytes[64]; size_t len; } pokes[MAX_POKES];
     int num_pokes = 0;
     /* --watch ADDR[:LEN], --count ADDR and --break ADDR all live in
-     * core/debug.c now, so the GUI drives the identical code (TODO.md T39).
+     * core/debug.c, so the GUI drives the identical code.
      * --watch reports every change to a byte, naming the instruction that
      * wrote it; --watch-break also stops the run there. --count answers
-     * "does this handler ever actually run?",
-     * the single question this project asks most; --break stops the run at
-     * a PC so the exit report describes that exact moment.
-     * With no --watch given, $0003 and $0039 are watched - the two
-     * page-zero corruption canaries this project has needed most often. */
+     * "does this handler ever actually run?"; --break stops the run at a PC
+     * so the exit report describes that exact moment.
+     * With no --watch given, $0003 and $0039 are watched by default - the
+     * two page-zero corruption canaries. */
     P2500Debug dbg;
     p2500_debug_init(&dbg);
     dbg.on_watch = cli_watch;
@@ -430,8 +425,7 @@ int main(int argc, char **argv) {
     m.fdc.verbose = verbose_io; /* also wanted with no disk attached */
     m.pio.verbose = verbose_io;
     /* The daisy chain was the one device the harness could not see, while
-     * the GUI's log panel could. Added with T34 rather than found by it -
-     * the refactor itself changed no output at all. */
+     * the GUI's log panel could. */
     m.intctl.verbose = verbose_io;
     m.dma.verbose = verbose_io;
     m.ctc.verbose = verbose_io;
@@ -471,9 +465,9 @@ int main(int argc, char **argv) {
     const unsigned STUCK_WINDOW = 200000;
     const unsigned CHECK_INTERVAL = 5000;
     const unsigned STUCK_DISTINCT_THRESHOLD = 8;
-    /* TODO.md T25: counting *distinct* addresses alone misses cycles - the
-     * ISSUE-5 deadlock walks 64 addresses and so ran the full 5 M steps
-     * reporting nothing. So also look for a repeating *state* sequence.
+    /* Counting *distinct* addresses alone misses cycles - a deadlock loop
+     * that walks many addresses can run the full step budget reporting
+     * nothing. So also look for a repeating *state* sequence.
      *
      * It has to be state, not PC: the IPL's own 64K RAM test ($016B) is an
      * 11-instruction loop whose PC sequence repeats perfectly for hundreds
@@ -482,7 +476,7 @@ int main(int argc, char **argv) {
      * register, unbroken for CYCLE_CONFIRM steps, cannot be making
      * progress: nothing it could still be waiting on is being sampled into
      * a register. (A polling wait on a memory location an ISR writes -
-     * exactly ISSUE-5's $EB02 - does repeat state, and is correctly
+     * e.g. $EB02 - does repeat state, and is correctly
      * reported: the ISR that would break it is not running.) */
     const unsigned MAX_CYCLE_PERIOD = 2048;
     const unsigned CYCLE_CONFIRM = 20000;
@@ -498,10 +492,8 @@ int main(int argc, char **argv) {
     int reset_visits = 0;
     const char *stop_reason = NULL;
     const double wall_start = wall_seconds();
-    /* P2500_TRACE_FROM/TO, read once. This used to be two getenv() calls and
-     * two strtoul() calls per instruction, in the innermost loop of every
-     * test run - the environment cannot change under us, so hoisting it is
-     * free speed for `make test`. */
+    /* P2500_TRACE_FROM/TO, read once outside the step loop - the
+     * environment cannot change under us. */
     const char *trace_from_env = getenv("P2500_TRACE_FROM");
     const char *trace_to_env = getenv("P2500_TRACE_TO");
     const bool tracing = trace_from_env && trace_to_env;
@@ -575,8 +567,7 @@ int main(int argc, char **argv) {
              * still owns page zero, where $0000 is "JP $0100". Once CP/M is
              * up it is "JP $E203", the CBIOS warm-boot vector, and passing
              * through it is exactly what Ctrl-C at the prompt does - so
-             * gate on the documented invariant rather than on the address.
-             * See TODO.md's "Known-good invariants". */
+             * gate on the documented invariant rather than on the address. */
             bool ipl_owns_page_zero = p2500_peek(&m, 0) == 0xC3 &&
                                       p2500_peek(&m, 1) == 0x00 &&
                                       p2500_peek(&m, 2) == 0x01;
@@ -643,7 +634,7 @@ int main(int argc, char **argv) {
     for (size_t i = 0; i < NUM_LANDMARKS; i++) {
         if (landmarks[i].gated_count > 0)
             printf("  (landmark $%04X (%s): %d hit(s) at this PC didn't match the "
-                   "expected byte(s), not counted - see T8)\n",
+                   "expected byte(s), not counted)\n",
                    landmarks[i].addr, landmarks[i].name, landmarks[i].gated_count);
     }
     if (detected_cycle)
@@ -690,11 +681,11 @@ int main(int argc, char **argv) {
         printf("Video: %lu write(s) carrying an attribute; latch (port $0A) now $%02X\n",
                m.attr_writes, m.port0a_latch);
     if (m.unknown_bank_writes)
-        printf("Port $05: %lu write(s) selected an undecoded $8000-$BFFF window "
-               "- see TODO.md T27\n", m.unknown_bank_writes);
+        printf("Port $05: %lu write(s) selected an undecoded $8000-$BFFF window\n",
+               m.unknown_bank_writes);
     {
-        /* MC6845 state. Nothing in the emulator reads these yet (TODO.md
-         * T37), so printing them is the only way to see what the firmware
+        /* MC6845 state. Nothing in the emulator reads these yet, so
+         * printing them is the only way to see what the firmware
          * actually programmed. Field widths per the datasheet: R12/R13 and
          * R14/R15 are 14-bit pairs, so the high byte carries only 6 bits. */
         const uint8_t *r = m.crtc_regs;
@@ -816,7 +807,7 @@ int main(int argc, char **argv) {
     }
 
     if (screen_dump_path) {
-        /* Renders through the core's own p2500_video_render (TODO.md T37),
+        /* Renders through the core's own p2500_video_render,
          * the same call the GUI makes, so the two agree by construction
          * rather than by two parallel implementations staying in step. */
         P2500VideoInfo vi;

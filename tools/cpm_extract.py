@@ -5,10 +5,8 @@ Extract files from a Philips P2500 CP/M disk image (.raw).
 Why this exists rather than cpmtools: the P2500's sectors are physically
 interleaved on the track, and a flat .raw is in *physical* order. An
 extractor that ignores that reads every other sector from the wrong place.
-The per-file set this project shipped before 2026-09-28 was produced that
-way and 38 of its 142 files were wrong - including one "pip.com" that was
-actually another disk's directory. So this tool derives the format from the
-image and then *checks* what it produced.
+This tool derives the format from the image and then *checks* what it
+produced.
 
 What is derived rather than assumed:
 

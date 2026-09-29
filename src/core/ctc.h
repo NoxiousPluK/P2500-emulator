@@ -15,14 +15,14 @@ extern "C" {
  * independently programmable counter/timer channels, one per port
  * (channel = port & 3, i.e. CS1/CS0 tied to A1/A0). The chip itself is
  * confirmed from real silicon: a Z8430A sits on the CPU card next to the
- * Z8400A (see ../P2500-general-findings.md).
+ * Z8400A.
  *
  * Modeled from "Zilog Z80 Family CPU Peripherals User Manual"
  * (UM008101-0601), chapter "Counter/Timer Channels": control-word bit
  * layout (Table 2), interrupt vector formation (Table 3), channel select
  * convention (Table 1).
  *
- * TIMING IS REAL, NOT SCALED (TODO.md T18). The down-counter is driven by
+ * TIMING IS REAL, NOT SCALED. The down-counter is driven by
  * T-states from the CPU core's own cycle counter through the actual
  * prescaler (divide by 16 or 256), so a channel's period is
  * prescaler x time_constant T-states exactly as on hardware. There is no
@@ -38,7 +38,7 @@ extern "C" {
  * Fold a prescaler wrong, or tick per instruction instead of per T-state,
  * and that table decodes to nothing.
  *
- * WHAT EACH CHANNEL IS WIRED TO (TODO.md T19). Established by reading
+ * WHAT EACH CHANNEL IS WIRED TO. Established by reading
  * CBIOS's own four ISRs out of a live RAM dump (tools/disasm_ram.sh), via
  * its IM2 table at $FF90 = $FF0C/$FF15/$FF03/$FEFA, which trampoline to
  * $F597/$F669/$F37F/$ED2A respectively:
@@ -104,7 +104,7 @@ typedef struct {
     bool vector_set;
 
     /* Diagnostics sink, pointed at the machine's own by p2500_init().
-     * NULL is fine - the messages are simply discarded (TODO.md T34). */
+     * NULL is fine - the messages are simply discarded. */
     const P2500Log *log;
     P2500CtcInterruptCallback on_interrupt;
     P2500CtcResetCallback on_reset;
