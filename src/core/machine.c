@@ -201,7 +201,7 @@ static uint8_t port_in(z80 *cpu, uint8_t port) {
             return 0x00;
         }
     case 0x0F:
-        return p2500_sesam_in(&m->sesam);
+        return p2500_cartridge_in(&m->cartridge);
     case 0x10:
         return p2500_pio_read_data(&m->pio, P2500_PIO_PORT_A);
     case 0x11:
@@ -251,7 +251,7 @@ static void port_out(z80 *cpu, uint8_t port, uint8_t value) {
                        value, m->crtc_index);
         break;
     case 0x0F:
-        p2500_sesam_out(&m->sesam, value);
+        p2500_cartridge_out(&m->cartridge, value);
         break;
     case 0x10:
         p2500_pio_write_data(&m->pio, P2500_PIO_PORT_A, value);
@@ -330,7 +330,7 @@ void p2500_init(P2500Machine *m) {
     m->serial_rxd = true;      /* idle mark - nothing plugged into the serial port */
     m->serial_tx_ready = true; /* handshake input idles asserted */
 
-    p2500_sesam_init(&m->sesam, NULL, 0);
+    p2500_cartridge_init(&m->cartridge, NULL, 0);
 
     p2500_fdc_init(&m->fdc, NULL, 0);
     m->fdc.on_interrupt = fdc_interrupt_trampoline;
@@ -367,7 +367,7 @@ void p2500_init(P2500Machine *m) {
     m->ctc.log = &m->log;
     m->keyboard.log = &m->log;
     m->serial.log = &m->log;
-    m->sesam.log = &m->log;
+    m->cartridge.log = &m->log;
 
     m->bank = 0x07; /* EPROM visible at $0000-$0FFF, as at power-on */
     m->verbose_unknown_ports = false;
@@ -393,8 +393,8 @@ void p2500_reset(P2500Machine *m) {
         disk[d] = m->fdc.disk[d];
         disk_size[d] = m->fdc.disk_size[d];
     }
-    const uint8_t *sesam = m->sesam.stream;
-    size_t sesam_len = m->sesam.stream_len;
+    const uint8_t *cartridge = m->cartridge.stream;
+    size_t cartridge_len = m->cartridge.stream_len;
     const uint8_t *keys = m->keyboard.queue;
     size_t keys_len = m->keyboard.queue_len;
     const unsigned long *release_at = m->keyboard.release_at;
@@ -412,8 +412,8 @@ void p2500_reset(P2500Machine *m) {
         m->fdc.disk[d] = disk[d];
         m->fdc.disk_size[d] = disk_size[d];
     }
-    m->sesam.stream = sesam;
-    m->sesam.stream_len = sesam_len;
+    m->cartridge.stream = cartridge;
+    m->cartridge.stream_len = cartridge_len;
     m->keyboard.queue = keys;
     m->keyboard.queue_len = keys_len;
     m->keyboard.release_at = release_at;

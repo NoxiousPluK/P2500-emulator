@@ -133,6 +133,19 @@ struct App {
     char disk_path[1024];
     unsigned pending_unit;       /* which drive the dialog was opened for */
     char status[160];            /* last action, shown at the right of the bar */
+
+    /* Cartridge slot (port $0F) - SESAM keys are its best-documented use,
+     * but the slot is generic, so this also accepts an arbitrary cartridge
+     * ROM file. `cart_buf` is kept even while ejected, so the right-click
+     * toggle can restore it without the user retyping/reloading. */
+    uint8_t *cart_buf;
+    size_t cart_buf_len;
+    char cart_name[64];           /* basename if loaded from a file; empty = manual key */
+    bool cart_inserted;
+    bool show_cartridge;          /* Cartridge window open flag */
+    uint8_t cart_edit_hi, cart_edit_lo; /* live-typed serial bytes, not yet inserted */
+    SDL_AtomicInt cart_pending;    /* set by the cartridge file-dialog callback */
+    char cart_path[1024];
 };
 
 static const P2500Palette PALETTE = {
@@ -292,6 +305,83 @@ static void eject_disk(App *app, unsigned unit)
     SDL_Log("drive %c: ejected", 'A' + (int)unit);
 }
 
+/* SDL may run this on another thread, so it only parks the path and raises a
+ * flag; the actual load happens in SDL_AppIterate. Mirrors disk_chosen(). */
+static void SDLCALL cartridge_chosen(void *userdata, const char *const *filelist, int)
+{
+    App *app = (App *)userdata;
+    if (!filelist || !filelist[0]) return; /* cancelled, or the dialog failed */
+    SDL_strlcpy(app->cart_path, filelist[0], sizeof app->cart_path);
+    SDL_SetAtomicInt(&app->cart_pending, 1);
+}
+
+static void mount_cartridge(App *app, const char *path)
+{
+    size_t n = 0;
+    uint8_t *buf = read_whole_file(path, &n);
+    if (!buf) { set_status(app, "could not read %s", path); return; }
+    free(app->cart_buf);
+    app->cart_buf = buf;
+    app->cart_buf_len = n;
+    p2500_cartridge_init(&app->m.cartridge, buf, n);
+    const char *base = SDL_strrchr(path, '/');
+    SDL_strlcpy(app->cart_name, base ? base + 1 : path, sizeof app->cart_name);
+    app->cart_inserted = true;
+    set_status(app, "cartridge: %s", app->cart_name);
+}
+
+/* The $01 presence byte is fixed by the confirmed protocol - not something
+ * a real key's owner chooses - so only the two serial bytes are editable. */
+static void insert_manual_key(App *app)
+{
+    uint8_t *buf = (uint8_t *)malloc(3);
+    if (!buf) return;
+    buf[0] = 0x01;
+    buf[1] = app->cart_edit_hi;
+    buf[2] = app->cart_edit_lo;
+    free(app->cart_buf);
+    app->cart_buf = buf;
+    app->cart_buf_len = 3;
+    p2500_cartridge_init(&app->m.cartridge, buf, 3);
+    app->cart_name[0] = '\0';
+    app->cart_inserted = true;
+    set_status(app, "cartridge: ID 0x%02X%02X", app->cart_edit_hi, app->cart_edit_lo);
+}
+
+/* Ejecting deliberately keeps cart_buf, so the right-click toggle (and the
+ * Cartridge window's own Eject/re-insert) can restore the same key or ROM
+ * without the user retyping or reloading it. */
+static void eject_cartridge(App *app)
+{
+    if (!app->cart_inserted) return;
+    app->cart_inserted = false;
+    p2500_cartridge_init(&app->m.cartridge, NULL, 0);
+    set_status(app, "cartridge: empty");
+    SDL_Log("cartridge: ejected");
+}
+
+static void toggle_cartridge(App *app)
+{
+    if (app->cart_inserted) { eject_cartridge(app); return; }
+    if (!app->cart_buf) return;
+    /* Re-running init also resets the internal read position, matching the
+     * real protocol's own "freshly inserted" state. */
+    p2500_cartridge_init(&app->m.cartridge, app->cart_buf, app->cart_buf_len);
+    app->cart_inserted = true;
+    if (app->cart_name[0]) set_status(app, "cartridge: %s", app->cart_name);
+    else set_status(app, "cartridge: ID 0x%02X%02X", app->cart_buf[1], app->cart_buf[2]);
+}
+
+static void open_cartridge_dialog(App *app)
+{
+    static const SDL_DialogFileFilter filters[] = {
+        { "Cartridge images", "rom;bin" },
+        { "All files", "*" },
+    };
+    SDL_ShowOpenFileDialog(cartridge_chosen, app, app->window,
+                           filters, SDL_arraysize(filters), NULL, false);
+}
+
 /* One place, because three things reach it: the File menu, F12, and the
  * run/pause lamp. Resuming clears any breakpoint stop, or Run would trip
  * straight back over the address it is standing on. */
@@ -400,6 +490,27 @@ static void speed_menu_items(App *app)
             app->speed_item_y[i] = (mn.y + mx.y) * 0.5f;
         }
     }
+}
+
+/* What the cartridge cell/window shows. Filenames are truncated to a fixed
+ * width so the reserved toolbar cell - and everything left of it - never
+ * moves; the full name is always in the tooltip instead. */
+#define CART_NAME_DISPLAY_MAX 14
+static void cartridge_reading(const App *app, char *out, size_t n)
+{
+    if (!app->cart_inserted) { SDL_strlcpy(out, "empty", n); return; }
+    if (app->cart_name[0]) {
+        if (strlen(app->cart_name) > CART_NAME_DISPLAY_MAX)
+            SDL_snprintf(out, n, "%.*s...", CART_NAME_DISPLAY_MAX - 3, app->cart_name);
+        else
+            SDL_strlcpy(out, app->cart_name, n);
+        return;
+    }
+    const uint8_t *s = app->m.cartridge.stream;
+    if (s && app->m.cartridge.stream_len >= 3)
+        SDL_snprintf(out, n, "ID 0x%02X%02X", s[1], s[2]);
+    else
+        SDL_strlcpy(out, "ID", n);
 }
 
 /* CBIOS supports A:, B: and C:, so the dialog is opened per
@@ -587,6 +698,46 @@ static ImU32 lamp_paint(ImDrawList *dl, const Lamp &l, bool lit)
     return ImGui::GetColorU32(ImGuiCol_MenuBarBg);
 }
 
+/* A plain non-modal window, toggled by app->show_cartridge like a debugger
+ * panel's own bool - opened from the Machine menu or by clicking the
+ * toolbar lamp. */
+static void draw_cartridge_window(App *app)
+{
+    if (!app->show_cartridge) return;
+    ImGui::SetNextWindowSize(ImVec2(320, 0), ImGuiCond_FirstUseEver);
+    if (!ImGui::Begin("Cartridge", &app->show_cartridge)) { ImGui::End(); return; }
+
+    char reading[32];
+    cartridge_reading(app, reading, sizeof reading);
+    ImGui::Text("%s: %s", "Cartridge", reading);
+    
+    ImGui::Separator();
+    ImGui::TextUnformatted("SESAM key");
+    ImGui::TextDisabled("Insert serial number (byte 2 and 3):");
+    int hi = app->cart_edit_hi, lo = app->cart_edit_lo;
+    ImGui::PushItemWidth(60);
+    if (ImGui::InputScalar("Serial hi", ImGuiDataType_U8, &hi, NULL, NULL, "%02X",
+                           ImGuiInputTextFlags_CharsHexadecimal))
+        app->cart_edit_hi = (uint8_t)hi;
+    ImGui::SameLine();
+    if (ImGui::InputScalar("Serial lo", ImGuiDataType_U8, &lo, NULL, NULL, "%02X",
+                           ImGuiInputTextFlags_CharsHexadecimal))
+        app->cart_edit_lo = (uint8_t)lo;
+    ImGui::PopItemWidth();
+    if (ImGui::Button("Insert Key")) insert_manual_key(app);
+
+    ImGui::Separator();
+    ImGui::TextUnformatted("Cartridge ROM");
+    if (ImGui::Button("Load...")) open_cartridge_dialog(app);
+
+    ImGui::Separator();
+    ImGui::BeginDisabled(!app->cart_inserted);
+    if (ImGui::Button("Eject")) eject_cartridge(app);
+    ImGui::EndDisabled();
+
+    ImGui::End();
+}
+
 static void draw_menu_bar(App *app)
 {
     if (!ImGui::BeginMainMenuBar()) return;
@@ -615,6 +766,7 @@ static void draw_menu_bar(App *app)
             app->caps_lock = !app->caps_lock;
             set_status(app, "capitals lock %s", app->caps_lock ? "on (as shipped)" : "off");
         }
+        if (ImGui::MenuItem("Cartridge...")) app->show_cartridge = true;
         if (ImGui::BeginMenu("Speed")) {
             speed_menu_items(app);
             ImGui::EndMenu();
@@ -678,6 +830,17 @@ static void draw_menu_bar(App *app)
                     ImGui::GetColorU32(ImGuiCol_Separator), 1.0f);
         x -= gap;
 
+        /* The cartridge cell. Width reserved off the longest possible
+         * reading - a full-length truncated filename - so, like the speed
+         * cell, neither it nor anything left of it moves as the text
+         * changes. */
+        const float cart_w = ImGui::CalcTextSize("Cartridge: XXXXXXXXXXXXXX").x;
+        const float cart_centre = x - cart_w * 0.5f;
+        x -= cart_w + gap;
+        dl->AddLine(ImVec2(x + 0.5f, bar_y + 3.0f), ImVec2(x + 0.5f, bar_y + bar_h - 3.0f),
+                    ImGui::GetColorU32(ImGuiCol_Separator), 1.0f);
+        x -= gap;
+
         /* The speed cell. Its width is reserved off the widest string it can
          * ever hold, not the current one, so a reading that changes width -
          * "1x" to "~18.6x" - moves neither the cell nor the status text
@@ -706,12 +869,12 @@ static void draw_menu_bar(App *app)
              * lamps the moment a menu is added or the font changes. */
             if (app->win_shot_path && app->frames == 2)
                 SDL_Log("lamps: caps %.0f run %.0f drives %.0f %.0f %.0f rows %.0f-%.0f"
-                        " speed %.0f",
+                        " cartridge %.0f speed %.0f",
                         caps_centre, run_centre,
                         drives_left + letter_w * 0.5f,
                         drives_left + drive_cell + letter_w * 0.5f,
                         drives_left + 2 * drive_cell + letter_w * 0.5f,
-                        bar_y + 2.0f, bar_y + bar_h - 2.0f, speed_centre);
+                        bar_y + 2.0f, bar_y + bar_h - 2.0f, cart_centre, speed_centre);
 
             Lamp caps = lamp_button("##caps", caps_centre, caps_w, bar_y, bar_h);
             if (caps.clicked || caps.alt_clicked) {
@@ -756,6 +919,24 @@ static void draw_menu_bar(App *app)
                 const char letter[2] = { (char)('A' + u), '\0' };
                 dl->AddText(ImVec2(cx - letter_w * 0.5f, mid_y - font_h * 0.5f), ink, letter);
             }
+
+            /* Cartridge slot. Lit when something is inserted. Left click
+             * opens the Cartridge window; right click toggles insert/eject,
+             * restoring the last key/ROM without retyping or reloading. */
+            char cart_short[32];
+            cartridge_reading(app, cart_short, sizeof cart_short);
+            char cart_label[40];
+            SDL_snprintf(cart_label, sizeof cart_label, "Cartridge: %s", cart_short);
+            Lamp cart = lamp_button("##cartridge", cart_centre, cart_w, bar_y, bar_h);
+            if (cart.clicked) app->show_cartridge = true;
+            if (cart.alt_clicked) toggle_cartridge(app);
+            ImGui::SetItemTooltip("%s\nClick to open the Cartridge window,"
+                                  " right-click to %s.", cart_label,
+                                  app->cart_inserted ? "eject" : "re-insert");
+            const ImU32 cart_ink = lamp_paint(dl, cart, app->cart_inserted);
+            const float cart_tw = ImGui::CalcTextSize(cart_label).x;
+            dl->AddText(ImVec2(cart_centre - cart_tw * 0.5f, mid_y - font_h * 0.5f),
+                        cart_ink, cart_label);
 
             /* Speed. Lit when the machine is NOT running at its own rate,
              * which is the state worth noticing - the same reason the run
@@ -1190,7 +1371,7 @@ SDL_AppResult SDL_AppIterate(void *appstate)
         app->m.pio.verbose = v;
         app->m.dma.verbose = v;
         app->m.ctc.verbose = v;
-        app->m.sesam.verbose = v;
+        app->m.cartridge.verbose = v;
         app->m.keyboard.verbose = v;
         app->m.intctl.verbose = v;
     }
@@ -1198,6 +1379,11 @@ SDL_AppResult SDL_AppIterate(void *appstate)
     if (SDL_GetAtomicInt(&app->disk_pending)) {
         SDL_SetAtomicInt(&app->disk_pending, 0);
         mount_disk(app, app->pending_unit, app->disk_path);
+    }
+
+    if (SDL_GetAtomicInt(&app->cart_pending)) {
+        SDL_SetAtomicInt(&app->cart_pending, 0);
+        mount_cartridge(app, app->cart_path);
     }
 
     for (int i = 0; i < app->pushes; i++) {
@@ -1292,6 +1478,7 @@ SDL_AppResult SDL_AppIterate(void *appstate)
         }
         ImGui::NewFrame();
         draw_menu_bar(app);
+        draw_cartridge_window(app);
         bool want_pause_toggle = false;
         P2500PanelActions act = p2500_panels_draw(app->panels, app->m, app->dbg,
                                                   app->paused, &want_pause_toggle);
@@ -1423,5 +1610,6 @@ void SDL_AppQuit(void *appstate, SDL_AppResult)
     if (app->window) SDL_DestroyWindow(app->window);
     free(app->fb);
     for (unsigned u = 0; u < P2500_FDC_MAX_DRIVES; u++) free(app->disk[u]);
+    free(app->cart_buf);
     delete app;
 }

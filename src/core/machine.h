@@ -6,7 +6,7 @@
 #include <stddef.h>
 #include "vendor/superzazu_z80/z80.h"
 #include "fdc.h"
-#include "sesam.h"
+#include "cartridge.h"
 #include "pio.h"
 #include "dma.h"
 #include "ctc.h"
@@ -41,7 +41,8 @@ extern "C" {
  *            handshake/ready input the channel-0 transmit ISR waits on
  *            before shifting a byte out. See ctc.h.
  *   $08/$09  MC6845 CRTC (index/data)
- *   $0F      SESAM port (dongle / bootable-cartridge probe)
+ *   $0F      Cartridge slot (dongle / bootable-cartridge probe - SESAM is
+ *            its best-documented use)
  *   $10/$11  Z80A-PIO data registers (Port A/B)
  *   $12/$13  Z80A-PIO control registers (Port A/B)
  *   $14/$15  uPD765 FDC (main status / data)
@@ -158,7 +159,7 @@ typedef struct {
     unsigned long unhandled_in[256];
 
     P2500Fdc fdc;
-    P2500Sesam sesam;
+    P2500Cartridge cartridge;
     P2500Pio pio;
     P2500Dma dma;
     P2500Ctc ctc;
@@ -208,7 +209,7 @@ void p2500_init(P2500Machine *m);
 void p2500_set_log(P2500Machine *m, P2500LogFn fn, void *userdata);
 
 /* Power-cycle the machine while KEEPING everything a front-end attached:
- * the boot EPROM and character ROM images, the mounted disk, the SESAM
+ * the boot EPROM and character ROM images, the mounted disk, the cartridge
  * stream and any scripted keystrokes. Everything else - CPU,
  * RAM, video memory, every device, every counter - is cleared.
  *

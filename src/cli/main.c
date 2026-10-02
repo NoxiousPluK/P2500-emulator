@@ -150,7 +150,7 @@ static uint8_t *read_whole_file(const char *path, size_t *out_size) {
 int main(int argc, char **argv) {
     const char *rom_path = "roms/ipl.bin";
     const char *disk_paths[P2500_FDC_MAX_DRIVES] = {0};
-    const char *sesam_path = NULL;
+    const char *cart_path = NULL;
     const char *vram_dump_path = NULL;
     const char *vram_attr_dump_path = NULL;
     const char *screen_dump_path = NULL;
@@ -227,7 +227,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--disk") && i + 1 < argc) disk_paths[0] = argv[++i];
         else if (!strcmp(argv[i], "--disk-b") && i + 1 < argc) disk_paths[1] = argv[++i];
         else if (!strcmp(argv[i], "--disk-c") && i + 1 < argc) disk_paths[2] = argv[++i];
-        else if (!strcmp(argv[i], "--sesam") && i + 1 < argc) sesam_path = argv[++i];
+        else if (!strcmp(argv[i], "--cartridge") && i + 1 < argc) cart_path = argv[++i];
         else if (!strcmp(argv[i], "--dump-vram") && i + 1 < argc) vram_dump_path = argv[++i];
         else if (!strcmp(argv[i], "--dump-vram-attr") && i + 1 < argc) vram_attr_dump_path = argv[++i];
         else if (!strcmp(argv[i], "--dump-screen") && i + 1 < argc) screen_dump_path = argv[++i];
@@ -368,7 +368,7 @@ int main(int argc, char **argv) {
         } else {
             fprintf(stderr, "unknown or malformed argument: %s\n", argv[i]);
             fprintf(stderr, "usage: %s [--rom path] [--disk path] [--disk-b path] [--disk-c path]\n"
-                            "  [--sesam path]\n"
+                            "  [--cartridge path]\n"
                             "  [--dump-vram path] [--dump-vram-attr path] [--dump-screen file.ppm]\n"
                             "  [--dump-ram path]\n"
                             "  [--max-steps N] [--verbose-io] [--speed X|unlimited]\n"
@@ -429,7 +429,7 @@ int main(int argc, char **argv) {
     m.intctl.verbose = verbose_io;
     m.dma.verbose = verbose_io;
     m.ctc.verbose = verbose_io;
-    m.sesam.verbose = verbose_io;
+    m.cartridge.verbose = verbose_io;
     m.keyboard.verbose = verbose_io;
     m.serial.verbose = true; /* always show console TX - it's this project's only view of program output */
 
@@ -443,14 +443,14 @@ int main(int argc, char **argv) {
                swaps[sw].path, swaps[sw].size, swaps[sw].at_ms);
     }
 
-    uint8_t *sesam_buf = NULL;
-    size_t sesam_size = 0;
-    if (sesam_path) {
-        sesam_buf = read_whole_file(sesam_path, &sesam_size);
-        if (!sesam_buf) { fprintf(stderr, "failed to load SESAM stream %s\n", sesam_path); return 1; }
-        m.sesam.stream = sesam_buf;
-        m.sesam.stream_len = sesam_size;
-        printf("Loaded SESAM stream from %s (%zu bytes)\n", sesam_path, sesam_size);
+    uint8_t *cart_buf = NULL;
+    size_t cart_size = 0;
+    if (cart_path) {
+        cart_buf = read_whole_file(cart_path, &cart_size);
+        if (!cart_buf) { fprintf(stderr, "failed to load cartridge stream %s\n", cart_path); return 1; }
+        m.cartridge.stream = cart_buf;
+        m.cartridge.stream_len = cart_size;
+        printf("Loaded cartridge stream from %s (%zu bytes)\n", cart_path, cart_size);
     }
 
     for (int p = 0; p < num_pokes; p++) {
@@ -660,8 +660,8 @@ int main(int argc, char **argv) {
                    (double)m.total_instructions / wall / 1e6,
                    speed > 0.0 ? " - throttled by --speed" : "");
     }
-    if (m.sesam.reads || m.sesam.writes)
-        printf("SESAM port $0F: %lu read(s), %lu write(s)\n", m.sesam.reads, m.sesam.writes);
+    if (m.cartridge.reads || m.cartridge.writes)
+        printf("Cartridge port $0F: %lu read(s), %lu write(s)\n", m.cartridge.reads, m.cartridge.writes);
     {
         int any = 0;
         for (int pn = 0; pn < 256; pn++)
@@ -840,6 +840,6 @@ int main(int argc, char **argv) {
     free(ring);
     free(state_ring);
 
-    free(sesam_buf);
+    free(cart_buf);
     return 0;
 }

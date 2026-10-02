@@ -705,8 +705,8 @@ static void line_misc(const P2500Machine *m, int line,
                       char *label, size_t label_n, char *value, size_t value_n)
 {
     switch (line) {
-    case 0: LBL("SESAM (port $0F)");
-            VAL("%lu read(s), %lu write(s)", m->sesam.reads, m->sesam.writes);
+    case 0: LBL("Cartridge (port $0F)");
+            VAL("%lu read(s), %lu write(s)", m->cartridge.reads, m->cartridge.writes);
             break;
     case 1: {
         char t[128] = "";

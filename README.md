@@ -25,18 +25,15 @@ this software or do this research.
 
 ## Features
 
-- Full Z80 CPU emulation with a real IM2 interrupt daisy chain (CTC, PIO,
-  DMA, FDC)
-- CP/M 2.2 boot from floppy disk images, including mid-run disk swapping
-- MC6845 CRTC-driven text video (80×24, 8×12 cells) and 512×256
-  high-resolution graphics mode
-- A live keyboard, with the P2500's own key mapping
-- An SDL3 + Dear ImGui GUI with adjustable emulation speed (0.25×–8× or
-  unlimited) and a four-panel debugger: device state, memory, disassembly,
-  and a filterable diagnostic log
-- A headless CLI front-end (`p2500-emu`) for scripted runs, disk-image
-  probing, and automated testing — no display required
-- Tools to build and inspect P2500 CP/M disk images from the host
+- Full Z80 CPU emulation with a real IM2 interrupt daisy chain (CTC, PIO, DMA, FDC)
+- CP/M 2.2 boot from floppy disk images, including disk swapping
+- MC6845 CRTC-driven text video (80×24, 8×12 cells) and 512×256 high-resolution graphics mode
+- Cartridge support including SESAM-key emulation
+- Keyboard input
+- Adjustable emulation speed
+- An SDL3 + Dear ImGui GUI with debugger: device state, memory, disassembly, watches with auto-pause
+- A headless CLI front-end (`p2500-emu`) for scripted runs, disk-image probing, and automated testing
+- Some tools to build and inspect P2500 CP/M disk images
 
 ## Building
 
@@ -103,7 +100,7 @@ are configured — unshifted keys produce capitals.
 ### Menu bar
 
 **File**: Load Disk A/B/C, Reset, Pause, Screenshot, Quit.
-**Machine**: capitals lock, speed.
+**Machine**: capitals lock, Cartridge..., speed.
 **Debug**: the four debugger panels.
 
 At the right of the bar, a row of status lamps doubles as controls:
@@ -111,9 +108,17 @@ At the right of the bar, a row of status lamps doubles as controls:
 | Lamp | Shows | Click |
 |---|---|---|
 | `A B C` | a disk is attached in that drive | load a disk; right-click ejects |
+| `Cartridge: ...` | the port $0F cartridge slot's contents (SESAM key ID / loaded ROM) | opens the Cartridge window; right-click toggles insert/eject |
 | ▶ / ⏸ | running / paused | toggle pause |
 | ⊓⊔ | capitals lock | toggle |
 | `1x` | current speed (lit when not 1×) | toggle unlimited; right-click for the speed list |
+
+The **Cartridge** window (Machine menu, or click its lamp) covers port
+$0F; a generic plug-in slot whose best-documented use is the SESAM
+copy-protection dongle, though the same slot can hold other cartridges (the
+P2500's "Maint" diagnostic plug is a, first-party example). It lets you
+type in a SESAM key serial to unblock a disk image that is already SESAM-initialized
+against a real key, or load an arbitrary cartridge ROM file.
 
 ### GUI command-line options
 
@@ -166,7 +171,7 @@ scripted runs, probing, and disk-image inspection.
 | `--rom PATH` / `--charrom PATH` | boot EPROM, character generator |
 | `--disk PATH` / `--disk-b` / `--disk-c` | attach images in drives A:, B:, C: |
 | `--swap-at MS:PATH` | change disks at an emulated-time offset; `MS:B:PATH` targets a drive |
-| `--sesam PATH` | attach a byte stream to the SESAM dongle port |
+| `--cartridge PATH` | attach a byte stream to the port $0F cartridge slot (e.g. a SESAM dongle stream) |
 | `--type STRING` / `--type-after MS` / `--type-at MS:STRING` | scripted keystrokes via the queue |
 | `--push-at MS:STRING` | keystrokes via the live ring — the same path a GUI keypress takes |
 | `--max-steps N` | instruction budget (default 2,000,000) |
@@ -231,8 +236,8 @@ actually does.
 make test
 ```
 
-runs `tests/run_tests.sh`: 77 checks covering the SESAM cartridge boot
-path, the IPL and CP/M boot sequence, disk I/O (including mid-run swaps),
+runs `tests/run_tests.sh`: checks covering the cartridge-slot (SESAM)
+boot path, the IPL and CP/M boot sequence, disk I/O (including mid-run swaps),
 the video renderer (checked as pixels, not just state), the debugger
 panels, the disassembler (`tests/disasm_crosscheck.py`, cross-checked
 against `z80dasm` over ~34,000 instructions), and the speed control. Exit
@@ -258,7 +263,7 @@ docs/       user-facing documentation (porting CP/M software, etc.)
 
 `src/core/` holds the machine model — CPU wiring, the interrupt daisy
 chain, video, and each device (`ctc`, `pio`, `dma`, `fdc`, `keyboard`,
-`sesam`) — and nothing in it may depend on either front-end. `src/cli/`
+`cartridge`) — and nothing in it may depend on either front-end. `src/cli/`
 and `src/gui/` are both thin front-ends over the same core, so
 `p2500-emu --state`/`--disasm` and the GUI's panels can never disagree
 about what the machine is doing.

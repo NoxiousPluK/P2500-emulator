@@ -1,5 +1,5 @@
-#ifndef P2500_SESAM_H
-#define P2500_SESAM_H
+#ifndef P2500_CARTRIDGE_H
+#define P2500_CARTRIDGE_H
 
 #include <stdint.h>
 #include <stddef.h>
@@ -12,10 +12,12 @@ extern "C" {
 #endif
 
 /*
- * SESAM port ($0F) model - the copy-protection dongle / bootable-cartridge
- * slot. Protocol: OUT 15,1 (power on) / delay / OUT 15,3 (reset internal
- * read-address counter) / repeated IN 15 (auto-incrementing, no
- * re-addressing) / OUT 15,0 (power off).
+ * Cartridge slot ($0F) model - a generic plug-in socket. Its best-documented
+ * use is the SESAM copy-protection dongle, but the same slot also loads
+ * small programs (the P2500's own "Maint" diagnostic plug is a real,
+ * first-party example). Protocol: OUT 15,1 (power on) / delay / OUT 15,3
+ * (reset internal read-address counter) / repeated IN 15 (auto-incrementing,
+ * no re-addressing) / OUT 15,0 (power off).
  *
  * With no stream loaded, every read returns $FF - "nothing plugged in",
  * matching the ROM's own presence check (byte 0 must be $00 for the
@@ -33,11 +35,11 @@ typedef struct {
      * NULL is fine - the messages are simply discarded. */
     const P2500Log *log;
     bool verbose;
-} P2500Sesam;
+} P2500Cartridge;
 
-void p2500_sesam_init(P2500Sesam *s, const uint8_t *stream, size_t stream_len);
-uint8_t p2500_sesam_in(P2500Sesam *s);
-void p2500_sesam_out(P2500Sesam *s, uint8_t value);
+void p2500_cartridge_init(P2500Cartridge *s, const uint8_t *stream, size_t stream_len);
+uint8_t p2500_cartridge_in(P2500Cartridge *s);
+void p2500_cartridge_out(P2500Cartridge *s, uint8_t value);
 
 #ifdef __cplusplus
 }

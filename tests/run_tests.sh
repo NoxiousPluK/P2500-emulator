@@ -38,7 +38,7 @@ echo "== 1. SESAM bootable-cartridge banner (byte-exact VRAM)"
 if [ ! -f "$REF" ]; then
     fail "reference dump missing: $REF"
 else
-    $EMU --rom roms/ipl.bin --sesam tests/fixtures/sesam_banner_test.bin \
+    $EMU --rom roms/ipl.bin --cartridge tests/fixtures/sesam_banner_test.bin \
          --max-steps 2000000 --dump-vram "$TMP/sesam.bin" >"$TMP/sesam.log" 2>&1
     if cmp -s "$TMP/sesam.bin" "$REF"; then pass "VRAM identical to $REF"
     else fail "VRAM differs from $REF"; fi
@@ -140,7 +140,7 @@ echo "== 5. The undecoded-video-bank tripwire still fires"
 # undecoded $8000-$BFFF windows, the most likely home of the video card's
 # attribute plane. Nothing in any disk image does this, so without a
 # deliberate probe the diagnostic would be untested code that quietly rots.
-$EMU --sesam tests/fixtures/sesam_bank_probe.bin --max-steps 3000000 \
+$EMU --cartridge tests/fixtures/sesam_bank_probe.bin --max-steps 3000000 \
      >"$TMP/bank.log" 2>&1
 if grep -q 'selects an unknown \$8000-\$BFFF window' "$TMP/bank.log"; then
     pass "unknown bank select is logged"
@@ -589,7 +589,7 @@ echo "== 9. Core diagnostics go through the log callback"
 ./p2500-emu --disk "$DISK" --max-steps 4000000 --verbose-io --type 'DIR\r' \
     >/dev/null 2>"$TMP/verbose.err"
 missing=""
-for cat in ctc dma fdc io int pio sesam; do
+for cat in ctc dma fdc io int pio cartridge; do
     grep -q "^\[$cat\] " "$TMP/verbose.err" || missing="$missing $cat"
 done
 if [ -z "$missing" ]; then
