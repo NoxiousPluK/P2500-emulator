@@ -752,9 +752,8 @@ static void draw_about_window(App *app)
     ImGui::Spacing();
 
     time_t now = time(NULL);
-    struct tm tm_now;
-    localtime_r(&now, &tm_now);
-    ImGui::Text("(c) NoxiousPluK, %d", 1900 + tm_now.tm_year);
+    struct tm *tm_now = localtime(&now);
+    ImGui::Text("(c) NoxiousPluK, %d", 1900 + tm_now->tm_year);
 
     ImGui::Spacing();
     static const char url[] = "https://noxiouspl.uk/";
