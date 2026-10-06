@@ -51,6 +51,7 @@
 #include "core/machine.h"
 #include "core/debug.h"
 #include "core/video.h"
+#include "core/version.h"
 
 #include "panels.h"
 
@@ -143,6 +144,7 @@ struct App {
     char cart_name[64];           /* basename if loaded from a file; empty = manual key */
     bool cart_inserted;
     bool show_cartridge;          /* Cartridge window open flag */
+    bool show_about;              /* About window open flag */
     uint8_t cart_edit_hi, cart_edit_lo; /* live-typed serial bytes, not yet inserted */
     SDL_AtomicInt cart_pending;    /* set by the cartridge file-dialog callback */
     char cart_path[1024];
@@ -738,6 +740,39 @@ static void draw_cartridge_window(App *app)
     ImGui::End();
 }
 
+/* About dialog (in Help menu). */
+static void draw_about_window(App *app)
+{
+    if (!app->show_about) return;
+    ImGui::SetNextWindowSize(ImVec2(320, 0), ImGuiCond_FirstUseEver);
+    if (!ImGui::Begin("About", &app->show_about, ImGuiWindowFlags_NoResize)) { ImGui::End(); return; }
+
+    ImGui::TextUnformatted("Philips P2000B-P2500 emulator");
+    ImGui::Text("Version %s", P2500_VERSION_STR);
+    ImGui::Spacing();
+
+    time_t now = time(NULL);
+    struct tm tm_now;
+    localtime_r(&now, &tm_now);
+    ImGui::Text("(c) NoxiousPluK, %d", 1900 + tm_now.tm_year);
+
+    ImGui::Spacing();
+    static const char url[] = "https://noxiouspl.uk/";
+    ImVec2 url_pos = ImGui::GetCursorScreenPos();
+    ImVec2 url_size = ImGui::CalcTextSize(url);
+    bool url_hovered = ImGui::IsMouseHoveringRect(url_pos, ImVec2(url_pos.x + url_size.x, url_pos.y + url_size.y));
+    ImGui::PushStyleColor(ImGuiCol_Text, url_hovered ? IM_COL32_WHITE : ImGui::GetColorU32(ImGuiCol_Text));
+    ImGui::TextUnformatted(url);
+    ImGui::PopStyleColor();
+    if (url_hovered) ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+    if (ImGui::IsItemClicked()) SDL_OpenURL(url);
+
+    ImGui::Spacing();
+    if (ImGui::Button("Close")) app->show_about = false;
+
+    ImGui::End();
+}
+
 static void draw_menu_bar(App *app)
 {
     if (!ImGui::BeginMainMenuBar()) return;
@@ -776,6 +811,11 @@ static void draw_menu_bar(App *app)
 
     if (ImGui::BeginMenu("Debug")) {
         p2500_panels_menu(app->panels);
+        ImGui::EndMenu();
+    }
+
+    if (ImGui::BeginMenu("Help")) {
+        if (ImGui::MenuItem("About")) app->show_about = true;
         ImGui::EndMenu();
     }
 
@@ -1252,7 +1292,9 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[])
         return SDL_APP_FAILURE;
     }
     p2500_video_info(&app->m, &app->info);
-    if (!SDL_CreateWindowAndRenderer("Philips P2500", app->info.width * scale,
+    char window_title[64];
+    SDL_snprintf(window_title, sizeof window_title, "Philips P2500 v%s", P2500_VERSION_STR);
+    if (!SDL_CreateWindowAndRenderer(window_title, app->info.width * scale,
                                      app->info.height * scale + 24,
                                      SDL_WINDOW_RESIZABLE,
                                      &app->window, &app->renderer)) {
@@ -1479,6 +1521,7 @@ SDL_AppResult SDL_AppIterate(void *appstate)
         ImGui::NewFrame();
         draw_menu_bar(app);
         draw_cartridge_window(app);
+        draw_about_window(app);
         bool want_pause_toggle = false;
         P2500PanelActions act = p2500_panels_draw(app->panels, app->m, app->dbg,
                                                   app->paused, &want_pause_toggle);

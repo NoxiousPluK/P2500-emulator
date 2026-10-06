@@ -30,6 +30,13 @@ cd "$(dirname "$0")"
 WIN_SYSTEM_DLLS='^(KERNEL32|USER32|GDI32|ADVAPI32|SHELL32|SHLWAPI|OLE32|OLEAUT32|SETUPAPI|VERSION|WINMM|IMM32|COMDLG32|WS2_32|WININET|CRYPT32|DNSAPI|IPHLPAPI|NTDLL|MSVCRT|UXTHEME|DWMAPI)\.dll$|^api-ms-win-'
 MINGW_BIN=/usr/x86_64-w64-mingw32/bin
 
+# Single source of version truth is src/core/version.h
+VERSION=$(sed -n 's/^#define P2500_VERSION_STR "\(.*\)"/\1/p' src/core/version.h)
+if [ -z "$VERSION" ]; then
+    echo "publish.sh: could not read P2500_VERSION_STR from src/core/version.h" >&2
+    exit 1
+fi
+
 report() {
     echo
     echo "Published to $1/:"
@@ -68,6 +75,8 @@ EOF
     cp -r demos disks docs roms tools "$OUT/"
     rm -f "$OUT"/demos/*.COM
     find "$OUT/tools" -name '__pycache__' -exec rm -rf {} +
+
+    tar czf "publish/linux-x64-v$VERSION.tar.gz" -C publish linux-x64
 
     report "$OUT"
 }
@@ -131,6 +140,12 @@ publish_windows() {
     rm -f "$OUT"/demos/*.COM
     find "$OUT/tools" -name '__pycache__' -exec rm -rf {} +
     rm -rf "$hold"
+
+    if command -v zip >/dev/null 2>&1; then
+        (cd publish && zip -rq "windows-x64-v$VERSION.zip" windows-x64)
+    else
+        echo "publish.sh: zip not found - skipping windows-x64-v$VERSION.zip" >&2
+    fi
 
     report "$OUT"
 }

@@ -5,6 +5,7 @@
 #include "core/machine.h"
 #include "core/debug.h"
 #include "core/video.h"
+#include "core/version.h"
 #include <ctype.h>
 #include <time.h>
 #include <stdio.h>
@@ -148,6 +149,8 @@ static uint8_t *read_whole_file(const char *path, size_t *out_size) {
 }
 
 int main(int argc, char **argv) {
+    printf("p2500-emu %s\n", P2500_VERSION_STR);
+
     const char *rom_path = "roms/ipl.bin";
     const char *disk_paths[P2500_FDC_MAX_DRIVES] = {0};
     const char *cart_path = NULL;
