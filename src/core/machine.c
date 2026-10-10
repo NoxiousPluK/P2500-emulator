@@ -256,14 +256,27 @@ static void port_out(z80 *cpu, uint8_t port, uint8_t value) {
     case 0x10:
         p2500_pio_write_data(&m->pio, P2500_PIO_PORT_A, value);
         break;
-    case 0x11:
+    case 0x11: {
+        /* PIO port B bit 2 is the FDD card's uPD765 RESET line. Both
+         * drivers pulse it the same way before touching the controller:
+         * the IPL at $0AE5 ("LD A,$46 / OUT ($11) / LD A,$42 / OUT ($11)"
+         * followed by a settle delay), and P25K_G's CBIOS at $FA1A
+         * ($56 -> $52, then "IN A,($14) / CP $80" to confirm the
+         * controller came back idle). A release of that line is what
+         * re-arms the uPD765's unsolicited post-reset attention
+         * interrupt - see p2500_fdc_reset_line_released. */
+        uint8_t prev = m->pio.output_latch[P2500_PIO_PORT_B];
         p2500_pio_write_data(&m->pio, P2500_PIO_PORT_B, value);
+        if ((prev & P2500_FDC_PIO_B_RESET) && !(value & P2500_FDC_PIO_B_RESET))
+            p2500_fdc_reset_line_released(&m->fdc);
         break;
+    }
     case 0x12: {
-        /* The first two times this ROM
-         * arms PIO port A (the FDC's INT line) interrupts, stand in for
-         * the real uPD765's post-reset unsolicited interrupts - see
-         * p2500_fdc_raise_startup_interrupt's doc comment.
+        /* While the post-reset interrupt budget lasts (two per release of
+         * the RESET line - see port $11 above and
+         * p2500_fdc_raise_startup_interrupt's doc comment), arming PIO
+         * port A (the FDC's INT line) interrupts stands in for the real
+         * uPD765's post-reset unsolicited interrupts.
          *
          * Delivered as a one-shot pulse here, deliberately NOT via
          * fdc->int_line's normal held-level path: that path assumes

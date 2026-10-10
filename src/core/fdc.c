@@ -69,6 +69,18 @@ static void fire_interrupt(P2500Fdc *fdc) {
     if (fdc->on_interrupt) fdc->on_interrupt(fdc->interrupt_userdata);
 }
 
+void p2500_fdc_reset_line_released(P2500Fdc *fdc) {
+    /* See fdc.h. The budget goes back to its full cold-boot value rather
+     * than to 1: the IPL pulses RESET twice back-to-back at $0AE5 before
+     * drawing on it at all, so anything smaller would hand the IPL a
+     * shorter budget than it has today. */
+    fdc->real_operation_started = false;
+    fdc->startup_interrupts_remaining = 2;
+    if (fdc->verbose)
+        p2500_logf(fdc->log, P2500_LOG_TRACE, "fdc",
+                   "RESET released - post-reset interrupt budget refilled to 2");
+}
+
 bool p2500_fdc_raise_startup_interrupt(P2500Fdc *fdc) {
     if (fdc->real_operation_started || fdc->startup_interrupts_remaining <= 0) return false;
     fdc->startup_interrupts_remaining--;

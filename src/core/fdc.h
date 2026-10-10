@@ -92,7 +92,13 @@ typedef struct {
      * - it can only hijack control before the real command is sent, not
      * substitute for a real completion. Stops being drawn on once a real
      * Recalibrate/Seek/Read Data is issued (`real_operation_started`)
-     * too, as a second line of defense. */
+     * too, as a second line of defense.
+     *
+     * Refilled by p2500_fdc_reset_line_released() on every release of the
+     * controller's RESET line, not just the cold-boot one: a second
+     * driver taking the card over after the IPL (P25K_G's CBIOS does
+     * exactly this) resets it again and waits for its own post-reset
+     * attention interrupt. */
     int startup_interrupts_remaining;
     bool real_operation_started;
 
@@ -153,6 +159,26 @@ void p2500_fdc_attach(P2500Fdc *fdc, unsigned unit,
  * consumer of this synthetic interrupt reads a SENSE INTERRUPT STATUS
  * result to clear a held level). */
 bool p2500_fdc_raise_startup_interrupt(P2500Fdc *fdc);
+
+/*
+ * The controller's RESET line (PIO port B bit 2) went from asserted to
+ * released: refill the post-reset interrupt budget, because a real uPD765
+ * re-runs its drive-polling sweep after every reset and raises a fresh
+ * unsolicited interrupt from it - not only the first time.
+ *
+ * This matters for any driver that takes the card over after the IPL has
+ * already spent the cold-boot budget. P25K_G's CBIOS resets the controller
+ * at $FA1A, then arms "port B = $42, enable PIO-A interrupts, wait" at
+ * $FB1C and needs exactly one attention interrupt to get going; once it
+ * arrives, the CBIOS sets its own "already bootstrapped" flag ($FD24) and
+ * every later transfer runs the synchronous path instead. Without this it
+ * waited forever and the disk never reached the CP/M prompt.
+ * (P25K_B's newer CBIOS has an extra "IN A,($11) / AND $80" escape at
+ * $FABA that skips the wait entirely, which is why it booted regardless
+ * and hid this gap for so long.)
+ */
+void p2500_fdc_reset_line_released(P2500Fdc *fdc);
+
 uint8_t p2500_fdc_read_status(P2500Fdc *fdc);   /* port $14 */
 uint8_t p2500_fdc_read_data(P2500Fdc *fdc);     /* port $15 read */
 void p2500_fdc_write_data(P2500Fdc *fdc, uint8_t value); /* port $15 write */

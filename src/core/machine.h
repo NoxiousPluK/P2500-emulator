@@ -139,6 +139,10 @@ extern "C" {
  * named constant so it can be flipped in one place. */
 #define P2500_FDC_PIO_PORT P2500_PIO_PORT_A
 #define P2500_FDC_PIO_BIT 0
+/* PIO port B bit 2: the FDD card's uPD765 RESET line (see port $11's
+ * handler in machine.c). Port B's other output bits (1, 3, 4, 6) are
+ * still unidentified. */
+#define P2500_FDC_PIO_B_RESET 0x04
 
 typedef struct {
     z80 cpu;
