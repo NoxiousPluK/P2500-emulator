@@ -16,11 +16,20 @@
 # Neither p2500-emu link needs anything beyond its own OS's C runtime.
 # p2500-gui additionally needs SDL3, which most machines won't have
 # installed, so that library (and whatever it in turn pulls in - e.g.
-# libssp-0.dll from the mingw build) is vendored into lib/, and p2500-gui
-# becomes a wrapper that points the loader at lib/ before running the
-# real binary (p2500-gui.bin / p2500-gui.real.exe). Not vendored:
-# libc/libstdc++/libgcc - those are linked statically into the Windows
-# build already (see Makefile), and assumed present on any Linux host.
+# libssp-0.dll from the mingw build) is vendored alongside it. The two
+# targets need different handling:
+#
+#   Windows  the DLLs sit next to p2500-gui.exe, because the directory the
+#            .exe was loaded from is the FIRST entry in Windows' DLL search
+#            order - ahead of the system directories and PATH. No wrapper,
+#            no manifest, nothing to set: the .exe is directly runnable.
+#   Linux    ld.so has no equivalent rule, so the vendored libSDL3 goes in
+#            lib/ and p2500-gui is a shell wrapper that sets
+#            LD_LIBRARY_PATH before exec-ing p2500-gui.bin.
+#
+# Not vendored: libc/libstdc++/libgcc - those are linked statically into
+# the Windows build already (see Makefile), and assumed present on any
+# Linux host.
 set -eu
 cd "$(dirname "$0")"
 
@@ -100,13 +109,9 @@ publish_windows() {
 
     OUT=publish/windows-x64
     rm -rf "$OUT"
-    mkdir -p "$OUT/lib"
+    mkdir -p "$OUT"
 
-    cp p2500-emu.exe libp2500.a "$OUT/"
-    cp p2500-gui.exe "$OUT/p2500-gui.real.exe"
-    # A .cmd wrapper so lib/ is found by name (PATH-based DLL search)
-    # without needing a manifest or copying the DLLs next to the binary.
-    printf '@echo off\r\nset PATH=%%~dp0lib;%%PATH%%\r\n"%%~dp0p2500-gui.real.exe" %%*\r\n' > "$OUT/p2500-gui.cmd"
+    cp p2500-emu.exe p2500-gui.exe libp2500.a "$OUT/"
 
     # Transitive: a bundled DLL (SDL3.dll) can itself need one from the
     # mingw sysroot (libssp-0.dll) that p2500-gui.exe never mentions
@@ -125,7 +130,7 @@ publish_windows() {
             if printf '%s\n' "$dll" | grep -qiE "$WIN_SYSTEM_DLLS"; then continue; fi
             case " $seen " in *" $dll "*) continue ;; esac
             if [ -f "$MINGW_BIN/$dll" ]; then
-                cp "$MINGW_BIN/$dll" "$OUT/lib/"
+                cp "$MINGW_BIN/$dll" "$OUT/"
                 set -- "$@" "$dll"
             else
                 echo "publish.sh: could not find $dll under $MINGW_BIN - p2500-gui.exe" >&2

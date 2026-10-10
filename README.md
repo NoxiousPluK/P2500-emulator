@@ -69,7 +69,7 @@ Publishes ready to use binaries for Windows and Linux in `publish/`.
 Or on Windows:
 
 ```cmd
-p2500-gui.cmd --disk disks/P25K_B.raw --disk-b disks/P2500GAM.raw
+p2500-gui.exe --disk disks/P25K_B.raw --disk-b disks/P2500GAM.raw
 ```
 
 `disks/` holds known working disk images — a CP/M system disk, SuperCalc2,
