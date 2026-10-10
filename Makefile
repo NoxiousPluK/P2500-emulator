@@ -49,7 +49,7 @@ PKG_CONFIG = pkg-config
 EXE_SUFFIX =
 RES_OBJ =
 BIN_LDFLAGS =
-GUI_LDFLAGS =
+GUI_LDFLAGS = -Wl,-rpath,'$$ORIGIN/lib'
 endif
 
 # -MMD -MP emits a .d per object listing the headers it used, so editing a

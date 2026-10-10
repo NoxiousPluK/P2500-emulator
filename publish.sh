@@ -21,11 +21,11 @@
 #
 #   Windows  the DLLs sit next to p2500-gui.exe, because the directory the
 #            .exe was loaded from is the FIRST entry in Windows' DLL search
-#            order - ahead of the system directories and PATH. No wrapper,
-#            no manifest, nothing to set: the .exe is directly runnable.
-#   Linux    ld.so has no equivalent rule, so the vendored libSDL3 goes in
-#            lib/ and p2500-gui is a shell wrapper that sets
-#            LD_LIBRARY_PATH before exec-ing p2500-gui.bin.
+#            order - ahead of the system directories and PATH.
+#   Linux    the vendored libSDL3 goes in lib/, which p2500-gui finds
+#            through the RUNPATH of $ORIGIN/lib the Makefile links it with
+#            - $ORIGIN being the binary's own directory, so the tree stays
+#            relocatable.
 #
 # Not vendored: libc/libstdc++/libgcc - those are linked statically into
 # the Windows build already (see Makefile), and assumed present on any
@@ -61,16 +61,8 @@ publish_linux() {
     rm -rf "$OUT"
     mkdir -p "$OUT/lib"
 
-    cp p2500-emu libp2500.a "$OUT/"
-    cp p2500-gui "$OUT/p2500-gui.bin"
-    cat > "$OUT/p2500-gui" <<'EOF'
-#!/bin/sh
-# Wrapper: points the loader at lib/ (vendored SDL3) before exec-ing the
-# real binary. Keeps the published tree relocatable - no absolute paths.
-dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-LD_LIBRARY_PATH="$dir/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" exec "$dir/p2500-gui.bin" "$@"
-EOF
-    chmod +x "$OUT/p2500-gui" "$OUT/p2500-gui.bin" "$OUT/p2500-emu"
+    cp p2500-emu p2500-gui libp2500.a "$OUT/"
+    chmod +x "$OUT/p2500-gui" "$OUT/p2500-emu"
 
     sdl3=$(ldd p2500-gui | awk '/libSDL3\.so/ {print $3; exit}')
     if [ -z "${sdl3:-}" ] || [ ! -f "$sdl3" ]; then
