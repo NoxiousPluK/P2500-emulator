@@ -5,6 +5,9 @@
 #   1. SESAM  - the banner VRAM must be byte-identical to the Python-era
 #               reference dump. Guards the CPU core, the SESAM port and the
 #               video write path.
+#   1b.Banner - with no disk and no cartridge the IPL must come back out of
+#               the drive-ready path, print its banner and halt at $014D -
+#               what a real P2500 does.
 #   2. IPL    - Phase 1: a real disk boot must reach $4A00, plus the four
 #               sector-0 landmarks.
 #   3. CP/M   - Phase 2: page zero must hold CP/M's real vectors, CBIOS's
@@ -46,6 +49,65 @@ else
     if cmp -s "$TMP/sesam.bin" "$REF"; then pass "VRAM identical to $REF"
     else fail "VRAM differs from $REF"; fi
 fi
+
+echo "== 1b. No disk, no cartridge: the IPL banner and the halt at \$014D"
+# What a real P2500 does when it finds nothing to boot from, confirmed
+# against real hardware. The FDD card is present in this configuration,
+# the FDC presence probe at $0498 passes, and the IPL still has to come
+# back out of the drive-ready path and print the banner.
+$EMU --rom roms/ipl.bin --max-steps 2000000 --break 0x014D \
+     --dump-vram "$TMP/nodisk.bin" --dump-screen "$TMP/nodisk.ppm" \
+     >"$TMP/nodisk.log" 2>&1
+if grep -q 'Final: PC=\$014D' "$TMP/nodisk.log"; then
+    pass "diskless boot reaches the halt at \$014D"
+else fail "diskless boot never reached \$014D - the IPL is stuck again"; fi
+
+# Byte-exact, because the banner is a table of (address, string) records in
+# the ROM: if the row pitch is not 80 these offsets are not row starts.
+python3 - "$TMP/nodisk.bin" <<'PY' && pass "banner is at rows 6/9/12, and nothing else is on screen" || fail "banner VRAM is wrong"
+import sys
+v = open(sys.argv[1], 'rb').read()
+ok = True
+def check(cond, why):
+    global ok
+    if not cond:
+        print("    banner check failed: " + why); ok = False
+for off, want in ((0, b'\x9f'),                      # row 0 col 0
+                  (512, b'P H I L I P S'),           # row 6 col 32
+                  (752, b'MICROCOMPUTER'),           # row 9 col 32
+                  (995, b'P2000/B')):                # row 12 col 35
+    got = v[off:off + len(want)]
+    check(got == want, "at $%04X wanted %r, got %r" % (0x8000 + off, want, got))
+# 1 + 13 + 13 + 7 = 34 cells written; the rest of the visible page is clear.
+check(sum(1 for c in v[:1920] if c) == 34,
+      "%d non-zero cells on the visible page, expected 34" % sum(1 for c in v[:1920] if c))
+sys.exit(0 if ok else 1)
+PY
+
+# The $9F at row 0 col 0 is how the IPL extinguishes the hardware cursor:
+# the CRTC's non-blinking full-cell cursor sits on that cell and inverts
+# whatever is under it, so a blank reads as a solid block and the solid
+# block reads as blank. Both halves are asserted - checking only the final
+# frame would pass just as well if the cursor were not drawn at all.
+$EMU --rom roms/ipl.bin --max-steps 2000000 --break 0x013C \
+     --dump-screen "$TMP/precursor.ppm" >>"$TMP/nodisk.log" 2>&1
+python3 - "$TMP/precursor.ppm" "$TMP/nodisk.ppm" <<'PY' && pass "the \$9F block cancels the cursor at row 0 col 0" || fail "cursor/\$9F inversion is wrong"
+import sys
+def cell00(path):
+    d = open(path, 'rb').read()
+    hdr = d.split(b'\n', 3)
+    w, h = (int(v) for v in hdr[1].split())
+    px = d[len(b'\n'.join(hdr[:3])) + 1:]
+    # Any lit dot in the top-left character cell (8 x 12).
+    return any(px[((y * w + x) * 3) + 1] > 0x80
+               for y in range(12) for x in range(8))
+ok = True
+if not cell00(sys.argv[1]):
+    print("    before the banner: cell (0,0) is dark - the cursor is not drawn"); ok = False
+if cell00(sys.argv[2]):
+    print("    after the banner: cell (0,0) is lit - the $9F did not cancel it"); ok = False
+sys.exit(0 if ok else 1)
+PY
 
 echo "== 2. IPL disk boot reaches Phase 1's landmarks"
 if [ ! -f "$DISK" ]; then
