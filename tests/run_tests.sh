@@ -14,6 +14,9 @@
 #               the disk image actually contains. This exercises the whole
 #               chain at once: CTC channel 3 + port $06 in, the interrupt
 #               daisy chain, the FDC/DMA read path, and CONOUT.
+#   4c.Game   - and the same keystroke path must satisfy a program that
+#               polls BDOS function 6 in a loop instead of reading a line,
+#               all the way to a game that is actually playing.
 #
 # usage: tests/run_tests.sh   (or: make test)
 set -u
@@ -132,6 +135,49 @@ else
     if grep -q 'watch \$E1AD\] \$01 -> \$00.*written by \$E086' "$TMP/swap.err"; then
         pass "Ctrl-C clears the read-only flag"
     else fail "Ctrl-C did not clear the read-only flag"; fi
+fi
+
+echo "== 4c. A scripted session drives an interactive game (P25K_G, PAC.COM)"
+# The widest thing --type-at has to answer for: a program that polls BDOS
+# function 6 with E=$FF - direct console I/O, non-blocking - in a tight
+# loop, rather than reading a line through the CCP. PAC does that from
+# $0A25, so every poll either gets the byte or gets a zero, and a queue
+# that delivered bytes only on a read the program never makes would show
+# up here and nowhere else in this suite.
+#
+# Three claims, because "the screen changed" is not one: the setup screen
+# is reached, a scripted TAB lands in the program's own field index, and
+# two carriage returns - PAC has TWO setup screens, which is the whole
+# reason this once read as a harness bug - leave a game actually playing.
+GAMEDISK="disks/P25K_G.raw"
+if [ ! -f "$GAMEDISK" ]; then
+    echo "  SKIP  $GAMEDISK not present"
+else
+    $EMU --disk "$GAMEDISK" --max-steps 20000000 \
+         --type-at '4000:PAC\r' --type-at '12000:\t' --watch 45C5:1 \
+         --dump-vram "$TMP/pac.bin" >"$TMP/pac.log" 2>"$TMP/pac.err"
+    screen "$TMP/pac.bin" >"$TMP/pac.screen"
+    if grep -q '<TAB> next field' "$TMP/pac.screen"; then
+        pass "PAC.COM loads and draws its setup screen"
+    else fail "PAC.COM never drew its setup screen"; fi
+    # The field index itself, not a redraw: $0833 is PAC's own store.
+    if grep -q 'watch \$45C5\] \$00 -> \$01, written by \$0833' "$TMP/pac.err"; then
+        pass "a scripted TAB advances PAC's field index"
+    else fail "the scripted TAB never reached PAC's BDOS-6 poll"; fi
+
+    $EMU --disk "$GAMEDISK" --max-steps 35000000 \
+         --type-at '4000:PAC\r' --type-at '12000:\r' --type-at '14000:\r' \
+         --dump-vram "$TMP/pacrun.bin" >"$TMP/pacrun.log" 2>&1
+    screen "$TMP/pacrun.bin" >"$TMP/pacrun.screen"
+    # The title line survives both setup screens and is gone once the maze
+    # owns the display, so its absence is the state change, and a non-zero
+    # score is the game having actually run rather than merely redrawn.
+    if grep -q 'PACMAN' "$TMP/pacrun.screen"; then
+        fail "still on PAC's setup screen after two carriage returns"
+    else pass "two carriage returns leave PAC's setup screens"; fi
+    if grep -qE 'PLAYER 1: *[1-9]' "$TMP/pacrun.screen"; then
+        pass "the game is playing (PLAYER 1 has scored)"
+    else fail "the maze is up but nothing is moving"; fi
 fi
 
 echo "== 5. The undecoded-video-bank tripwire still fires"
