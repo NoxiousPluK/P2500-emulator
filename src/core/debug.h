@@ -77,12 +77,15 @@ typedef struct {
 /* ---------------------------------------------------------------- symbols */
 
 /* Names for addresses, so a listing reads `call SELDSK` instead of
- * `call $E620`. Nothing here is a constant of the machine: CP/M's BIOS
- * lives wherever this disk's CBIOS put it, which is why the table is
- * derived from live memory (p2500_debug_scan_symbols) rather than written
- * down. 14 characters holds the longest name this produces,
- * `SECTRAN.body`, with room to spare. */
-#define P2500_DEBUG_MAX_SYMBOLS 64
+ * `call $E620`. The CP/M names are not constants of the machine: its BIOS
+ * lives wherever this disk's CBIOS put it, which is why they are derived
+ * from live memory (p2500_debug_scan_symbols) rather than written down.
+ * Names that *are* fixed for a given build - the IPL's RAM block, CBIOS's
+ * internals - come from a symbol file instead
+ * (p2500_debug_load_symbols). 14 characters holds the longest name the
+ * scan produces, `SECTRAN.body`, with room to spare; the table holds a
+ * whole hand-written file plus a scan on top of it. */
+#define P2500_DEBUG_MAX_SYMBOLS 256
 #define P2500_DEBUG_SYMBOL_LEN 14
 
 typedef struct {
@@ -163,6 +166,57 @@ const char *p2500_debug_symbol(const P2500Debug *d, uint16_t addr);
  * nothing - when page zero does not hold CP/M's vectors, which is the
  * normal answer before the boot finishes. Safe to call repeatedly. */
 int p2500_debug_scan_symbols(P2500Debug *d, const P2500Machine *m);
+
+/* Load names from a text file: one `ADDR NAME` per line, ADDR in hex with
+ * an optional `$` or `0x`, `:` or `=` accepted in place of the space, `#`
+ * or `;` starting a comment, blank lines ignored. Returns how many names
+ * were added, or -1 on a bad file - in which case `err` (if given) holds a
+ * one-line `path:line: reason`. Names longer than P2500_DEBUG_SYMBOL_LEN-1
+ * are truncated rather than refused, and `*truncated` (if given) counts
+ * them, so a caller can say so. Since add_symbol keeps the first name for
+ * an address, loading before a scan means the file wins. */
+int p2500_debug_load_symbols(P2500Debug *d, const char *path,
+                             int *truncated, char *err, size_t errlen);
+
+/* ---------------------------------------------------- symbol auto-loading
+ *
+ * A symbol file's names belong to one build, and nothing in the machine
+ * says which build is running - but the build's own bytes do. So a file
+ * may carry fingerprint lines, which this checks before trusting it:
+ *
+ *   # match     ADDR:LEN:CRC32   CRC32 of LEN bytes of memory from ADDR
+ *   # match-rom ADDR:LEN:CRC32   the same over the boot EPROM image
+ *
+ * Several lines mean "any of these", so one file can cover several disks
+ * that ship the same BIOS. A file with no fingerprint is never
+ * auto-loaded, only loaded on request.
+ *
+ * `match` reads memory as the CPU sees it, which makes a rule expire by
+ * itself when what it describes is paged out or overwritten - that is a
+ * feature, and the reason symbols/ipl.sym fingerprints the EPROM through
+ * $0000 rather than as a ROM image: its names stop being true the moment
+ * CBIOS banks the EPROM away, and the rule stops matching at the same
+ * moment. Pick a window of code rather than state, and one that is empty
+ * before the build is resident, so a rule cannot match too early.
+ *
+ * `match-rom` reads the EPROM image regardless of banking, so it
+ * identifies a ROM build rather than a machine state. It is always true
+ * once that ROM is loaded - which is exactly what you want for naming the
+ * ROM itself, and exactly what you do not want for naming anything the
+ * ROM only builds temporarily. */
+
+/* 1 = a rule matched, 0 = rules present, none matched, -1 = no rules or
+ * the file cannot be read. */
+int p2500_debug_symbols_match(const char *path, const P2500Machine *m);
+
+/* Load the first fingerprint-matching .sym file in `dir` (files are tried
+ * in name order, so the answer does not depend on the filesystem).
+ * Returns names added, 0 if nothing matched, -1 if the directory cannot be
+ * read; `chosen` receives the path that matched. Safe to call repeatedly:
+ * before a guest BIOS is resident nothing matches, which is the correct
+ * answer at that point. */
+int p2500_debug_auto_symbols(P2500Debug *d, const P2500Machine *m,
+                             const char *dir, char *chosen, size_t chosenlen);
 
 /* Run until `addr` is reached, once. Replaces any armed one-shot. */
 void p2500_debug_run_to(P2500Debug *d, uint16_t addr);

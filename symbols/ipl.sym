@@ -1,0 +1,74 @@
+# IPL-era symbols for the P2500 boot EPROM and its RAM block.
+#
+#   ./p2500-emu --symbols symbols/ipl.sym --disasm 02DA:24
+#
+# Every name here is a fixed address of the boot ROM in roms/ipl.bin, or of
+# the RAM block that ROM builds at $FE00-$FF2F, so unlike the CP/M-era
+# names these can honestly be written down. Source: the ROM disassembly and
+# the decoded RAM map in the research notes' TODO.md ("Reference: RAM
+# addresses", IPL era). An address whose meaning is only a guess is not
+# listed; a dump of $FE00-$FEFF at a breakpoint is still the artifact to
+# read when one of these is not enough.
+#
+# Fingerprint, so `--symbols auto` can recognise this build without
+# being told which disk is in the drive:
+# The EPROM as the CPU sees it at $0000, NOT as a ROM image: that makes
+# the rule self-expiring, which is what this file needs. Every name here
+# is true exactly while the IPL owns the machine - once CBIOS banks the
+# EPROM out of $0000-$0FFF and builds its own IM2 table over $FE00, both
+# halves of this file are stale, and so is the fingerprint.
+# match 0000:0400:1C8DB59E
+#
+# Format: ADDR NAME, hex, one per line. $ or 0x prefix optional, : or =
+# accepted in place of the space, # and ; start a comment.
+
+# ---- ROM entry points
+0000 RESET
+0003 DISPATCH
+0100 COLDBOOT
+014D GIVEUP
+01EB VECT.COPY
+01FB VECT.SRC
+02DA DISPATCH.body
+0333 REQ.SUBMIT
+03E3 ISR.PRO1
+0422 DISPATCH.TAB
+043E ID0.DRIVEPREP
+0498 FDC.IDLECHK
+059C ID4.READDATA
+06C6 BUSYWAIT1
+0752 ISR.PRO2
+0798 BUSYWAIT2
+1000 BOOTSEC
+4A00 SEC0.TARGET
+
+# ---- the RAM block the IPL builds
+FE00 IM2.TABLE
+FE0A DEV.DISPATCH
+FE19 REQ.BLK1
+FE45 REQ.BLK2
+FE59 REQ.BLK3
+FE5E REQ.BLK4
+FE83 DPB.IPL
+FE84 DONE.CB
+FE88 SPT
+FE89 SECSIZE.N
+FE90 TRACK.MUL
+FE93 MODE.FLAG
+FE94 REQ.COPY
+FE9A SEC.COUNT
+FE9C DMA.BUFADDR
+FE9E REQ.PTR
+FEA0 PIOA.VEC
+FEA2 FDC.CMDBUF
+FEAC FDC.RESULT
+FEB3 DMA.TEMPL
+FEC9 TRAMPOLINE
+FECC DONE.TRAMP
+FECF DONE.STATUS
+FED5 BUSY.FLAG
+FED6 DRIVE.MODE
+FED8 PIOA.SHADOW
+FED9 CYL.CACHE
+FEDD FDC.OPCODE
+FF26 SAVED.SP

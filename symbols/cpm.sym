@@ -1,0 +1,165 @@
+# CP/M-era symbols, as laid out by P25K_B's CBIOS/PBIOS.
+#
+#   ./p2500-emu --symbols symbols/cpm.sym --disk disks/P25K_B.raw \
+#     --max-steps 60000000 --disasm ED2A:12
+#
+# BUILD-SPECIFIC, and measured as such. Checked against the live RAM of
+# every disk here that boots (tools/sym_check.py in the research repo,
+# 16-byte windows):
+#
+#   P25K_B    reference
+#   P25K_S    41 of 45 names at the same address, 0 moved
+#   P25TEST   41 of 45 names at the same address, 0 moved
+#   P25K_G    3 of 45 - do NOT use this file there; see p25k_g.sym
+#
+# The four that do not compare on S/P25TEST are live data, not refutations:
+# TICKS, KBD.RING, GENQ.BUF and DPH.TABLE hold values that differ between
+# two runs of the SAME disk, which is the control that says so.
+#
+# P25K_G carries the older PHILIPS P2000B generation: its SYSCBI.PHI loads
+# at $E200 like this one but is a different, shorter build ($E833 vs
+# $EABE), so nothing below can be reached by adding an offset. The emulator derives the parts that can be derived - the BDOS entry
+# and all 17 CBIOS jump-table slots with their bodies - out of the live
+# machine's own page zero, so those are deliberately NOT listed: this file
+# is for what a scan cannot see. Source: the research notes' TODO.md,
+# "Reference: RAM addresses", CP/M era.
+#
+# Fingerprint, so `--symbols auto` can recognise this build without
+# being told which disk is in the drive:
+# $E200-$E5FF is the first kilobyte of this CBIOS build, identical on
+# P25K_B, P25K_S and P25TEST and unchanged between runs (it is code,
+# not state). Before CP/M is resident that window is empty, so the rule
+# cannot match too early.
+# match E200:0400:22B19A76
+#
+# Format: ADDR NAME, hex, one per line. $ or 0x prefix optional, : or =
+# accepted in place of the space, # and ; start a comment.
+
+# ---- CP/M itself
+CC00 CCP
+D400 BDOS.base
+E086 BDOS.RESET
+E117 BDOS.RDROVEC
+E1AD RO.VECTOR
+E1AF LOGIN.VECTOR
+
+# ---- console
+E274 KEYXLAT.TAB
+E34C CAPS.MASK
+E34D ESC.COUNT
+E482 CAPS.TOGGLE
+E4B7 CONIN.XOR
+E4F8 CONOUT.XLAT
+
+# ---- disk
+E81D DPH.TABLE
+E84D DPB
+E87C DRIVE.MAP
+E880 DRIVE.RECS
+
+# ---- the driver layer
+EAC0 REQ.POST
+EB56 DEV.TABLE
+EBE2 EI.RETI
+EBE5 RING.PUSH
+EBFB RING.POP
+
+# ---- keyboard
+ED02 KBD.RINGINIT
+ED2A CTC3.ISR
+ED2D CTC3.ISR.body
+ED8F KBD.RING
+
+# ---- screen
+EDD5 SCREEN.DRV
+EDFC SCREEN.FNTAB
+EE91 SCREEN.WRITE
+F170 ESC.TAB
+F199 ESC.TAB2
+F43B ATTR.CUR
+F454 ATTR.TMPL
+F46C CRTC.R10TMPL
+F475 GENQ.WPTR
+FD23 GENQ.BUF
+
+# ---- clock
+F37F CTC2.ISR
+F382 CTC2.ISR.body
+F436 TICKS
+
+# ---- serial
+F546 BAUD.TAB
+F597 CTC0.ISR
+F5A6 TX.WAIT
+F669 CTC1.ISR
+F72A TX.FLAGS
+F72D TX.TIMEOUT
+
+# ---- CBIOS's own IM2 table, at I=$FF
+FF90 CBIOS.IM2
+
+# ---- The driver layer, read out of this build's own device table at
+#      $EB56 and each driver's function table. Added when P25K_G's
+#      equivalents were derived (tools/port_syms.py --devtable in the
+#      research repo), since the same structures name both builds.
+EB8B DRV.DISPATCH   ; every driver's `ld hl,fntab / call here`
+ECAB KBD.DRV        ; device $30
+ECC7 KBD.FNTAB
+ED89 KBD.REQ.PTR
+F430 SCREEN.REQ.P  
+F432 SCREEN.FLAGS   ; bit 2 drives the generated-code queue
+F4B9 SER.DRV        ; device $40 - serial/printer; its data sits with
+                    ; TX.FLAGS and the baud table
+F4D5 SER.FNTAB
+F72F SER.REQ.PTR
+F7A7 DISK.DRV       ; devices $00-$03
+F7D5 DISK.FNTAB     ; nine functions
+EC2B DEVFF.DRV      ; device $FF, purpose unidentified
+EC40 DEVFF.FNTAB
+
+# ---- The IM2 layer and the rest of the disk structures, same provenance
+FEE8 IM2.TRAMP      ; six trampolines, $FEE8 to $FF15, in vector order
+FF33 ISR.SHIM       ; saves A, patches its own jp with the handler address
+FFE7 ISR.SAVE.HL
+FBE8 PIOA.ISR       ; from the trampoline at $FEE8
+FB67 DMA.ISR        ; from the trampoline at $FEF1
+E809 DRIVE.CUR      ; SELDSK stores the selected drive here
+E85C SECTRAN.TAB    ; 01 02 05 06 09 0A 0D 0E ... - CP/M's own translate
+E93E DIRBUF         ; from DPH[0]
+E905 ALV.A
+E8D5 CSV.A
+E1C1 BDOS.DPBCOPY   ; BDOS's own copy of the DPB
+
+# ---- Derived straight from this machine's own tables by
+#      tools/derive_syms.py (research repo), which needs no
+#      reference build: the per-drive check and allocation
+#      vectors out of each DPH, and every driver's function
+#      entries out of its function table. Function codes are
+#      the driver's own; $05 is write on the screen driver.
+E8E5 CSV.B
+E8F5 CSV.C
+E918 ALV.B
+E92B ALV.C
+EC48 DEVFF.F00
+EC83 DEVFF.F03
+ECD5 KBD.F00
+ED0F KBD.F03
+ED1C KBD.F04
+EE0D SCREEN.F00
+EE3B SCREEN.F01
+EE57 SCREEN.F03
+EE7D SCREEN.F02
+F4E6 SER.F00
+F539 SER.F01
+F554 SER.F03
+F568 SER.F05
+F589 SER.F04
+F7F2 DISK.F00
+F83C DISK.F01
+F844 DISK.F02
+F868 DISK.F03
+F895 DISK.F06
+F89D DISK.F07
+F8A9 DISK.F04
+F8B8 DISK.F05
+F8C7 DISK.F08

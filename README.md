@@ -124,7 +124,8 @@ against a real key, or load an arbitrary cartridge ROM file.
 
 | Flag | |
 |---|---|
-| `--disk PATH` / `--disk-b` / `--disk-c` | attach images in drives A:, B:, C: |
+| `--disks A[,B[,C[,D]]]` | attach images to the four drives in order; an empty field skips one |
+| `--disk PATH` / `--disk-b` / `--disk-c` / `--disk-d` | the same, one drive at a time |
 | `--rom PATH` / `--charrom PATH` | boot EPROM, character generator |
 | `--scale N` | initial window zoom (the window is resizable and letterboxes with integer scaling) |
 | `--speed X` \| `unlimited` | initial emulation speed |
@@ -136,7 +137,9 @@ against a real key, or load an arbitrary cartridge ROM file.
 | `--mouse [FRAME:]X,Y[,left\|right]` | drive a synthetic pointer click (repeatable) |
 | `--ui-type FRAME:TEXT` | type into whichever panel widget has focus |
 | `--break ADDR` / `--watch ADDR` / `--watch-break ADDR` | stop / trace / stop-on-change |
+| `--symbols FILE` \| `auto` | load names from a symbol file (repeatable), or match the running build — see [Symbol files](#symbol-files) |
 | `--verbose-io` | arm every device's diagnostic log output |
+| `--help` | print the flag list and exit |
 
 The last five make the GUI fully scriptable with no display, which is how
 `make test` exercises it.
@@ -160,7 +163,8 @@ harness can't also report.
   to here*. With **symbols** ticked the listing reads `call CONIN` rather
   than `call $E209`: the names are read out of the running machine's own
   page zero and CBIOS jump table, so they belong to the disk that is
-  actually booted and there is nothing to show before CP/M is up.
+  actually booted and there is nothing to show before CP/M is up —
+  `--symbols` adds names that a running machine cannot be asked for.
   While paused, **Step back** / **Back 100** / **Back to brk** run the
   machine *backwards* — see below.
 - **Log** (F4) — every diagnostic the core produces, filterable by level
@@ -208,6 +212,84 @@ Media is outside the snapshots — disk images are immutable today — so a
 rewind across a disk write will need the writes journalled alongside them
 when write support lands.
 
+## Symbol files
+
+The debugger names what it can read out of the running machine: the BDOS
+entry, the 17 CBIOS jump-table slots and the routines behind them all come
+from the booted disk's own page zero, because that is the only honest
+source for an address CP/M chose at link time. Everything *else* worth a
+name — the IPL's RAM block, CBIOS's internals, the clock tick, the baud
+table — is fixed for a given build and is written down instead:
+
+```
+./p2500-emu --symbols symbols/ipl.sym --disasm 02DA:8
+./p2500-emu --disk disks/P25K_B.raw --symbols symbols/cpm.sym \
+            --max-steps 3000000 --disasm E4B7:4
+p2500-gui --disk disks/P25K_B.raw --symbols symbols/cpm.sym --panels disasm
+```
+
+```
+$E4B7: 3A 4C E3     ld a,(CAPS.MASK)
+```
+
+Three files ship in `symbols/`:
+
+- **`ipl.sym`** — the boot EPROM's entry points and the RAM block it
+  builds at `$FE00`–`$FF2F`. Good for any run, since the IPL is the same
+  ROM every time.
+- **`cpm.sym`** — CBIOS and PBIOS internals, read off `P25K_B` and checked
+  against every other disk here that boots: **41 of its 45 names are at the
+  same address on `P25K_S` and `P25TEST`**, and the four that are not are
+  live data (the clock tick, two buffers, the DPH table) that differs
+  between two runs of the *same* disk. So it covers that whole BIOS
+  generation.
+- **`p25k_g.sym`** — the same for `P25K_G`, which carries the older
+  `PHILIPS P2000B` generation and is a **different build, not a
+  relocation**: both `SYSCBI.PHI`s load at `$E200` but G's is shorter and
+  its CBIOS diverges from B's at the first instruction of CONIN, and while
+  its `SYSPBI.PHI` loads exactly `$C0` above B's, the routines inside have
+  drifted by `+$AF`, `+$BB`, `+$83`, `+$31` and `+$90`. So `cpm.sym` must
+  not be used on that disk (it matches 3 of 45 names there, and `make test`
+  asserts that too). This file was derived from G itself — its device
+  table, its IM2 trampolines, its own `SELDSK` and `CONIN`, and lockstep
+  disassembly against B — and it records four of B's names as having **no
+  counterpart**, which is a finding rather than a gap: G's clock ISR keeps
+  no tick counter, and its CBIOS has no key-translation table.
+
+### Finding the right one by itself
+
+`--symbols auto` (and the GUI, unless you name files yourself) identifies
+the running build from its own bytes. Each file carries a fingerprint:
+
+```
+# match 0000:0400:1C8DB59E      a CRC32 over memory, as the CPU sees it
+# match-rom 0000:1000:4CB66255  the same over the boot EPROM image
+```
+
+A file is loaded only if one of its rules holds, so a wrong name cannot
+appear — and because `match` reads memory *through the CPU's view*, a rule
+expires by itself when what it describes is paged out or overwritten.
+`ipl.sym` fingerprints the EPROM at `$0000`, which is true at reset and
+false the moment CBIOS banks it away — exactly when the IPL's names stop
+being right. The GUI re-checks a few times a second, so one run names the
+IPL during the boot and then the CBIOS that replaces it:
+
+```
+symbols: 47 name(s) from symbols/ipl.sym
+symbols: 96 name(s) from symbols/cpm.sym
+```
+
+### Writing one
+
+The format is one `ADDR NAME` per line — hex, `$` or `0x` optional, `:` or
+`=` accepted instead of the space, `#` and `;` start a comment, blank lines
+ignored. Names are at most 13 characters and are truncated (with a count
+reported) rather than refused. A syntax error names the file and line and
+is fatal, so a typo cannot quietly cost you a name. Files load in the order
+given and the first name for an address wins, which means a name you
+supply survives the machine's own scan. The GUI re-applies its `--symbols`
+files after a reset, which clears the derived ones.
+
 ## The headless harness
 
 `p2500-emu` is what `make test` drives, and is useful on its own for
@@ -216,7 +298,8 @@ scripted runs, probing, and disk-image inspection.
 | Flag | |
 |---|---|
 | `--rom PATH` / `--charrom PATH` | boot EPROM, character generator |
-| `--disk PATH` / `--disk-b` / `--disk-c` | attach images in drives A:, B:, C: |
+| `--disks A[,B[,C[,D]]]` | attach images to the four drives in order; an empty field skips one |
+| `--disk PATH` / `--disk-b` / `--disk-c` / `--disk-d` | the same, one drive at a time |
 | `--swap-at MS:PATH` | change disks at an emulated-time offset; `MS:B:PATH` targets a drive |
 | `--cartridge PATH` | attach a byte stream to the port $0F cartridge slot (e.g. a SESAM dongle stream) |
 | `--type STRING` / `--type-after MS` / `--type-at MS:STRING` | scripted keystrokes via the queue |
@@ -231,10 +314,12 @@ scripted runs, probing, and disk-image inspection.
 | `--state` | print every device's live state |
 | `--disasm ADDR[:COUNT]` | disassemble, bank-aware, with symbol names |
 | `--symbol ADDR:NAME` | name an address yourself; yours wins over a derived name |
+| `--symbols FILE` | load names from a symbol file (repeatable) — see [Symbol files](#symbol-files) |
 | `--step-over ADDR` | run to ADDR, then run the CALL there to completion and stop after it |
 | `--history` / `--step-back N` / `--seek N` / `--back-to ADDR` / `--back-to-break` / `--verify-rewind N` | rewind — see [Rewind](#rewind) |
 | `--verbose-io` | arm every device's diagnostics (very noisy) |
 | `--no-stuck-detect` | disable the state-hash cycle detector |
+| `--help` | print the flag list and exit |
 
 `P2500_TRACE_FROM` / `P2500_TRACE_TO` (environment variables) give a
 bounded per-step instruction trace.
@@ -316,6 +401,7 @@ tests/      the regression suite and its fixtures
 demos/      three graphics demos + a benchmark, in Z80 assembly
 disks/      CP/M disk images that boot on the emulator
 roms/       the boot EPROM and character ROM dumps
+symbols/    symbol files for the debugger (ADDR NAME, hex)
 docs/       user-facing documentation (porting CP/M software, etc.)
 ```
 

@@ -110,6 +110,18 @@ struct App {
      * Empty by default, which is what lets the run loop keep its
      * whole-frame fast path until the user actually asks for something. */
     P2500Debug dbg;
+    /* --symbols files, kept so they can be re-applied: a reset throws the
+     * symbol table away (the next disk's CBIOS lands elsewhere), but names
+     * the user supplied by hand are not the machine's to forget. */
+    static const int MAX_SYMFILES = 4;
+    const char *symfile[MAX_SYMFILES] = {0};
+    int symfiles = 0;
+    /* Auto-identification: with no --symbols given, watch for a build
+     * whose fingerprint one of the shipped files claims, and say so once.
+     * Re-armed by a reset or a change of media, because the answer can
+     * change - loading P25K_G after P25K_B is a different BIOS. */
+    bool symbols_auto = true;
+    char symbols_auto_from[256] = {0};
     /* Execution history, so the debugger can step BACKWARDS - a ring of
      * whole-machine snapshots plus a silent replay (core/history.h). Heap
      * allocated because it is ~7 MB, and cleared whenever the past stops
@@ -303,6 +315,11 @@ static void mount_disk(App *app, unsigned unit, const char *path)
     p2500_history_clear(app->hist);
     const char *base = SDL_strrchr(path, '/');
     SDL_strlcpy(app->disk_name[unit], base ? base + 1 : path, sizeof app->disk_name[unit]);
+    /* A new disk in A: may be a different BIOS generation, and the names
+     * for the old one would then be wrong. Nothing is cleared here - the
+     * running machine still holds the old CBIOS until it warm-boots - but
+     * the detector is allowed to notice when that changes. */
+    if (unit == 0) app->symbols_auto_from[0] = '\0';
     set_status(app, "%c: %s", 'A' + (int)unit, app->disk_name[unit]);
 }
 
@@ -399,6 +416,50 @@ static void open_cartridge_dialog(App *app)
 /* One place, because three things reach it: the File menu, F12, and the
  * run/pause lamp. Resuming clears any breakpoint stop, or Run would trip
  * straight back over the address it is standing on. */
+/* Load every --symbols file into the debug table, in the order given.
+ * Called once at startup and again after each reset, which clears the
+ * table: the CP/M names are the machine's to forget, the user's are not. */
+/* Try the shipped symbol files against what is actually in memory. Costs
+ * a CRC over a kilobyte per candidate, so it runs a few times a second
+ * rather than per frame, and stops once something matches. */
+static void try_auto_symbols(App *app)
+{
+    if (!app->symbols_auto) return;
+    /* What fits the machine as it stands - which changes as it boots: the
+     * IPL's own names are right at reset and wrong once CBIOS has banked
+     * the EPROM away and built its table over the IPL's RAM block. */
+    char chosen[256] = {0};
+    p2500_debug_auto_symbols(NULL, &app->m, "symbols", chosen, sizeof chosen);
+    if (!chosen[0] || !strcmp(chosen, app->symbols_auto_from)) return;
+    if (app->symbols_auto_from[0]) p2500_debug_clear_symbols(&app->dbg);
+    int added = p2500_debug_auto_symbols(&app->dbg, &app->m, "symbols",
+                                         chosen, sizeof chosen);
+    if (added <= 0) return;
+    SDL_strlcpy(app->symbols_auto_from, chosen, sizeof app->symbols_auto_from);
+    p2500_panels_log(app->panels, P2500_LOG_INFO, "symbols",
+                     "%d name(s) from %s - this build's own bytes match it",
+                     added, chosen);
+    /* Also to the terminal: a headless run is how the test suite sees it. */
+    SDL_Log("symbols: %d name(s) from %s", added, chosen);
+    set_status(app, "symbols: %s", chosen);
+}
+
+static int load_symbol_files(App *app)
+{
+    int total = 0;
+    for (int i = 0; i < app->symfiles; i++) {
+        char err[256] = {0};
+        int trunc = 0;
+        int n = p2500_debug_load_symbols(&app->dbg, app->symfile[i], &trunc,
+                                         err, sizeof err);
+        if (n < 0) { SDL_Log("%s", err); continue; }
+        SDL_Log("loaded %d symbol(s) from %s%s", n, app->symfile[i],
+                trunc ? " (some names truncated)" : "");
+        total += n;
+    }
+    return total;
+}
+
 static void toggle_pause(App *app)
 {
     app->paused = !app->paused;
@@ -793,6 +854,7 @@ static void draw_menu_bar(App *app)
         if (ImGui::MenuItem("Load Disk A...", "Ctrl+O")) open_disk_dialog(app, 0);
         if (ImGui::MenuItem("Load Disk B...")) open_disk_dialog(app, 1);
         if (ImGui::MenuItem("Load Disk C...")) open_disk_dialog(app, 2);
+        if (ImGui::MenuItem("Load Disk D...")) open_disk_dialog(app, 3);
         ImGui::Separator();
         if (ImGui::MenuItem("Reset", "Ctrl+R")) {
             p2500_reset(&app->m);
@@ -802,6 +864,8 @@ static void draw_menu_bar(App *app)
              * disk links its CBIOS somewhere else, so they have to be read
              * again rather than carried across. */
             p2500_debug_clear_symbols(&app->dbg);
+            app->symbols_auto_from[0] = '\0';
+            load_symbol_files(app);
             app->dbg.one_shot_armed = false;
             set_status(app, "reset - media still attached");
         }
@@ -1217,6 +1281,29 @@ static bool make_screen_texture(App *app)
     return app->fb != NULL;
 }
 
+/* One usage text for both callers: --help prints it to stdout and exits 0,
+ * a bad argument prints it to stderr and exits 1. */
+static void usage(FILE *out)
+{
+    fprintf(out, "usage: p2500-gui [--rom path] [--charrom path] [--scale N]\n"
+                 "                 [--disks A[,B[,C[,D]]]]\n"
+                 "                 [--disk path] [--disk-b path] [--disk-c path]\n"
+                 "                 [--disk-d path]\n"
+                 "                 [--frames N] [--screenshot out.ppm] [--shot-window out.ppm]\n"
+                 "                 [--push-at MS:STRING ...] [--no-caps-lock]\n"
+                 "                 [--panels devices,memory,disasm,log] [--verbose-io]\n"
+                 "                 [--paced] [--speed X|unlimited]\n"
+                 "                 [--mouse [FRAME:]X,Y[,left|right] ...]\n"
+                 "                 [--ui-type FRAME:TEXT ...]\n"
+                 "                 [--break ADDR ...] [--watch ADDR ...]\n"
+                 "                 [--watch-break ADDR ...]\n"
+                 "                 [--symbols FILE ...] [--help]\n"
+                 "\nWith no --symbols, the shipped symbols/*.sym are matched against\n"
+                 "the running build by fingerprint and the one that fits is loaded.\n"
+                 "\nAddresses are hex. Symbol files are one `ADDR NAME` per line;\n"
+                 "symbols/ipl.sym and symbols/cpm.sym ship with the emulator.\n");
+}
+
 SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[])
 {
     const char *rom = "roms/ipl.bin";
@@ -1244,13 +1331,40 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[])
     int nwatch = 0;
     uint16_t wbreak_at[MAX_PUSHES] = {0};
     int nwbreak = 0;
+    const char *symfiles[App::MAX_SYMFILES] = {0};
+    int nsymfile = 0;
 
     for (int i = 1; i < argc; i++) {
-        if (!strcmp(argv[i], "--rom") && i + 1 < argc) rom = argv[++i];
+        if (!strcmp(argv[i], "--help") || !strcmp(argv[i], "-h")) {
+            usage(stdout);
+            return SDL_APP_SUCCESS;
+        }
+        else if (!strcmp(argv[i], "--rom") && i + 1 < argc) rom = argv[++i];
         else if (!strcmp(argv[i], "--charrom") && i + 1 < argc) charrom = argv[++i];
         else if (!strcmp(argv[i], "--disk") && i + 1 < argc) disks[0] = argv[++i];
         else if (!strcmp(argv[i], "--disk-b") && i + 1 < argc) disks[1] = argv[++i];
         else if (!strcmp(argv[i], "--disk-c") && i + 1 < argc) disks[2] = argv[++i];
+        else if (!strcmp(argv[i], "--disk-d") && i + 1 < argc) disks[3] = argv[++i];
+        /* See the CLI's note: four is the hardware's number of select
+         * lines, not a claim about what the guest BIOS maps (three on
+         * P25K_B, two on P25K_G). */
+        else if (!strcmp(argv[i], "--disks") && i + 1 < argc) {
+            /* By hand, so an empty field skips a drive - see the CLI. */
+            char *p = argv[++i];
+            unsigned u = 0;
+            for (;;) {
+                char *comma = SDL_strchr(p, ',');
+                if (comma) *comma = '\0';
+                if (u >= P2500_FDC_MAX_DRIVES) {
+                    SDL_Log("--disks: at most %d images", P2500_FDC_MAX_DRIVES);
+                    return SDL_APP_FAILURE;
+                }
+                if (*p) disks[u] = p;
+                u++;
+                if (!comma) break;
+                p = comma + 1;
+            }
+        }
         else if (!strcmp(argv[i], "--scale") && i + 1 < argc) scale = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--frames") && i + 1 < argc) frame_limit = strtoul(argv[++i], NULL, 0);
         else if (!strcmp(argv[i], "--screenshot") && i + 1 < argc) shot_path = argv[++i];
@@ -1296,6 +1410,13 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[])
                 c2 ? ((c2[1] == 'r' || c2[1] == 'R') ? 2 : 1) : 0;
             mouse_steps++;
         }
+        else if (!strcmp(argv[i], "--symbols") && i + 1 < argc) {
+            if (nsymfile >= App::MAX_SYMFILES) {
+                SDL_Log("at most %d --symbols files", App::MAX_SYMFILES);
+                return SDL_APP_FAILURE;
+            }
+            symfiles[nsymfile++] = argv[++i];
+        }
         else if (!strcmp(argv[i], "--break") && i + 1 < argc && nbreak < MAX_PUSHES)
             break_at[nbreak++] = (uint16_t)strtoul(argv[++i], NULL, 16);
         else if (!strcmp(argv[i], "--watch") && i + 1 < argc && nwatch < MAX_PUSHES)
@@ -1311,16 +1432,8 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[])
             npush++;
         }
         else {
-            SDL_Log("usage: p2500-gui [--rom path] [--charrom path] [--scale N]\n"
-                    "                 [--disk path] [--disk-b path] [--disk-c path]\n"
-                    "                 [--frames N] [--screenshot out.ppm] [--shot-window out.ppm]\n"
-                    "                 [--push-at MS:STRING ...] [--no-caps-lock]\n"
-                    "                 [--panels devices,memory,disasm,log] [--verbose-io]\n"
-                    "                 [--paced] [--speed X|unlimited]\n"
-                    "                 [--mouse [FRAME:]X,Y[,left|right] ...]\n"
-                    "                 [--ui-type FRAME:TEXT ...]\n"
-                    "                 [--break ADDR ...] [--watch ADDR ...]\n"
-                    "                 [--watch-break ADDR ...]");
+            SDL_Log("unknown or malformed argument: %s", argv[i]);
+            usage(stderr);
             return SDL_APP_FAILURE;
         }
     }
@@ -1412,6 +1525,12 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[])
         int i = p2500_debug_add_watch(&app->dbg, wbreak_at[w], 1);
         if (i >= 0) app->dbg.watch[i].stop = true;
     }
+    for (int f = 0; f < nsymfile; f++) app->symfile[f] = symfiles[f];
+    app->symfiles = nsymfile;
+    /* Asking for files by name means you want those, not whatever the
+     * fingerprints find. */
+    app->symbols_auto = (nsymfile == 0);
+    load_symbol_files(app);
     p2500_debug_baseline(&app->dbg, &app->m);
     if (panels_arg) {
         app->panels.show_devices = strstr(panels_arg, "devices") != NULL;
@@ -1467,7 +1586,7 @@ SDL_AppResult SDL_AppEvent(void *appstate, SDL_Event *event)
         /* Menu accelerators win over the guest, which is why Ctrl-C still
          * reaches CP/M: it is deliberately not one of them. */
         if (ctrl && k == SDLK_O) { open_disk_dialog(app, 0); return SDL_APP_CONTINUE; }
-        if (ctrl && k == SDLK_R) { p2500_reset(&app->m); p2500_history_clear(app->hist); p2500_debug_baseline(&app->dbg, &app->m); p2500_debug_clear_symbols(&app->dbg); app->dbg.one_shot_armed = false; set_status(app, "reset - media still attached"); return SDL_APP_CONTINUE; }
+        if (ctrl && k == SDLK_R) { p2500_reset(&app->m); p2500_history_clear(app->hist); p2500_debug_baseline(&app->dbg, &app->m); p2500_debug_clear_symbols(&app->dbg); app->symbols_auto_from[0] = '\0'; load_symbol_files(app); app->dbg.one_shot_armed = false; set_status(app, "reset - media still attached"); return SDL_APP_CONTINUE; }
         if (ctrl && k == SDLK_Q) return SDL_APP_SUCCESS;
         if (k == SDLK_F10) { save_screenshot(app); return SDL_APP_CONTINUE; }
         if (k == SDLK_F12) { toggle_pause(app); return SDL_APP_CONTINUE; }
@@ -1556,6 +1675,7 @@ SDL_AppResult SDL_AppIterate(void *appstate)
     }
     measure_speed(app);
     app->frames++;
+    if ((app->frames % 15) == 0) try_auto_symbols(app);
 
     /* The CRTC can be reprogrammed by the guest - the manual's graphics mode
      * reinitialises it - so re-check the geometry rather than trusting the

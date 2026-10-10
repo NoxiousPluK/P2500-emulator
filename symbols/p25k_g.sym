@@ -1,0 +1,175 @@
+# P25K_G's CBIOS and PBIOS - the older PHILIPS P2000B generation, and the
+# only sample of it this project has. It is also the disk with the most
+# software on it, which is why it is worth naming.
+#
+#   ./p2500-emu --disk disks/P25K_G.raw --symbols symbols/p25k_g.sym \
+#     --max-steps 3000000 --disasm EDDC:12
+#   p2500-gui --disk disks/P25K_G.raw --symbols symbols/p25k_g.sym --panels disasm
+#
+# NOT symbols/cpm.sym plus an offset. Both SYSCBI.PHI files load at $E200,
+# but G's ends at $E833 where P25K_B's ends at $EABE, and its CBIOS is a
+# different implementation - the two diverge at the first instruction of
+# CONIN. Its SYSPBI.PHI loads at $EB80 against B's $EAC0, the +$C0 the
+# research notes record, but inside that module the routines have drifted
+# by their own amounts: +$AF, +$BB, +$83, +$31, and +$90 all appear below.
+#
+# How each name here was established, so it can be re-checked or refuted:
+#
+#   - the driver layer, from G's own device table and function tables,
+#     matched to B's by device id and function code (tools/sym_check.py's
+#     companion, tools/port_syms.py --devtable, in the research repo)
+#   - the interrupt handlers, from G's IM2 trampolines, which are the only
+#     place those addresses appear
+#   - the rest of PBIOS, by walking both builds' disassembly in lockstep
+#     from those entry points: every name below had at least two
+#     instructions whose operands say so, or was confirmed by hand
+#   - the CBIOS half, from G's own SELDSK, CONIN and CONOUT bodies
+#   - three tables, by content: the baud table and the sector-translate
+#     table are byte-identical to B's, and the escape table has the same
+#     {code, pointer} records
+#
+# Four names in cpm.sym have NO counterpart here, which is a finding, not
+# a gap in this file: TICKS (G's clock ISR has no counter block at all -
+# so nothing in RAM ticks at 50 Hz on this disk, and the field-sync trick
+# in demos/p2500.inc does not work), KEYXLAT.TAB (no key translation
+# table - no cursor diamond, no dead keys), ESC.COUNT and CONOUT.XLAT
+# (G's CONOUT only posts a request; the screen driver owns the escapes).
+#
+# Fingerprint, so `--symbols auto` can recognise this build without
+# being told which disk is in the drive:
+# the same window over P25K_G's own, different, CBIOS build.
+# match E200:0400:E2D1C08D
+#
+# Format: ADDR NAME, hex, one per line. $ or 0x prefix optional, : or =
+# accepted in place of the space, # and ; start a comment.
+
+# ---- CP/M itself: the same Digital Research build as every other disk
+#      here, byte-identical where it is code
+CC00 CCP
+D400 BDOS.base
+E086 BDOS.RESET
+E117 BDOS.RDROVEC
+E1AD RO.VECTOR
+E1AF LOGIN.VECTOR
+E1C1 BDOS.DPBCOPY   ; BDOS's own copy of the DPB - at $E1C1 in both builds
+
+# ---- CBIOS: disk, from G's SELDSK ($E469: drive*16 + $E233)
+E233 DPH.TABLE      ; stride 16; DPH[0] = XLT $E253, DIRBUF, DPB, CSV, ALV
+E253 SECTRAN.TAB    ; byte-identical to B's: 01 02 05 06 09 0A 0D 0E ...
+E273 DPB            ; SPT 32, BSH/BLM 4/15, EXM 1, DSM 149, DRM 63,
+                    ; CKS 16, OFF 2 - and AL0 $C0 where B has $80
+E291 DRIVE.MAP      ; two entries ($10 $10): this BIOS knows two drives
+E2A7 DRIVEMAP.PTR   ; SELDSK reads the map through this pointer
+E74B DRIVE.CUR      ; SELDSK stores the selected drive here
+E74C TRACK.CUR      ; SETTRK stores the track here
+E76B DIRBUF         ; from DPH[0]
+E7FF ALV.A          ; from DPH[0]
+E823 CSV.A          ; from DPH[0]
+
+# ---- CBIOS: console
+E2AF REQ.SUBMIT     ; one instruction, jp REQ.POST - CBIOS's door into PBIOS
+E390 CONIN.body     ; also derived live; here for when page zero is not CP/M's
+E3A8 CONIN.MASK     ; ld a,(CAPS.MASK) / and b
+E3AD CAPS.CHECK     ; polls KBD.REQ's status, then toggles the mask
+E3B9 CAPS.TOGGLE    ; xor $20 into CAPS.MASK
+E3C3 CAPS.MASK      ; $DF as shipped, and ANDed with the input - so this
+                    ; BIOS CLAMPS to upper case where B's XOR $20 SWAPS
+                    ; case. Verified by typing: `DIR` echoes `DIR` here
+                    ; and `dir` on P25K_B
+E3C4 KBD.REQ        ; the console-in request block
+E3C6 KBD.REQ.BUSY   ; CONIN spins on this before posting
+E3C8 KBD.REQ.STAT   ; and waits for $80 here
+E3C9 KBD.REQ2       ; a second block for device $30, posted by BOOT
+
+# ---- PBIOS: the request and driver layer
+EB80 REQ.POST       ; B $EAC0 +$C0 - post a request, then spin on its status
+EC16 DEV.TABLE      ; count byte, then {id, ptr_lo, ptr_hi}; ids $31 $30
+                    ; $00 $01 $40 $FF - two disk units, where B has four
+EC46 DRV.DISPATCH   ; every driver's `ld hl,fntab / call here`
+EC9D EI.RETI        ; how every handler releases the daisy chain
+ECA0 RING.PUSH      ; circular buffer push
+ECB6 RING.POP       ; and pop
+ECE6 DEVFF.DRV      ; device $FF, purpose unidentified (B $EC2B)
+ECFB DEVFF.FNTAB
+
+# ---- PBIOS: keyboard (device $30)
+ED5A KBD.DRV
+ED76 KBD.FNTAB      ; f00 $ED84, f01 $EDB1, f03 $EDBE, f04 $EDCB
+EDB1 KBD.RINGINIT
+EDD9 CTC3.ISR       ; keyboard byte-ready, from the IM2 trampoline at $FF2A
+EDDC CTC3.ISR.body  ; in a,($06) at $EDE7
+EE38 KBD.REQ.PTR    ; the driver's current request
+EE3E KBD.RING       ; header [count][write][read], 32 bytes at +3
+
+# ---- PBIOS: screen (device $31)
+EE84 SCREEN.DRV
+EEAB SCREEN.FNTAB   ; f00 $EEB9, f01 $EEDE, f03 $EEF7, f05 $EF1D
+EF1D SCREEN.WRITE   ; function $05
+F1FB ESC.TAB        ; {code, pointer} records, same shape as B's
+F224 ESC.TAB2       ; the alternate set
+F4B6 SCREEN.REQ.P  
+F4B8 SCREEN.FLAGS   ; bit 2 drives the generated-code queue below
+F4BE ATTR.CUR       ; current attribute; its low nibble reaches port $0A
+F4D7 ATTR.TMPL      ; 3E 00 D3 0A - the OUT ($0A) template
+F4EF CRTC.R10TMPL   ; the R10 write template used by ESC C / ESC c
+F4F8 GENQ.WPTR      ; write pointer into the generated-code queue
+FD54 GENQ.BUF       ; the queue itself, terminated $C9 and then called
+
+# ---- PBIOS: clock
+F40F CTC2.ISR       ; 50 Hz field strobe, from the trampoline at $FF33
+F412 CTC2.ISR.body  ; NO tick counter here - see the header
+
+# ---- PBIOS: serial / printer (device $40)
+F53C SER.DRV
+F558 SER.FNTAB      ; f00 $F569, f01 $F5BC, f03 $F5D7, f04 $F60C, f05 $F5EB
+F5C9 BAUD.TAB       ; 7 x {control, time constant}, byte-identical to B's
+F61A CTC0.ISR       ; transmit clock
+F629 TX.WAIT        ; waits on port $05 bit 6
+F6EC CTC1.ISR       ; receive sampler
+F7AD TX.FLAGS
+F7B0 TX.TIMEOUT
+F7B2 SER.REQ.PTR
+
+# ---- PBIOS: disk (devices $00 and $01)
+F82A DISK.DRV
+F858 DISK.FNTAB     ; nine functions, same codes as B's
+FBCC DMA.ISR        ; from the trampoline at $FF21
+FC4C PIOA.ISR       ; from the trampoline at $FF18
+
+# ---- The IM2 layer, at I=$FF
+FF18 IM2.TRAMP      ; six trampolines, $FF18 to $FF45, vector order
+FF63 ISR.SHIM       ; saves A, patches its own jp with the handler address
+FFC0 CBIOS.IM2      ; vectors $C0-$CB: CTC 0-3, PIO A, DMA
+FFDE ISR.SAVE.A
+FFDF ISR.SAVE.HL
+
+# ---- Derived straight from this machine's own tables by
+#      tools/derive_syms.py (research repo), which needs no
+#      reference build: the per-drive check and allocation
+#      vectors out of each DPH, and every driver's function
+#      entries out of its function table. Function codes are
+#      the driver's own; $05 is write on the screen driver.
+E7EB ALV.B
+E813 CSV.B
+ED03 DEVFF.F00
+ED3E DEVFF.F03
+ED84 KBD.F00
+EDBE KBD.F03
+EDCB KBD.F04
+EEB9 SCREEN.F00
+EEDE SCREEN.F01
+EEF7 SCREEN.F03
+F569 SER.F00
+F5BC SER.F01
+F5D7 SER.F03
+F5EB SER.F05
+F60C SER.F04
+F875 DISK.F00
+F8BB DISK.F01
+F8C3 DISK.F02
+F8F6 DISK.F03
+F91B DISK.F06
+F923 DISK.F07
+F92F DISK.F04
+F93E DISK.F05
+F94D DISK.F08

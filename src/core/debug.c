@@ -1,6 +1,8 @@
 #include "debug.h"
 
+#include <dirent.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 /* ======================================================================== *
@@ -316,6 +318,213 @@ int p2500_debug_scan_symbols(P2500Debug *d, const P2500Machine *m)
         p2500_debug_add_symbol(d, peek16(m, (uint16_t)(slot + 1)), body);
     }
     return d->syms - before;
+}
+
+/* One `ADDR NAME` line of a symbol file. Returns 0 on a blank/comment
+ * line, 1 when `addr` and `name` are filled, -1 on syntax. `name` points into
+ * `line`, which is modified in place. */
+static int parse_sym_line(char *line, uint16_t *addr, char **name)
+{
+    char *hash = strpbrk(line, "#;");
+    if (hash) *hash = '\0';
+    char *p = line;
+    while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n') p++;
+    if (!*p) return 0;
+
+    if (*p == '$') p++;
+    else if (p[0] == '0' && (p[1] == 'x' || p[1] == 'X')) p += 2;
+    unsigned v = 0;
+    int digits = 0;
+    for (; *p; p++, digits++) {
+        int nib;
+        if (*p >= '0' && *p <= '9') nib = *p - '0';
+        else if (*p >= 'a' && *p <= 'f') nib = *p - 'a' + 10;
+        else if (*p >= 'A' && *p <= 'F') nib = *p - 'A' + 10;
+        else break;
+        v = v * 16u + (unsigned)nib;
+    }
+    if (digits < 1 || digits > 4) return -1;
+
+    /* The separator is required: `E200SELDSK` is a typo, not a 4-digit
+     * address followed by a name. */
+    if (*p != ' ' && *p != '\t' && *p != ':' && *p != '=') return -1;
+    while (*p == ' ' || *p == '\t' || *p == ':' || *p == '=') p++;
+    char *end = p + strlen(p);
+    while (end > p && (end[-1] == ' ' || end[-1] == '\t' ||
+                       end[-1] == '\r' || end[-1] == '\n')) end--;
+    *end = '\0';
+    if (!*p) return -1;
+
+    *addr = (uint16_t)v;
+    *name = p;
+    return 1;
+}
+
+int p2500_debug_load_symbols(P2500Debug *d, const char *path,
+                             int *truncated, char *err, size_t errlen)
+{
+    if (truncated) *truncated = 0;
+    FILE *f = fopen(path, "r");
+    if (!f) {
+        if (err) snprintf(err, errlen, "%s: cannot open", path);
+        return -1;
+    }
+    const int before = d->syms;
+    char line[256];
+    int lineno = 0;
+    while (fgets(line, sizeof line, f)) {
+        lineno++;
+        uint16_t addr = 0;
+        char *name = NULL;
+        int got = parse_sym_line(line, &addr, &name);
+        if (got < 0) {
+            if (err) snprintf(err, errlen, "%s:%d: want ADDR NAME", path, lineno);
+            fclose(f);
+            d->syms = before;
+            return -1;
+        }
+        if (got == 0) continue;
+        if (strlen(name) >= P2500_DEBUG_SYMBOL_LEN && truncated) (*truncated)++;
+        if (p2500_debug_add_symbol(d, addr, name) < 0 &&
+            d->syms >= P2500_DEBUG_MAX_SYMBOLS) {
+            if (err) snprintf(err, errlen, "%s:%d: symbol table full (%d)",
+                              path, lineno, P2500_DEBUG_MAX_SYMBOLS);
+            fclose(f);
+            d->syms = before;
+            return -1;
+        }
+    }
+    fclose(f);
+    return d->syms - before;
+}
+
+/* ======================================================================== *
+ *  Symbol auto-loading
+ *
+ *  Which build is running is not something the machine will tell you, so
+ *  a symbol file states what it expects to find in memory and is only
+ *  believed when that checks out. See debug.h for the line format.
+ * ======================================================================== */
+
+/* Bitwise CRC-32 (reflected, 0xEDB88320) - the usual one, no table: this
+ * runs over a kilobyte a handful of times, not over a disk image. */
+static uint32_t crc32_bytes(const uint8_t *p, size_t n)
+{
+    uint32_t c = 0xFFFFFFFFu;
+    for (size_t i = 0; i < n; i++) {
+        c ^= p[i];
+        for (int k = 0; k < 8; k++)
+            c = (c >> 1) ^ (0xEDB88320u & (uint32_t)-(int32_t)(c & 1));
+    }
+    return ~c;
+}
+
+static uint32_t crc32_memory(const P2500Machine *m, uint32_t addr, uint32_t len)
+{
+    uint32_t c = 0xFFFFFFFFu;
+    for (uint32_t i = 0; i < len; i++) {
+        c ^= p2500_peek(m, (uint16_t)((addr + i) & 0xFFFF));
+        for (int k = 0; k < 8; k++)
+            c = (c >> 1) ^ (0xEDB88320u & (uint32_t)-(int32_t)(c & 1));
+    }
+    return ~c;
+}
+
+/* `# match ADDR:LEN:CRC` / `# match-rom ADDR:LEN:CRC`, else 0. */
+static int parse_match_line(const char *line, bool *rom, uint32_t *addr,
+                            uint32_t *len, uint32_t *crc)
+{
+    const char *p = line;
+    while (*p == ' ' || *p == '\t') p++;
+    if (*p != '#' && *p != ';') return 0;
+    p++;
+    while (*p == ' ' || *p == '\t') p++;
+    if (!strncmp(p, "match-rom", 9)) { *rom = true; p += 9; }
+    else if (!strncmp(p, "match", 5)) { *rom = false; p += 5; }
+    else return 0;
+    while (*p == ' ' || *p == '\t' || *p == ':' || *p == '=') p++;
+    char *end = NULL;
+    *addr = (uint32_t)strtoul(p, &end, 16);
+    if (!end || *end != ':') return 0;
+    *len = (uint32_t)strtoul(end + 1, &end, 16);
+    if (!end || *end != ':' || *len == 0) return 0;
+    *crc = (uint32_t)strtoul(end + 1, &end, 16);
+    return 1;
+}
+
+int p2500_debug_symbols_match(const char *path, const P2500Machine *m)
+{
+    FILE *f = fopen(path, "r");
+    if (!f) return -1;
+    char line[256];
+    int rules = 0, hit = 0;
+    while (fgets(line, sizeof line, f)) {
+        bool rom = false;
+        uint32_t addr = 0, len = 0, crc = 0;
+        if (!parse_match_line(line, &rom, &addr, &len, &crc)) continue;
+        rules++;
+        uint32_t got;
+        if (rom) {
+            if (addr + len > P2500_EPROM_SIZE) continue;
+            got = crc32_bytes(m->eprom + addr, len);
+        } else {
+            got = crc32_memory(m, addr, len);
+        }
+        if (got == crc) { hit = 1; break; }
+    }
+    fclose(f);
+    return rules == 0 ? -1 : hit;
+}
+
+int p2500_debug_auto_symbols(P2500Debug *d, const P2500Machine *m,
+                             const char *dir, char *chosen, size_t chosenlen)
+{
+    if (!dir || strlen(dir) > 400) return -1;
+    DIR *dp = opendir(dir);
+    if (!dp) return -1;
+    /* Name order, not readdir order: which file is tried first must not
+     * depend on the filesystem. */
+    enum { MAX_FILES = 32, NAME_LEN = 64 };
+    char names[MAX_FILES][NAME_LEN];
+    int n = 0;
+    struct dirent *e;
+    while ((e = readdir(dp)) && n < MAX_FILES) {
+        size_t l = strlen(e->d_name);
+        if (l < 5 || l >= NAME_LEN || strcmp(e->d_name + l - 4, ".sym")) continue;
+        snprintf(names[n++], NAME_LEN, "%s", e->d_name);
+    }
+    closedir(dp);
+    for (int i = 1; i < n; i++)
+        for (int j = i; j > 0 && strcmp(names[j - 1], names[j]) > 0; j--) {
+            char t[NAME_LEN];
+            memcpy(t, names[j - 1], NAME_LEN);
+            memcpy(names[j - 1], names[j], NAME_LEN);
+            memcpy(names[j], t, NAME_LEN);
+        }
+    /* Every match, not the first: two files can describe one machine
+     * truthfully at once - a user's own names beside a shipped set - and
+     * a rule that does not fit simply does not fire. Earlier files win on
+     * a shared address, which is add_symbol's rule already. */
+    int total = 0;
+    if (chosen && chosenlen) chosen[0] = '\0';
+    for (int i = 0; i < n; i++) {
+        char path[512];
+        if (snprintf(path, sizeof path, "%s/%s", dir, names[i]) >= (int)sizeof path)
+            continue;
+        if (p2500_debug_symbols_match(path, m) != 1) continue;
+        /* d == NULL is a dry run: report what WOULD be loaded. A caller
+         * that already auto-loaded needs to know when the answer has
+         * changed - a machine that has warm-booted into a different BIOS -
+         * without disturbing the table it is still using. */
+        int added = d ? p2500_debug_load_symbols(d, path, NULL, NULL, 0) : 1;
+        if (added < 0) continue;
+        total += added;
+        if (chosen && chosenlen) {
+            size_t at = strlen(chosen);
+            snprintf(chosen + at, chosenlen - at, "%s%s", at ? ", " : "", path);
+        }
+    }
+    return total;
 }
 
 /* Exactly four hex digits, and not a fifth: `$E206` is an address, `$0A`

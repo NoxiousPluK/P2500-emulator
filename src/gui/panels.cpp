@@ -316,12 +316,14 @@ static void draw_disasm(P2500Panels &p, const P2500Machine &m, P2500Debug &dbg,
     /* Attempted every frame rather than once: the table can only be read
      * out of a machine that has finished booting, and this is what notices
      * that it has. It is a two-byte test when the answer is no, and
-     * idempotent when the answer is yes. */
-    if (dbg.syms == 0) p2500_debug_scan_symbols(&dbg, &m);
+     * idempotent when the answer is yes - so it is NOT gated on the table
+     * being empty, which a --symbols file would make permanently false. */
+    p2500_debug_scan_symbols(&dbg, &m);
     ImGui::Checkbox("symbols", &p.disasm_symbols);
     if (ImGui::IsItemHovered())
-        ImGui::SetTooltip("%d names, read out of CP/M's page zero and CBIOS"
-                          " jump table", dbg.syms);
+        ImGui::SetTooltip("%d names: CP/M's page zero and CBIOS jump table,"
+                          " read out of the running machine, plus anything"
+                          " --symbols loaded", dbg.syms);
     ImGui::SameLine();
     uint16_t want = 0;
     if (addr_input("from", p.disasm_entry, sizeof p.disasm_entry, &want)) {

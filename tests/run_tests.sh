@@ -22,6 +22,13 @@
 #               all the way to a game that is actually playing.
 #   15.Rewind - going back N instructions and forward again must reproduce
 #               the machine byte for byte, and a rewind must emit nothing.
+#   16.Symbols- --help must work on both front-ends, the shipped
+#               symbols/*.sym addresses must agree with the running
+#               machine (each checked at an instruction that uses it), and
+#               --symbols auto must identify the build from its own bytes.
+#   17.Drives - four drive slots (the hardware's select lines), --disks
+#               placing images in order, and the guest BIOS refusing a
+#               letter it does not map.
 #   14.EOT    - a multi-sector read must stop at the last sector of the
 #               track. Unreachable from any guest program this project
 #               has, so it runs against the core directly.
@@ -1284,6 +1291,198 @@ if [ -x ./p2500-gui ] && [ -f "$DISK" ]; then
             pass "Back to brk says so when there is nothing to go back to"
         else fail "Back to brk failed silently"; fi
     fi
+fi
+
+
+echo "== 16. Symbol files, and --help"
+# Two claims. The small one: both front-ends answer --help on stdout with
+# status 0, and an unknown argument is still an error - a usage text that
+# only appears on failure is a usage text nobody can ask for.
+# The real one: the addresses in symbols/*.sym agree with the machine. A
+# name is a claim about where something lives, so each file is checked by
+# disassembling at an address that USES it and reading the operand back.
+for prog in "$EMU" ./p2500-gui; do
+    if [ ! -x "$prog" ]; then echo "  SKIP  $prog not built"; continue; fi
+    if "$prog" --help >"$TMP/help.out" 2>"$TMP/help.err" &&
+       grep -q 'usage:' "$TMP/help.out"; then
+        pass "$prog --help prints usage on stdout, exit 0"
+    else fail "$prog --help did not print usage with status 0"; fi
+    if "$prog" --no-such-flag >"$TMP/bad.out" 2>"$TMP/bad.err"; then
+        fail "$prog accepted --no-such-flag"
+    else pass "$prog rejects an unknown argument"; fi
+done
+
+# $02E3 is `ld hl,$FE0A`, the IPL loading the address of its own device
+# dispatch table - so ipl.sym's $FE0A entry has to show up as the operand.
+$EMU --symbols symbols/ipl.sym --max-steps 1 --disasm 02E3:1 \
+     >"$TMP/sym_ipl.log" 2>&1
+if grep -q 'ld hl,DEV.DISPATCH' "$TMP/sym_ipl.log"; then
+    pass "symbols/ipl.sym names \$FE0A where the IPL loads it"
+else fail "ipl.sym did not name \$FE0A at \$02E3"; fi
+
+if [ -f "$DISK" ]; then
+    # Same for the CP/M-era file, which is the build-specific one: $E4B7 is
+    # CONIN reading the capitals-lock mask at $E34C. Both names come out of
+    # cpm.sym, and CONIN - which does NOT - comes from the live scan, so
+    # one listing proves the two sources coexist.
+    $EMU --disk "$DISK" --symbols symbols/cpm.sym --max-steps 3000000 \
+         --disasm E4B7:1 --disasm E209:1 >"$TMP/sym_cpm.log" 2>&1
+    if grep -q 'CONIN.XOR:' "$TMP/sym_cpm.log" &&
+       grep -q 'ld a,(CAPS.MASK)' "$TMP/sym_cpm.log"; then
+        pass "symbols/cpm.sym names \$E34C where CONIN reads it"
+    else fail "cpm.sym did not name \$E34C at \$E4B7"; fi
+    if grep -q 'jp CONIN.body' "$TMP/sym_cpm.log"; then
+        pass "the live CBIOS scan still runs with a symbol file loaded"
+    else fail "a loaded symbol file suppressed the CBIOS scan"; fi
+
+    # A name the user wrote down wins over the one the scan would derive.
+    printf 'E206 MYCONST\n' >"$TMP/mine.sym"
+    $EMU --disk "$DISK" --symbols "$TMP/mine.sym" --max-steps 3000000 \
+         --disasm E206:1 >"$TMP/sym_win.log" 2>&1
+    if grep -q 'MYCONST:' "$TMP/sym_win.log" &&
+       ! grep -q '^ *CONST:' "$TMP/sym_win.log"; then
+        pass "a --symbols name overrides the scan's own"
+    else fail "the scan overwrote a name from --symbols"; fi
+fi
+
+# cpm.sym claims to hold for every disk of P25K_B's BIOS generation and
+# NOT for P25K_G's, which is a falsifiable claim about three disks.
+for d in P25K_S P25TEST; do
+    if [ ! -f "disks/$d.raw" ]; then echo "  SKIP  disks/$d.raw not present"; continue; fi
+    $EMU --disk "disks/$d.raw" --symbols symbols/cpm.sym --max-steps 3000000 \
+         --disasm E4B7:1 >"$TMP/sym_$d.log" 2>&1
+    if grep -q 'ld a,(CAPS.MASK)' "$TMP/sym_$d.log"; then
+        pass "symbols/cpm.sym holds on $d too"
+    else fail "cpm.sym's \$E34C does not hold on $d - the file's claim is wrong"; fi
+done
+
+if [ -f disks/P25K_G.raw ]; then
+    # The older PHILIPS P2000B generation. cpm.sym must NOT fit it - if this
+    # ever passes, that file has been generalised past what was measured.
+    $EMU --disk disks/P25K_G.raw --max-steps 3000000 --disasm E4B7:1 \
+         >"$TMP/sym_g.log" 2>&1
+    if grep -q 'ld a,(\$E34C)' "$TMP/sym_g.log"; then
+        fail "P25K_G now looks like P25K_B at \$E4B7 - re-measure cpm.sym"
+    else pass "P25K_G is a different build, as symbols/cpm.sym says"; fi
+    # And what p25k_g.sym does claim about it is checked the same way as
+    # the other files: at addresses whose contents say so. Four of them,
+    # one per way those names were derived - the IM2 trampolines, the
+    # device table, G's own SELDSK, and lockstep disassembly against
+    # P25K_B.
+    $EMU --disk disks/P25K_G.raw --symbols symbols/p25k_g.sym \
+         --max-steps 3000000 --disasm EC9D:2 --disasm E46B:1 \
+         --disasm EE8C:1 --disasm E3A8:2 >"$TMP/sym_g2.log" 2>&1
+    if grep -q 'EI.RETI:' "$TMP/sym_g2.log" &&
+       grep -q 'reti' "$TMP/sym_g2.log"; then
+        pass "symbols/p25k_g.sym names P25K_G's EI/RETI correctly"
+    else fail "p25k_g.sym's \$EC9D is not an EI/RETI"; fi
+    if grep -q 'ld hl,(DRIVEMAP.PTR)' "$TMP/sym_g2.log"; then
+        pass "p25k_g.sym's drive map pointer is where SELDSK reads it"
+    else fail "p25k_g.sym's \$E2A7 is not what SELDSK reads"; fi
+    if grep -q 'ld hl,SCREEN.FNTAB' "$TMP/sym_g2.log"; then
+        pass "p25k_g.sym's screen function table is the one its driver loads"
+    else fail "p25k_g.sym's \$EEAB is not the screen driver's table"; fi
+    if grep -q 'ld a,(CAPS.MASK)' "$TMP/sym_g2.log" &&
+       grep -q 'and b' "$TMP/sym_g2.log"; then
+        pass "p25k_g.sym's capitals mask is ANDed, as that BIOS does it"
+    else fail "p25k_g.sym's \$E3C3 is not CONIN's mask"; fi
+
+    # The two BIOS generations hold capitals lock differently, and it is
+    # visible from the prompt: P25K_B XORs $20, so typing DIR echoes dir,
+    # while P25K_G ANDs $DF, which clamps to upper case. Asserted because
+    # it is the one difference between them a user actually meets.
+    $EMU --disk "$DISK" --max-steps 40000000 --push-at '6000:DIR\r' \
+         --dump-vram "$TMP/caps_b.bin" >"$TMP/caps_b.log" 2>&1
+    $EMU --disk disks/P25K_G.raw --max-steps 40000000 --push-at '6000:DIR\r' \
+         --dump-vram "$TMP/caps_g.bin" >"$TMP/caps_g.log" 2>&1
+    screen "$TMP/caps_b.bin" >"$TMP/caps_b.screen"
+    screen "$TMP/caps_g.bin" >"$TMP/caps_g.screen"
+    if grep -q 'A>dir' "$TMP/caps_b.screen"; then
+        pass "P25K_B's capitals lock swaps case: DIR echoes dir"
+    else fail "P25K_B did not swap the case of DIR"; fi
+    if grep -q 'A>DIR' "$TMP/caps_g.screen"; then
+        pass "P25K_G's capitals lock clamps: DIR stays DIR"
+    else fail "P25K_G did not leave DIR alone"; fi
+fi
+
+# --symbols auto identifies the build from its own bytes. The claim is
+# that it follows the machine rather than the command line: the same
+# invocation must name the IPL early in the boot and the right CBIOS once
+# that CBIOS is resident, and must pick a different file for P25K_G.
+$EMU --symbols auto --max-steps 2000 >"$TMP/auto_ipl.log" 2>&1
+if grep -q 'from symbols/ipl.sym' "$TMP/auto_ipl.log"; then
+    pass "--symbols auto recognises the IPL with no disk attached"
+else fail "--symbols auto did not match symbols/ipl.sym at reset"; fi
+
+if [ -f "$DISK" ]; then
+    $EMU --disk "$DISK" --symbols auto --max-steps 3000000 \
+         >"$TMP/auto_b.log" 2>&1
+    if grep -q 'from symbols/cpm.sym' "$TMP/auto_b.log"; then
+        pass "--symbols auto recognises P25K_B's CBIOS once it is resident"
+    else fail "--symbols auto did not match symbols/cpm.sym"; fi
+    # The IPL's names are stale by then - its fingerprint is the EPROM seen
+    # through $0000, which CBIOS has banked away - so they must NOT load.
+    if grep -q 'from symbols/ipl.sym' "$TMP/auto_b.log"; then
+        fail "ipl.sym still matched after CBIOS banked the EPROM out"
+    else pass "the IPL's fingerprint expires when its names stop being true"; fi
+fi
+if [ -f disks/P25K_G.raw ]; then
+    $EMU --disk disks/P25K_G.raw --symbols auto --max-steps 3000000 \
+         >"$TMP/auto_g.log" 2>&1
+    if grep -q 'from symbols/p25k_g.sym' "$TMP/auto_g.log"; then
+        pass "--symbols auto tells the two BIOS generations apart"
+    else fail "--symbols auto did not match symbols/p25k_g.sym on P25K_G"; fi
+fi
+# And the GUI follows the machine as it boots, without being asked.
+if [ -x ./p2500-gui ] && [ -f "$DISK" ]; then
+    SDL_VIDEODRIVER=dummy ./p2500-gui --disk "$DISK" --frames 400 \
+        >"$TMP/auto_gui.log" 2>&1
+    if grep -q 'symbols: .* symbols/ipl.sym' "$TMP/auto_gui.log" &&
+       grep -q 'symbols: .* symbols/cpm.sym' "$TMP/auto_gui.log"; then
+        pass "the GUI re-identifies the build as the machine boots"
+    else fail "the GUI did not follow the build change during boot"; fi
+fi
+
+echo "== 17. Four drives, and --disks"
+# Four is the hardware's number: PIO port A bits 4-7 are one select line
+# per drive (T14). How many a guest BIOS maps is its own business.
+if [ ! -f disks/P2500GAM.raw ]; then
+    echo "  SKIP  disks/P2500GAM.raw not present"
+else
+    $EMU --disks "$DISK,,,disks/P2500GAM.raw" --max-steps 1000 \
+         >"$TMP/disks.log" 2>&1
+    if grep -q 'Loaded A: from' "$TMP/disks.log" &&
+       grep -q 'Loaded D: from' "$TMP/disks.log"; then
+        pass "--disks fills drives in order and an empty field skips one"
+    else fail "--disks did not place the images in A: and D:"; fi
+    # The fourth slot is the hardware's fourth select line, NOT a claim
+    # that anything maps it: P25K_B's CBIOS maps three drive letters and
+    # P25K_G's maps two. Both halves asserted, because the interesting
+    # failure would be a drive letter that silently reads the wrong unit.
+    $EMU --disks "$DISK,,disks/P2500GAM.raw" --max-steps 60000000 \
+         --push-at '4000:dir c:\r' --dump-vram "$TMP/c.bin" \
+         >"$TMP/dirc.log" 2>&1
+    screen "$TMP/c.bin" >"$TMP/dirc.screen"
+    if grep -q 'BLACKJAK' "$TMP/dirc.screen"; then
+        pass "DIR C: reads the third drive"
+    else fail "DIR C: did not read drive C"; fi
+    $EMU --disks "$DISK,,,disks/P2500GAM.raw" --max-steps 60000000 \
+         --push-at '4000:dir d:\r' --dump-vram "$TMP/d.bin" \
+         >"$TMP/dird.log" 2>&1
+    screen "$TMP/d.bin" >"$TMP/dird.screen"
+    if grep -q 'Bdos Err On D: Select' "$TMP/dird.screen"; then
+        pass "D: is attachable, and this CBIOS refuses it - it maps three"
+    else fail "DIR D: did not give the Select error P25K_B's CBIOS owes"; fi
+fi
+
+# And a bad file is refused with the line that caused it, not ignored.
+printf '# fine\nE200SELDSK\n' >"$TMP/broken.sym"
+if $EMU --symbols "$TMP/broken.sym" --max-steps 1 >"$TMP/sym_bad.log" 2>&1; then
+    fail "a malformed symbol file was accepted"
+else
+    if grep -q 'broken.sym:2:' "$TMP/sym_bad.log"; then
+        pass "a malformed symbol file names the offending line"
+    else fail "the symbol-file error did not name line 2"; fi
 fi
 
 

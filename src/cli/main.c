@@ -149,6 +149,31 @@ static uint8_t *read_whole_file(const char *path, size_t *out_size) {
     return buf;
 }
 
+/* Printed on request (--help, to stdout, exit 0) and on a bad argument (to
+ * stderr, exit 1) - one text, so the two can never drift apart. */
+static void usage(FILE *out, const char *argv0) {
+    fprintf(out, "usage: %s [--rom path] [--disk path] [--disk-b path] [--disk-c path]\n"
+                 "  [--charrom path] [--cartridge path]\n"
+                 "  [--dump-vram path] [--dump-vram-attr path] [--dump-screen file.ppm]\n"
+                 "  [--dump-ram path]\n"
+                 "  [--max-steps N] [--verbose-io] [--speed X|unlimited]\n"
+                 "  [--peek ADDR:LEN ...] [--poke ADDR:HEXBYTES ...]\n"
+                 "  [--watch ADDR[:LEN] ...] [--watch-break ADDR[:LEN] ...]\n"
+                 "  [--count ADDR ...] [--type STRING] [--type-after MS]\n"
+                 "  [--type-at MS:STRING ...]\n"
+                 "  [--break ADDR ...] [--step-over ADDR]\n"
+                 "  [--swap-at MS:PATH ...] [--push-at MS:STRING ...]\n"
+                 "  [--state] [--disasm ADDR[:COUNT] ...]\n"
+                 "  [--symbol ADDR:NAME ...] [--symbols FILE|auto ...]\n"
+                 "  [--history] [--step-back N] [--seek N]\n"
+                 "  [--back-to-break] [--back-to ADDR] [--verify-rewind N]\n"
+                 "  [--no-stuck-detect] [--help]\n"
+                 "\nAddresses are hex. Symbol files are one `ADDR NAME` per line;\n"
+                 "symbols/ shipped files name the IPL, CP/M's CBIOS and P25K_G's.\n"
+                 "`--symbols auto` picks the one whose fingerprint matches the\n"
+                 "build that is actually running.\n", argv0);
+}
+
 int main(int argc, char **argv) {
     printf("p2500-emu %s\n", P2500_VERSION_STR);
 
@@ -236,6 +261,9 @@ int main(int argc, char **argv) {
     P2500History *hist = NULL;
     int exit_status = 0;
     bool stuck_detect = true;
+    /* --symbols auto: identify the running build by fingerprint once it is
+     * resident, rather than being told which disk is in the drive. */
+    bool auto_symbols = false;
     /* --swap-at MS:PATH - change the disk in the drive partway through a
      * run, the way a person would. Reads pick the new disk up at once - a
      * DIR straight after a swap lists it - because CP/M re-reads the
@@ -254,10 +282,43 @@ int main(int argc, char **argv) {
     int num_pushes = 0;
 
     for (int i = 1; i < argc; i++) {
-        if (!strcmp(argv[i], "--rom") && i + 1 < argc) rom_path = argv[++i];
+        if (!strcmp(argv[i], "--help") || !strcmp(argv[i], "-h")) {
+            usage(stdout, argv[0]);
+            return 0;
+        }
+        else if (!strcmp(argv[i], "--rom") && i + 1 < argc) rom_path = argv[++i];
         else if (!strcmp(argv[i], "--disk") && i + 1 < argc) disk_paths[0] = argv[++i];
         else if (!strcmp(argv[i], "--disk-b") && i + 1 < argc) disk_paths[1] = argv[++i];
         else if (!strcmp(argv[i], "--disk-c") && i + 1 < argc) disk_paths[2] = argv[++i];
+        else if (!strcmp(argv[i], "--disk-d") && i + 1 < argc) disk_paths[3] = argv[++i];
+        /* --disks A,B,C,D fills the drives in order. Four is the HARDWARE's
+         * number - PIO port A bits 4-7 are one select line per drive (T14) -
+         * and not a claim about any BIOS: P25K_B's CBIOS maps three drive
+         * letters (its per-drive records at $E880 end with a $03
+         * terminator) and P25K_G's maps two. So a disk in D: is attached to
+         * a drive the running CP/M will refuse to select, which is what a
+         * real machine does too, and is why the slot exists anyway: it is
+         * the drive, not the BIOS, that this models. */
+        else if (!strcmp(argv[i], "--disks") && i + 1 < argc) {
+            /* Split by hand rather than with strtok: an empty field must
+             * SKIP a drive (`--disks a.raw,,c.raw` leaves B: empty), and
+             * strtok collapses those away. */
+            char *p = argv[++i];
+            unsigned u = 0;
+            for (;;) {
+                char *comma = strchr(p, ',');
+                if (comma) *comma = '\0';
+                if (u >= P2500_FDC_MAX_DRIVES) {
+                    fprintf(stderr, "--disks: at most %d images\n",
+                            P2500_FDC_MAX_DRIVES);
+                    return 1;
+                }
+                if (*p) disk_paths[u] = p;
+                u++;
+                if (!comma) break;
+                p = comma + 1;
+            }
+        }
         else if (!strcmp(argv[i], "--cartridge") && i + 1 < argc) cart_path = argv[++i];
         else if (!strcmp(argv[i], "--dump-vram") && i + 1 < argc) vram_dump_path = argv[++i];
         else if (!strcmp(argv[i], "--dump-vram-attr") && i + 1 < argc) vram_attr_dump_path = argv[++i];
@@ -381,6 +442,23 @@ int main(int argc, char **argv) {
             back_to_pc = (long)strtoul(argv[++i], NULL, 16);
         else if (!strcmp(argv[i], "--verify-rewind") && i + 1 < argc)
             verify_rewind = (long)strtoul(argv[++i], NULL, 0);
+        else if (!strcmp(argv[i], "--symbols") && i + 1 < argc &&
+                 !strcmp(argv[i + 1], "auto")) {
+            /* Deferred: nothing a symbol file fingerprints is in memory
+             * yet, so the attempt belongs after the run. */
+            auto_symbols = true;
+            i++;
+        }
+        else if (!strcmp(argv[i], "--symbols") && i + 1 < argc) {
+            char err[256] = {0};
+            int trunc = 0;
+            int n = p2500_debug_load_symbols(&dbg, argv[++i], &trunc, err, sizeof err);
+            if (n < 0) { fprintf(stderr, "%s\n", err); return 1; }
+            printf("Loaded %d symbol(s) from %s", n, argv[i]);
+            if (trunc) printf(" (%d name(s) truncated to %d chars)",
+                              trunc, P2500_DEBUG_SYMBOL_LEN - 1);
+            printf("\n");
+        }
         else if (!strcmp(argv[i], "--symbol") && i + 1 < argc) {
             char *arg = argv[++i];
             char *colon = strchr(arg, ':');
@@ -426,21 +504,7 @@ int main(int argc, char **argv) {
             num_pokes++;
         } else {
             fprintf(stderr, "unknown or malformed argument: %s\n", argv[i]);
-            fprintf(stderr, "usage: %s [--rom path] [--disk path] [--disk-b path] [--disk-c path]\n"
-                            "  [--cartridge path]\n"
-                            "  [--dump-vram path] [--dump-vram-attr path] [--dump-screen file.ppm]\n"
-                            "  [--dump-ram path]\n"
-                            "  [--max-steps N] [--verbose-io] [--speed X|unlimited]\n"
-                            "  [--peek ADDR:LEN ...] [--poke ADDR:HEXBYTES ...]\n"
-                            "  [--watch ADDR[:LEN] ...] [--watch-break ADDR[:LEN] ...]\n"
-                            "  [--count ADDR ...] [--type STRING] [--type-after MS]\n"
-                            "  [--type-at MS:STRING ...]\n"
-                            "  [--break ADDR ...] [--step-over ADDR]\n"
-                            "  [--swap-at MS:PATH ...] [--push-at MS:STRING ...]\n"
-                            "  [--state] [--disasm ADDR[:COUNT] ...] [--symbol ADDR:NAME ...]\n"
-                            "  [--history] [--step-back N] [--seek N]\n"
-                            "  [--back-to-break] [--back-to ADDR] [--verify-rewind N]\n"
-                            "  [--no-stuck-detect]\n", argv[0]);
+            usage(stderr, argv[0]);
             return 1;
         }
     }
@@ -885,6 +949,18 @@ int main(int argc, char **argv) {
      * table: before CP/M is up this adds nothing and the listing is
      * unchanged, which is the honest answer at that point. --symbol names
      * were added at parse time and so survive this. */
+    if (auto_symbols) {
+        char chosen[512] = {0};
+        int added = p2500_debug_auto_symbols(&dbg, &m, "symbols", chosen,
+                                             sizeof chosen);
+        if (added > 0)
+            printf("\nSymbols: %d from %s, matched against this machine's "
+                   "own bytes\n", added, chosen);
+        else if (added == 0)
+            printf("\nSymbols: no file in symbols/ fingerprints this build\n");
+        else
+            printf("\nSymbols: symbols/ could not be read\n");
+    }
     {
         int found = p2500_debug_scan_symbols(&dbg, &m);
         if (found > 0 && num_disasms > 0)

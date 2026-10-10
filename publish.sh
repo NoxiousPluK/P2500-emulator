@@ -73,7 +73,7 @@ publish_linux() {
     fi
 
     cp README.md "$OUT/"
-    cp -r demos disks docs roms tools "$OUT/"
+    cp -r demos disks docs roms symbols tools "$OUT/"
     rm -f "$OUT"/demos/*.COM
     find "$OUT/tools" -name '__pycache__' -exec rm -rf {} +
 
@@ -133,7 +133,7 @@ publish_windows() {
     done
 
     cp README.md "$OUT/"
-    cp -r "$hold/demos" disks docs roms tools "$OUT/"
+    cp -r "$hold/demos" disks docs roms symbols tools "$OUT/"
     rm -f "$OUT"/demos/*.COM
     find "$OUT/tools" -name '__pycache__' -exec rm -rf {} +
     rm -rf "$hold"
