@@ -22,7 +22,12 @@ CC = x86_64-w64-mingw32-gcc
 CXX = x86_64-w64-mingw32-g++
 AR = x86_64-w64-mingw32-ar
 PKG_CONFIG = x86_64-w64-mingw32-pkg-config
+WINDRES = x86_64-w64-mingw32-windres
 EXE_SUFFIX = .exe
+# The PE icon resource. Windows reads the .exe's own icon off this; the
+# SDL window icon is set at runtime from the same artwork (src/gui/icon.cpp).
+# ELF has no equivalent, so this is Windows-only and stays empty elsewhere.
+RES_OBJ = src/win/p2500.res.o
 # p2500-emu has no other dependencies, so link it fully static: no
 # MinGW-runtime DLLs to carry, only the Universal CRT forwarder DLLs,
 # which Windows 10+ ships itself.
@@ -42,6 +47,7 @@ CXX = c++
 AR = ar
 PKG_CONFIG = pkg-config
 EXE_SUFFIX =
+RES_OBJ =
 BIN_LDFLAGS =
 GUI_LDFLAGS =
 endif
@@ -92,14 +98,18 @@ all: $(BIN) $(GUI_IF_AVAILABLE)
 $(LIB): $(CORE_OBJ)
 	$(AR) rcs $@ $^
 
-$(BIN): $(CLI_OBJ) $(LIB)
-	$(CC) $(CFLAGS) $(BIN_LDFLAGS) -o $@ $(CLI_OBJ) $(LIB)
+$(BIN): $(CLI_OBJ) $(LIB) $(RES_OBJ)
+	$(CC) $(CFLAGS) $(BIN_LDFLAGS) -o $@ $(CLI_OBJ) $(LIB) $(RES_OBJ)
 
 gui: $(GUI)
 
-$(GUI): $(GUI_OBJ) $(IMGUI_OBJ) $(LIB)
+$(GUI): $(GUI_OBJ) $(IMGUI_OBJ) $(LIB) $(RES_OBJ)
 	@test "$(HAVE_SDL3)" = yes || { echo "sdl3 not found by pkg-config - install it to build the GUI"; exit 1; }
-	$(CXX) $(CXXFLAGS) $(GUI_LDFLAGS) -o $@ $(GUI_OBJ) $(IMGUI_OBJ) $(LIB) $(SDL_LIBS)
+	$(CXX) $(CXXFLAGS) $(GUI_LDFLAGS) -o $@ $(GUI_OBJ) $(IMGUI_OBJ) $(LIB) $(SDL_LIBS) $(RES_OBJ)
+
+# -I. so the .rc's path to assets/icon/ resolves from the project root.
+src/win/%.res.o: src/win/%.rc assets/icon/p2500icon.ico
+	$(WINDRES) -I. -O coff -i $< -o $@
 
 src/gui/%.o: src/gui/%.cpp
 	@test "$(HAVE_SDL3)" = yes || { echo "sdl3 not found by pkg-config - install it to build the GUI"; exit 1; }
@@ -131,6 +141,7 @@ $(DEMO_DISK): $(DEMO_COM) tools/cpm_build.py
 
 clean:
 	rm -f $(BIN) $(GUI) $(LIB) $(CORE_OBJ) $(CLI_OBJ) $(GUI_OBJ) $(IMGUI_OBJ) $(DEPS)
+	rm -f src/win/*.res.o
 	rm -f $(DEMO_COM) $(DEMO_DISK)
 
 -include $(DEPS)

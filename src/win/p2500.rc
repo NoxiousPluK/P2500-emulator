@@ -1,0 +1,12 @@
+/*
+ * Windows resource script: gives p2500-emu.exe and p2500-gui.exe the
+ * application icon that Explorer, the taskbar and Alt-Tab read off the PE
+ * image. The SDL window icon is set separately at runtime from the same
+ * artwork (src/gui/icon.cpp) - a PE resource is not visible to SDL, and
+ * an ELF binary has no equivalent, so both paths are needed.
+ *
+ * Compiled by windres only when building with MINGW=1; see the Makefile.
+ * The path is relative to the project root, which the Makefile passes to
+ * windres with -I.
+ */
+1 ICON "assets/icon/p2500icon.ico"

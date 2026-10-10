@@ -6,7 +6,6 @@ libp2500.a
 *.d
 p2500-gui
 tools/__pycache__/
-assets/
 demos/*.COM
 .claude/
 publish/

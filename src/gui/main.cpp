@@ -53,6 +53,7 @@
 #include "core/video.h"
 #include "core/version.h"
 
+#include "icon.h"
 #include "panels.h"
 
 #define SCALE_DEFAULT 2
@@ -1300,6 +1301,7 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[])
         SDL_Log("SDL_CreateWindowAndRenderer: %s", SDL_GetError());
         return SDL_APP_FAILURE;
     }
+    p2500_set_window_icon(app->window);
     /* Tear-free presentation; the actual speed is pace_field's business. */
     if (!SDL_SetRenderVSync(app->renderer, 1))
         SDL_Log("vsync unavailable (%s) - pacing still holds 50 Hz", SDL_GetError());

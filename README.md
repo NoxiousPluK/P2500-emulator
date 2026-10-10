@@ -222,6 +222,7 @@ Other tools in `tools/`:
 | `cpm_extract.py` | extracts files from a P2500 CP/M image, deriving the disk format from the image itself |
 | `z80asm.py` | a small Z80 assembler; `--verify` disassembles its own output and compares it against the source |
 | `mk_sprite.py` | converts a PNG to a pre-shifted 1-bit sprite for smooth motion in a byte-addressed framebuffer |
+| `mk_icon.py` | regenerates `src/gui/icon_data.h` (the embedded window icon) from `assets/icon/p2500icon.png` — only needed if the artwork changes |
 
 See `docs/porting-cpm-software.md` for what porting an existing CP/M
 program to the P2500 involves — the binary runs unmodified; the screen
@@ -253,7 +254,9 @@ looking at a capture by hand while chasing a test failure.
 src/core/   machine model (libp2500.a) — C11, no dependencies beyond libc
 src/cli/    headless harness (p2500-emu)
 src/gui/    SDL3 + Dear ImGui front-end (p2500-gui) — the only C++ in the tree
+src/win/    the Windows .exe icon resource, built by windres under MINGW=1
 tools/      disk-image and asset build tools (Python)
+assets/     build assets like the application icon
 tests/      the regression suite and its fixtures
 demos/      three graphics demos + a benchmark, in Z80 assembly
 disks/      CP/M disk images that boot on the emulator
