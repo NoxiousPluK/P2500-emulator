@@ -152,8 +152,19 @@ void p2500_dma_write(P2500Dma *dma, uint8_t value); /* port $16 */
  * DMA's programmed Port B address (clamped to not run off the end of a
  * 64K RAM image), then fires the end-of-block interrupt on the DMA's own
  * vector if interrupts are enabled. No-op if the DMA hasn't been enabled
- * for an IO->memory transfer. */
-void p2500_dma_deliver(P2500Dma *dma, uint8_t *ram, const uint8_t *src, size_t len);
+ * for an IO->memory transfer. Returns the number of bytes actually
+ * copied, so the caller can tell a transfer that ran to completion from
+ * one the DMA's own count cut short. */
+size_t p2500_dma_deliver(P2500Dma *dma, uint8_t *ram, const uint8_t *src, size_t len);
+
+/* How many bytes this DMA would accept right now - its programmed block
+ * length, clamped to the room left below the top of RAM, or 0 if it is
+ * not enabled for an IO->memory transfer. The FDC needs this *before*
+ * delivering: whether a read terminates normally or hits the end of the
+ * cylinder depends on whether the requester wanted more than the track
+ * had left, and after the fact a short transfer and an exact fit look
+ * the same. */
+size_t p2500_dma_requested_bytes(const P2500Dma *dma);
 
 #ifdef __cplusplus
 }

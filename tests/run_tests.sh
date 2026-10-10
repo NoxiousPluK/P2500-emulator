@@ -20,6 +20,9 @@
 #   4c.Game   - and the same keystroke path must satisfy a program that
 #               polls BDOS function 6 in a loop instead of reading a line,
 #               all the way to a game that is actually playing.
+#   14.EOT    - a multi-sector read must stop at the last sector of the
+#               track. Unreachable from any guest program this project
+#               has, so it runs against the core directly.
 #
 # usage: tests/run_tests.sh   (or: make test)
 set -u
@@ -1121,6 +1124,23 @@ if [ -f "$DISK" ]; then
     if [ -n "$R" ] && awk "BEGIN{exit !($R > 2)}"; then
         pass "p2500-emu runs flat out by default (${R}x real time here)"
     else fail "the default CLI run is throttled (${R:-no}x)"; fi
+fi
+
+echo "== 14. A multi-sector read is bounded by EOT, not by the end of the image"
+# tests/fdc_eot.c links libp2500.a directly and programs the DMA for more
+# than a track holds, which no guest program in this project's corpus does -
+# every traced READ DATA asks for exactly one track or exactly one sector,
+# so the bound is unreachable from here and this check has to reach past
+# the harness to see it. Its own output is already one line per claim.
+if [ -x ./tests/fdc_eot ]; then
+    if ./tests/fdc_eot >"$TMP/fdc-eot.log" 2>&1; then
+        sed -n 's/^  PASS  /  PASS  /p' "$TMP/fdc-eot.log"
+    else
+        sed -n 's/^  \(PASS\|FAIL\)  /  \1  /p' "$TMP/fdc-eot.log"
+        fail "tests/fdc_eot reported failures (see above)"
+    fi
+else
+    fail "tests/fdc_eot is not built (make tests/fdc_eot)"
 fi
 
 echo

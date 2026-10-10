@@ -239,11 +239,17 @@ void p2500_dma_write(P2500Dma *dma, uint8_t value) {
     handle_follow_byte(dma, role, value);
 }
 
-void p2500_dma_deliver(P2500Dma *dma, uint8_t *ram, const uint8_t *src, size_t len) {
+size_t p2500_dma_requested_bytes(const P2500Dma *dma) {
+    if (!dma->dma_enabled || dma->direction != P2500_DMA_DIR_IO_TO_MEMORY) return 0;
+    size_t room = (size_t)(0x10000 - dma->port_b_addr);
+    return dma->block_length < room ? dma->block_length : room;
+}
+
+size_t p2500_dma_deliver(P2500Dma *dma, uint8_t *ram, const uint8_t *src, size_t len) {
     if (!dma->dma_enabled || dma->direction != P2500_DMA_DIR_IO_TO_MEMORY) {
         if (dma->verbose)
             p2500_logf(dma->log, P2500_LOG_WARN, "dma", "deliver requested but DMA not enabled for READ - dropped");
-        return;
+        return 0;
     }
     if (len > dma->block_length) len = dma->block_length;
     size_t room = (size_t)(0x10000 - dma->port_b_addr);
@@ -255,4 +261,5 @@ void p2500_dma_deliver(P2500Dma *dma, uint8_t *ram, const uint8_t *src, size_t l
 
     if (dma->interrupts_enabled && dma->on_interrupt)
         dma->on_interrupt(dma->interrupt_userdata, dma->vector);
+    return len;
 }

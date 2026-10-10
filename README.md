@@ -250,6 +250,11 @@ panels, the disassembler (`tests/disasm_crosscheck.py`, cross-checked
 against `z80dasm` over ~34,000 instructions), and the speed control. Exit
 code 1 on any failure.
 
+Most checks drive `p2500-emu`, but `tests/fdc_eot.c` links `libp2500.a`
+directly: it checks that a multi-sector read stops at the track's last
+sector, which needs a DMA transfer longer than any real program here
+requests.
+
 `tests/render_vram.py` renders a `--dump-vram` capture to a PNG (`--attr`
 for the attribute plane, `--graphics` for the 512×256 mode) — useful for
 looking at a capture by hand while chasing a test failure.

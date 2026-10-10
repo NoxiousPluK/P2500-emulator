@@ -11,3 +11,4 @@ demos/*.COM
 publish/
 *.exe
 *.dll
+tests/fdc_eot

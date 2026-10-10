@@ -146,18 +146,97 @@ static void do_read_data(P2500Fdc *fdc) {
         return;
     }
 
+    /* A multi-sector read is bounded by EOT, the last sector number on the
+     * track - not by the end of the disk image. Handing the DMA the whole
+     * remaining span let a transfer that outlived the track walk silently
+     * into the next one; a real uPD765 stops at EOT and says so. Every
+     * read this project's firmware issues carries EOT=$10 (= 16 sectors,
+     * one track), so the bound below is the one real hardware applies. */
+    uint8_t eot = fdc->command[6];
+    uint8_t head = fdc->command[3];
+
+    if (eot < r) {
+        /* No sectors in the range at all. A driver asking for this has a
+         * bug; report it as the end of the cylinder rather than silently
+         * transferring something. */
+        if (fdc->verbose)
+            p2500_logf(fdc->log, P2500_LOG_WARN, "fdc", "READ DATA C=%u R=%u: EOT=%u is below R, "
+                               "nothing to transfer", c, r, eot);
+        uint8_t res[7] = {0x40, 0x80, 0x00, c, head, r, fdc->command[5]};
+        set_result(fdc, res, 7);
+        fire_interrupt(fdc);
+        return;
+    }
+
+    if (fdc->command[0] & 0x80) {
+        /* MT: continue onto the second head after EOT. These images are
+         * single-sided and the .raw layout has no second side to continue
+         * into, so the transfer stays bounded by EOT either way - but say
+         * so rather than quietly ignoring the bit. */
+        if (fdc->verbose)
+            p2500_logf(fdc->log, P2500_LOG_WARN, "fdc", "READ DATA C=%u R=%u: MT set but the media "
+                               "is single-sided; stopping at EOT=%u", c, r, eot);
+    }
+
+    size_t span = (size_t)(eot - r + 1) * P2500_FDC_SECTOR_SIZE;
+    size_t avail = media_size - off;
+    bool short_media = span > avail;
+    if (short_media) span = avail;
+
+    /* Whether this terminates normally or at the end of the cylinder
+     * depends on whether the requester wanted more than the track had
+     * left, and that has to be asked before the transfer. */
+    size_t wanted = (fdc->ram && fdc->dma) ? p2500_dma_requested_bytes(fdc->dma) : 0;
+    size_t moved = 0;
+
     if (fdc->ram && fdc->dma) {
-        size_t avail = media_size - off;
-        p2500_dma_deliver(fdc->dma, fdc->ram, media + off, avail);
+        moved = p2500_dma_deliver(fdc->dma, fdc->ram, media + off, span);
         if (fdc->verbose)
             p2500_logf(fdc->log, P2500_LOG_TRACE, "fdc", "READ DATA C=%u R=%u -> disk offset 0x%zx, "
-                               "handed to DMA", c, r, off);
+                               "%zu of %zu bytes to EOT=%u handed to DMA", c, r, off, moved, span, eot);
     } else if (fdc->verbose) {
         p2500_logf(fdc->log, P2500_LOG_WARN, "fdc", "READ DATA C=%u R=%u -> sector ready but no "
                            "RAM/DMA wired up, dropped", c, r);
     }
 
-    uint8_t res[7] = {0x00, 0x00, 0x00, c, fdc->command[3], (uint8_t)(r + 1), fdc->command[5]};
+    /* The DMA stops on a byte boundary; the FDC counts whole sectors. */
+    size_t sectors = (moved + P2500_FDC_SECTOR_SIZE - 1) / P2500_FDC_SECTOR_SIZE;
+    uint8_t last = (uint8_t)(r + (sectors ? sectors - 1 : 0));
+
+    /* Result-phase ID, per the datasheet's multi-sector table: below EOT
+     * the cylinder stands and R advances; at EOT the cylinder advances and
+     * R goes back to 1. */
+    uint8_t res_c = c, res_r;
+    if (last >= eot) {
+        res_c = (uint8_t)(c + 1);
+        res_r = 1;
+    } else {
+        res_r = (uint8_t)(last + 1);
+    }
+
+    uint8_t st0 = 0x00, st1 = 0x00;
+    if (short_media) {
+        /* The track claims sectors the image does not carry. */
+        st0 = 0x40;
+        st1 = 0x04; /* ND - no data, sector not found */
+        if (fdc->verbose)
+            p2500_logf(fdc->log, P2500_LOG_WARN, "fdc", "READ DATA C=%u R=%u: track runs past the end "
+                               "of the image, %zu bytes short", c, r, (size_t)((eot - r + 1) * P2500_FDC_SECTOR_SIZE) - avail);
+    } else if (wanted > span) {
+        /* The requester wanted more than this track held, so the transfer
+         * ended on EOT rather than on the DMA's terminal count. That is
+         * the uPD765's "end of cylinder": abnormal termination with EN
+         * set, and the condition this code used to paper over by reading
+         * on into the next track. */
+        st0 = 0x40;
+        st1 = 0x80; /* EN - end of cylinder */
+        if (fdc->verbose)
+            p2500_logf(fdc->log, P2500_LOG_WARN, "fdc", "READ DATA C=%u R=%u: requester wanted %zu bytes, "
+                               "track had %zu to EOT=%u - terminating at end of cylinder",
+                       c, r, wanted, span, eot);
+    }
+
+    uint8_t res[7] = {st0, st1, 0x00, res_c, head, res_r, fdc->command[5]};
     set_result(fdc, res, 7);
     fire_interrupt(fdc);
 }
