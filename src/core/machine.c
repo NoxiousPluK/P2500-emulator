@@ -394,45 +394,52 @@ bool p2500_load_rom(P2500Machine *m, const char *path) {
     return n == P2500_EPROM_SIZE;
 }
 
+void p2500_attachments_save(const P2500Machine *m, P2500Attachments *a) {
+    for (int d = 0; d < P2500_FDC_MAX_DRIVES; d++) {
+        a->disk[d] = m->fdc.disk[d];
+        a->disk_size[d] = m->fdc.disk_size[d];
+    }
+    a->cartridge = m->cartridge.stream;
+    a->cartridge_len = m->cartridge.stream_len;
+    a->keys = m->keyboard.queue;
+    a->keys_len = m->keyboard.queue_len;
+    a->release_at = m->keyboard.release_at;
+    a->verbose_unknown_ports = m->verbose_unknown_ports;
+    a->fdc_verbose = m->fdc.verbose;
+    a->serial_verbose = m->serial.verbose;
+    a->log = m->log;
+}
+
+void p2500_attachments_restore(P2500Machine *m, const P2500Attachments *a) {
+    for (int d = 0; d < P2500_FDC_MAX_DRIVES; d++) {
+        m->fdc.disk[d] = a->disk[d];
+        m->fdc.disk_size[d] = a->disk_size[d];
+    }
+    m->cartridge.stream = a->cartridge;
+    m->cartridge.stream_len = a->cartridge_len;
+    m->keyboard.queue = a->keys;
+    m->keyboard.queue_len = a->keys_len;
+    m->keyboard.release_at = a->release_at;
+    m->verbose_unknown_ports = a->verbose_unknown_ports;
+    m->fdc.verbose = a->fdc_verbose;
+    m->serial.verbose = a->serial_verbose;
+    m->log = a->log;
+}
+
 void p2500_reset(P2500Machine *m) {
     uint8_t eprom[P2500_EPROM_SIZE];
     uint8_t charrom[sizeof m->charrom];
     memcpy(eprom, m->eprom, sizeof eprom);
     memcpy(charrom, m->charrom, sizeof charrom);
 
-    const uint8_t *disk[P2500_FDC_MAX_DRIVES];
-    size_t disk_size[P2500_FDC_MAX_DRIVES];
-    for (int d = 0; d < P2500_FDC_MAX_DRIVES; d++) {
-        disk[d] = m->fdc.disk[d];
-        disk_size[d] = m->fdc.disk_size[d];
-    }
-    const uint8_t *cartridge = m->cartridge.stream;
-    size_t cartridge_len = m->cartridge.stream_len;
-    const uint8_t *keys = m->keyboard.queue;
-    size_t keys_len = m->keyboard.queue_len;
-    const unsigned long *release_at = m->keyboard.release_at;
-    bool verbose = m->verbose_unknown_ports;
-    bool fdc_verbose = m->fdc.verbose;
-    bool serial_verbose = m->serial.verbose;
-    P2500Log log = m->log;
+    P2500Attachments att;
+    p2500_attachments_save(m, &att);
 
     p2500_init(m);
-    m->log = log;
+    p2500_attachments_restore(m, &att);
 
     memcpy(m->eprom, eprom, sizeof eprom);
     memcpy(m->charrom, charrom, sizeof charrom);
-    for (int d = 0; d < P2500_FDC_MAX_DRIVES; d++) {
-        m->fdc.disk[d] = disk[d];
-        m->fdc.disk_size[d] = disk_size[d];
-    }
-    m->cartridge.stream = cartridge;
-    m->cartridge.stream_len = cartridge_len;
-    m->keyboard.queue = keys;
-    m->keyboard.queue_len = keys_len;
-    m->keyboard.release_at = release_at;
-    m->verbose_unknown_ports = verbose;
-    m->fdc.verbose = fdc_verbose;
-    m->serial.verbose = serial_verbose;
 }
 
 void p2500_set_log(P2500Machine *m, P2500LogFn fn, void *userdata) {

@@ -4,6 +4,7 @@
 
 #include "core/machine.h"
 #include "core/debug.h"
+#include "core/history.h"
 #include "core/video.h"
 #include "core/version.h"
 #include <ctype.h>
@@ -220,6 +221,20 @@ int main(int argc, char **argv) {
      * there. So it is counted, not watched. */
     unsigned long step_over_stop_at = 0;
     bool step_over_counting = false;
+    /* --history and the rewind flags (core/history.h): seek to an
+     * instruction that has already been executed, by restoring a snapshot
+     * and replaying. Recording is opt-in because it is not free - 7 MB of
+     * ring and a 109 KB memcpy per emulated field - and asking for any
+     * rewind turns it on. All of them act once the run has STOPPED, so the
+     * exit report, --state and --disasm describe the rewound moment. */
+    bool want_history = false;
+    long back_steps = -1;     /* --step-back N */
+    long seek_to = -1;        /* --seek N */
+    bool back_to_break = false; /* --back-to-break */
+    long back_to_pc = -1;     /* --back-to ADDR */
+    long verify_rewind = -1;  /* --verify-rewind N */
+    P2500History *hist = NULL;
+    int exit_status = 0;
     bool stuck_detect = true;
     /* --swap-at MS:PATH - change the disk in the drive partway through a
      * run, the way a person would. Reads pick the new disk up at once - a
@@ -356,6 +371,16 @@ int main(int argc, char **argv) {
                 fprintf(stderr, "too many --break args\n"); return 1;
             }
         }
+        else if (!strcmp(argv[i], "--history")) want_history = true;
+        else if (!strcmp(argv[i], "--step-back") && i + 1 < argc)
+            back_steps = (long)strtoul(argv[++i], NULL, 0);
+        else if (!strcmp(argv[i], "--seek") && i + 1 < argc)
+            seek_to = (long)strtoul(argv[++i], NULL, 0);
+        else if (!strcmp(argv[i], "--back-to-break")) back_to_break = true;
+        else if (!strcmp(argv[i], "--back-to") && i + 1 < argc)
+            back_to_pc = (long)strtoul(argv[++i], NULL, 16);
+        else if (!strcmp(argv[i], "--verify-rewind") && i + 1 < argc)
+            verify_rewind = (long)strtoul(argv[++i], NULL, 0);
         else if (!strcmp(argv[i], "--symbol") && i + 1 < argc) {
             char *arg = argv[++i];
             char *colon = strchr(arg, ':');
@@ -413,6 +438,8 @@ int main(int argc, char **argv) {
                             "  [--break ADDR ...] [--step-over ADDR]\n"
                             "  [--swap-at MS:PATH ...] [--push-at MS:STRING ...]\n"
                             "  [--state] [--disasm ADDR[:COUNT] ...] [--symbol ADDR:NAME ...]\n"
+                            "  [--history] [--step-back N] [--seek N]\n"
+                            "  [--back-to-break] [--back-to ADDR] [--verify-rewind N]\n"
                             "  [--no-stuck-detect]\n", argv[0]);
             return 1;
         }
@@ -541,8 +568,20 @@ int main(int argc, char **argv) {
     }
     p2500_debug_baseline(&dbg, &m);
 
+    if (back_steps >= 0 || seek_to >= 0 || back_to_break ||
+        back_to_pc >= 0 || verify_rewind >= 0)
+        want_history = true;
+    if (want_history) {
+        hist = p2500_history_create();
+        if (!hist) { fprintf(stderr, "out of memory allocating the history ring\n"); return 1; }
+    }
+
     for (; step < max_steps; step++) {
         uint16_t pc = m.cpu.pc;
+        /* Captures only when one is due; the cadence lives in history.c so
+         * this and the GUI rewind identically. A no-op when --history was
+         * not asked for. */
+        p2500_history_mark(hist, &m);
 
         /* --speed: sleep off whatever time the run is ahead by. Checked
          * every 8192 steps - about 5 ms of emulated time - because the check
@@ -691,6 +730,88 @@ int main(int argc, char **argv) {
     if (step >= max_steps && !stop_reason) stop_reason = "hit max-steps";
 
     printf("\nStopped after %lu steps: %s\n", step, stop_reason);
+
+    /* ------------------------------------------------------------- rewind *
+     *
+     * Everything below runs on the stopped machine, so the whole report
+     * that follows - Final:, --state, --disasm, the dumps - describes
+     * wherever the rewind left it. A failed rewind says so and changes
+     * nothing. */
+    if (hist) {
+        unsigned long oldest = 0, newest = 0;
+        if (p2500_history_span(hist, &m, &oldest, &newest))
+            printf("rewind: %d snapshot(s), instructions %lu..%lu seekable\n",
+                   p2500_history_depth(hist), oldest, newest);
+        else
+            printf("rewind: no snapshots recorded\n");
+
+        /* The determinism claim this whole feature rests on, asserted
+         * rather than assumed: go back N instructions, come forward again,
+         * and the machine must be the same machine down to the byte. */
+        if (verify_rewind >= 0) {
+            const unsigned long here = m.total_instructions;
+            const unsigned long long before = p2500_history_digest(&m);
+            if (!p2500_history_step_back(hist, &m, (unsigned long)verify_rewind)) {
+                printf("rewind: cannot step back %ld - oldest snapshot is "
+                       "instruction %lu\n", verify_rewind, oldest);
+                exit_status = 1;
+            } else {
+                p2500_history_seek(hist, &m, here);
+                const unsigned long long after = p2500_history_digest(&m);
+                if (after == before && m.total_instructions == here) {
+                    printf("rewind: verified - %ld instruction(s) back and forward "
+                           "again is bit-identical (digest %016llx)\n",
+                           verify_rewind, before);
+                } else {
+                    printf("rewind: MISMATCH after %ld instruction(s) - instruction "
+                           "%lu digest %016llx, was %lu / %016llx\n",
+                           verify_rewind, m.total_instructions, after, here, before);
+                    exit_status = 1;
+                }
+            }
+        }
+
+        if (back_to_break) {
+            const unsigned long here = m.total_instructions;
+            if (p2500_history_prev_break(hist, &m, &dbg))
+                printf("rewind: back to breakpoint $%04X at instruction %lu "
+                       "(from %lu)\n", m.cpu.pc, m.total_instructions, here);
+            else
+                printf("rewind: no earlier breakpoint inside the recorded history\n");
+        }
+
+        if (back_to_pc >= 0) {
+            const unsigned long here = m.total_instructions;
+            if (p2500_history_prev_pc(hist, &m, (uint16_t)back_to_pc))
+                printf("rewind: back to $%04X at instruction %lu (from %lu)\n",
+                       m.cpu.pc, m.total_instructions, here);
+            else
+                printf("rewind: $%04lX is not in the recorded history\n",
+                       (unsigned long)back_to_pc);
+        }
+
+        if (back_steps >= 0) {
+            const unsigned long here = m.total_instructions;
+            const uint16_t was_pc = m.cpu.pc;
+            if (p2500_history_step_back(hist, &m, (unsigned long)back_steps))
+                printf("rewind: stepped back %ld to instruction %lu, PC=$%04X "
+                       "(from %lu, PC=$%04X)\n", back_steps, m.total_instructions,
+                       m.cpu.pc, here, was_pc);
+            else
+                printf("rewind: no snapshot %ld instruction(s) back - oldest is "
+                       "instruction %lu\n", back_steps, oldest);
+        }
+
+        if (seek_to >= 0) {
+            const unsigned long here = m.total_instructions;
+            if (p2500_history_seek(hist, &m, (unsigned long)seek_to))
+                printf("rewind: sought to instruction %lu, PC=$%04X (from %lu)\n",
+                       m.total_instructions, m.cpu.pc, here);
+            else
+                printf("rewind: instruction %ld is older than the oldest snapshot "
+                       "(%lu)\n", seek_to, oldest);
+        }
+    }
     for (size_t i = 0; i < NUM_LANDMARKS; i++) {
         if (landmarks[i].gated_count > 0)
             printf("  (landmark $%04X (%s): %d hit(s) at this PC didn't match the "
@@ -917,5 +1038,6 @@ int main(int argc, char **argv) {
     free(state_ring);
 
     free(cart_buf);
-    return 0;
+    p2500_history_destroy(hist);
+    return exit_status;
 }

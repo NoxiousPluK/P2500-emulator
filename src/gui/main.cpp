@@ -50,6 +50,7 @@
 
 #include "core/machine.h"
 #include "core/debug.h"
+#include "core/history.h"
 #include "core/video.h"
 #include "core/version.h"
 
@@ -109,6 +110,11 @@ struct App {
      * Empty by default, which is what lets the run loop keep its
      * whole-frame fast path until the user actually asks for something. */
     P2500Debug dbg;
+    /* Execution history, so the debugger can step BACKWARDS - a ring of
+     * whole-machine snapshots plus a silent replay (core/history.h). Heap
+     * allocated because it is ~7 MB, and cleared whenever the past stops
+     * being replayable: a reset, or a change of media. */
+    P2500History *hist;
     P2500Panels panels;
     bool has_ui;                 /* false only if ImGui failed to initialise */
     float menu_h;                /* measured each frame, offsets the screen */
@@ -292,6 +298,9 @@ static void mount_disk(App *app, unsigned unit, const char *path)
     free(app->disk[unit]);
     app->disk[unit] = buf;
     p2500_fdc_attach(&app->m.fdc, unit, buf, n);
+    /* The snapshots describe a machine that was reading the old disk, and
+     * one of them holds a pointer into the buffer just freed. */
+    p2500_history_clear(app->hist);
     const char *base = SDL_strrchr(path, '/');
     SDL_strlcpy(app->disk_name[unit], base ? base + 1 : path, sizeof app->disk_name[unit]);
     set_status(app, "%c: %s", 'A' + (int)unit, app->disk_name[unit]);
@@ -301,6 +310,7 @@ static void eject_disk(App *app, unsigned unit)
 {
     if (unit >= P2500_FDC_MAX_DRIVES || !app->disk[unit]) return;
     p2500_fdc_attach(&app->m.fdc, unit, NULL, 0);
+    p2500_history_clear(app->hist);
     free(app->disk[unit]);
     app->disk[unit] = NULL;
     app->disk_name[unit][0] = '\0';
@@ -327,6 +337,7 @@ static void mount_cartridge(App *app, const char *path)
     app->cart_buf = buf;
     app->cart_buf_len = n;
     p2500_cartridge_init(&app->m.cartridge, buf, n);
+    p2500_history_clear(app->hist);
     const char *base = SDL_strrchr(path, '/');
     SDL_strlcpy(app->cart_name, base ? base + 1 : path, sizeof app->cart_name);
     app->cart_inserted = true;
@@ -785,6 +796,7 @@ static void draw_menu_bar(App *app)
         ImGui::Separator();
         if (ImGui::MenuItem("Reset", "Ctrl+R")) {
             p2500_reset(&app->m);
+            p2500_history_clear(app->hist);
             p2500_debug_baseline(&app->dbg, &app->m);
             /* The names belonged to the CP/M that was running: a different
              * disk links its CBIOS somewhere else, so they have to be read
@@ -1073,6 +1085,9 @@ static void hit_stop(App *app)
  * comfortably faster than the real machine. */
 static void run_machine(App *app, unsigned long tstates)
 {
+    /* Records a snapshot only when one is due; the cadence lives in
+     * history.c, so the GUI and the harness rewind identically. */
+    p2500_history_mark(app->hist, &app->m);
     if (!app->dbg.breaks && !app->dbg.watches && !app->dbg.counts &&
         !app->dbg.one_shot_armed) {
         p2500_run_tstates(&app->m, tstates);
@@ -1092,6 +1107,7 @@ static void run_machine(App *app, unsigned long tstates)
  * the machine is already stopped on, rather than re-triggering on it. */
 static void step_instructions(App *app, unsigned long n)
 {
+    p2500_history_mark(app->hist, &app->m);
     p2500_debug_resume(&app->dbg);
     for (unsigned long i = 0; i < n; i++) {
         if (p2500_debug_before_step(&app->dbg, &app->m, app->m.total_instructions)) {
@@ -1100,6 +1116,59 @@ static void step_instructions(App *app, unsigned long n)
         }
         p2500_step(&app->m);
     }
+}
+
+/* Rewind, from the disassembly panel's buttons.
+ *
+ * The log is NOT rewound: it is front-end state, and a transcript of what
+ * happened should not un-happen. It gets a marker line instead, so a line
+ * above the marker and one below it cannot be mistaken for one sequence.
+ * (The breakpoint and counter tallies are inside the snapshot, so those do
+ * rewind, whether or not that is wanted.)
+ *
+ * The screen needs nothing: the framebuffer is re-rendered from machine
+ * state every frame, so it rewinds for free.
+ */
+static void do_rewind(App *app, const P2500PanelActions &act)
+{
+    const unsigned long here = app->m.total_instructions;
+    const uint16_t was_pc = app->m.cpu.pc;
+    bool moved = false;
+
+    if (act.back_to_break) {
+        moved = p2500_history_prev_break(app->hist, &app->m, &app->dbg);
+        if (!moved) set_status(app, "no earlier breakpoint in history");
+    } else {
+        moved = p2500_history_step_back(app->hist, &app->m, act.back);
+        if (!moved) set_status(app, "history does not reach back that far");
+    }
+    if (!moved) {
+        p2500_panels_log(app->panels, P2500_LOG_WARN, "rewind",
+                         "nothing to rewind to - %d snapshot(s) held",
+                         p2500_history_depth(app->hist));
+        /* Said out loud for the same reason the success is: a refusal that
+         * only shows in a status line is a refusal nothing can guard. */
+        SDL_Log("rewind: nothing to rewind to (%d snapshot(s) held)",
+                p2500_history_depth(app->hist));
+        return;
+    }
+
+    /* Standing still again is a stop, so the one-shot must not survive it:
+     * a run-to-cursor armed before the rewind would fire on the way out. */
+    app->dbg.one_shot_armed = false;
+    p2500_debug_resume(&app->dbg);
+    p2500_debug_baseline(&app->dbg, &app->m);
+    set_status(app, "rewound to $%04X", app->m.cpu.pc);
+    p2500_panels_log(app->panels, P2500_LOG_INFO, "rewind",
+                     "---- rewound %lu instruction(s): $%04X (step %lu) -> "
+                     "$%04X (step %lu) ----",
+                     here - app->m.total_instructions, was_pc, here,
+                     app->m.cpu.pc, app->m.total_instructions);
+    /* Also to stderr, so a headless run can assert the rewind happened
+     * rather than inferring it from a screenshot. */
+    SDL_Log("rewind: %lu instruction(s) back to $%04X, instruction %lu (from "
+            "$%04X, %lu)", here - app->m.total_instructions, app->m.cpu.pc,
+            app->m.total_instructions, was_pc, here);
 }
 
 /*
@@ -1276,6 +1345,11 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[])
     }
 
     p2500_init(&app->m);
+    app->hist = p2500_history_create();
+    if (!app->hist) {
+        SDL_Log("failed to allocate the execution history ring");
+        return SDL_APP_FAILURE;
+    }
     if (!p2500_load_rom(&app->m, rom)) {
         SDL_Log("failed to load boot ROM from %s", rom);
         return SDL_APP_FAILURE;
@@ -1393,7 +1467,7 @@ SDL_AppResult SDL_AppEvent(void *appstate, SDL_Event *event)
         /* Menu accelerators win over the guest, which is why Ctrl-C still
          * reaches CP/M: it is deliberately not one of them. */
         if (ctrl && k == SDLK_O) { open_disk_dialog(app, 0); return SDL_APP_CONTINUE; }
-        if (ctrl && k == SDLK_R) { p2500_reset(&app->m); p2500_debug_baseline(&app->dbg, &app->m); p2500_debug_clear_symbols(&app->dbg); app->dbg.one_shot_armed = false; set_status(app, "reset - media still attached"); return SDL_APP_CONTINUE; }
+        if (ctrl && k == SDLK_R) { p2500_reset(&app->m); p2500_history_clear(app->hist); p2500_debug_baseline(&app->dbg, &app->m); p2500_debug_clear_symbols(&app->dbg); app->dbg.one_shot_armed = false; set_status(app, "reset - media still attached"); return SDL_APP_CONTINUE; }
         if (ctrl && k == SDLK_Q) return SDL_APP_SUCCESS;
         if (k == SDLK_F10) { save_screenshot(app); return SDL_APP_CONTINUE; }
         if (k == SDLK_F12) { toggle_pause(app); return SDL_APP_CONTINUE; }
@@ -1580,6 +1654,7 @@ SDL_AppResult SDL_AppIterate(void *appstate)
         } else if (act.steps) {
             step_instructions(app, act.steps);
         }
+        if (act.back || act.back_to_break) do_rewind(app, act);
     }
 
     /* Integer-scale the screen into whatever is left below the menu bar and
@@ -1618,6 +1693,11 @@ SDL_AppResult SDL_AppIterate(void *appstate)
                     app->panels.goto_geom.button_x, app->panels.goto_geom.button_y,
                     app->panels.watch_geom.field_x, app->panels.watch_geom.field_y,
                     app->panels.watch_geom.button_x, app->panels.watch_geom.button_y);
+        if (app->panels.rewind_geom.button_x >= 0.0f)
+            SDL_Log("disasm panel: step-back button %.0f,%.0f;"
+                    " back-to-break button %.0f,%.0f",
+                    app->panels.rewind_geom.button_x, app->panels.rewind_geom.button_y,
+                    app->panels.rewind_geom.field_x, app->panels.rewind_geom.field_y);
     }
 
     SDL_SetRenderDrawColor(app->renderer, 8, 12, 8, 255);
@@ -1671,5 +1751,6 @@ void SDL_AppQuit(void *appstate, SDL_AppResult)
     free(app->fb);
     for (unsigned u = 0; u < P2500_FDC_MAX_DRIVES; u++) free(app->disk[u]);
     free(app->cart_buf);
+    p2500_history_destroy(app->hist);
     delete app;
 }

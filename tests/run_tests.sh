@@ -20,6 +20,8 @@
 #   4c.Game   - and the same keystroke path must satisfy a program that
 #               polls BDOS function 6 in a loop instead of reading a line,
 #               all the way to a game that is actually playing.
+#   15.Rewind - going back N instructions and forward again must reproduce
+#               the machine byte for byte, and a rewind must emit nothing.
 #   14.EOT    - a multi-sector read must stop at the last sector of the
 #               track. Unreachable from any guest program this project
 #               has, so it runs against the core directly.
@@ -1142,6 +1144,148 @@ if [ -x ./tests/fdc_eot ]; then
 else
     fail "tests/fdc_eot is not built (make tests/fdc_eot)"
 fi
+
+echo "== 15. Rewind: seek to an instruction that has already run"
+# The claim the whole feature rests on is that a replay from a snapshot is
+# bit-identical, so that is checked first and directly - go back, come
+# forward, compare a digest of the entire P2500Machine - rather than
+# inferred from a PC landing where it was expected.
+if [ -f "$DISK" ]; then
+    $EMU --disk "$DISK" --break 4A00 --verify-rewind 1 >"$TMP/rw1.log" 2>&1
+    if grep -q 'rewind: verified' "$TMP/rw1.log"; then
+        pass "one instruction back and forward again is bit-identical"
+    else fail "a one-instruction rewind did not come back to the same state"; fi
+
+    # Across many snapshot boundaries, which is where a cadence or ring bug
+    # would show: 250k instructions is ~12 of the 64 slots.
+    $EMU --disk "$DISK" --break 4A00 --verify-rewind 250000 >"$TMP/rw2.log" 2>&1
+    if grep -q 'rewind: verified' "$TMP/rw2.log"; then
+        pass "250k instructions back and forward again is bit-identical"
+    else fail "a long rewind did not reproduce the state"; fi
+
+    # The negative control for both: asked for more history than is held,
+    # the check must REFUSE and exit non-zero. Without this, "verified"
+    # could mean "nothing was tried".
+    if $EMU --disk "$DISK" --break 4A00 --verify-rewind 900000 \
+            >"$TMP/rw3.log" 2>&1; then
+        fail "--verify-rewind returned success with no history to rewind"
+    elif grep -q 'rewind: cannot step back 900000' "$TMP/rw3.log"; then
+        pass "a rewind past the oldest snapshot is refused, not faked"
+    else fail "--verify-rewind failed for the wrong reason"; fi
+
+    # One instruction back from the boot sector's entry is $1014, the IPL's
+    # JP $4A00 - which is only the right answer if the replay stopped at
+    # exactly the right boundary.
+    $EMU --disk "$DISK" --break 4A00 --step-back 1 --disasm 1014:1 \
+        >"$TMP/rw4.log" 2>&1
+    if grep -q 'rewind: stepped back 1 to instruction 801122, PC=\$1014' "$TMP/rw4.log" &&
+       grep -qE 'Final: PC=\$1014 ' "$TMP/rw4.log" &&
+       grep -q 'C3 00 4A     jp \$4A00' "$TMP/rw4.log"; then
+        pass "--step-back 1 lands on the instruction that jumped here"
+    else fail "--step-back 1 did not land on \$1014"; fi
+    # The pair that makes the one above mean something: the same run whose
+    # rewind was a round trip still ends where it stopped.
+    if grep -qE 'Final: PC=\$4A00 ' "$TMP/rw1.log"; then
+        pass "a round-trip rewind leaves the run ending at \$4A00"
+    else fail "the round-trip run did not end at \$4A00"; fi
+
+    # --seek takes an absolute instruction number, which is the primitive
+    # the rest are built on; 801000 is 123 instructions before the stop.
+    $EMU --disk "$DISK" --break 4A00 --seek 801000 >"$TMP/rw4b.log" 2>&1
+    if grep -q 'rewind: sought to instruction 801000' "$TMP/rw4b.log"; then
+        pass "--seek goes to an absolute instruction number"
+    else fail "--seek did not land on instruction 801000"; fi
+
+    # Run backwards to the last time a breakpoint was standing at the PC.
+    # --step-over passes THROUGH its breakpoint at $1006 and stops 1161
+    # instructions later, so there is a real earlier hit to find.
+    $EMU --disk "$DISK" --max-steps 3000000 --step-over 1006 --back-to-break \
+        >"$TMP/rw5.log" 2>&1
+    if grep -q 'rewind: back to breakpoint \$1006 at instruction 791894' "$TMP/rw5.log" &&
+       grep -qE 'Final: PC=\$1006 ' "$TMP/rw5.log"; then
+        pass "--back-to-break runs backwards to the CALL it stepped over"
+    else fail "--back-to-break did not reach the earlier breakpoint hit"; fi
+    # Its negative control: a run that stopped ON its only breakpoint hit
+    # has nothing earlier to go back to, and must say so.
+    $EMU --disk "$DISK" --break 4A00 --back-to-break >"$TMP/rw6.log" 2>&1
+    if grep -q 'rewind: no earlier breakpoint' "$TMP/rw6.log"; then
+        pass "with no earlier hit, --back-to-break refuses"
+    else fail "--back-to-break claimed a hit that never happened"; fi
+
+    # --back-to ADDR, which is the sound version of a reverse step-over
+    # (see core/history.h): $06C6 is the IPL's busy-wait, executed 8000
+    # instructions before the boot sector runs.
+    $EMU --disk "$DISK" --break 4A00 --back-to 06C6 >"$TMP/rw7.log" 2>&1
+    if grep -q 'rewind: back to \$06C6' "$TMP/rw7.log" &&
+       grep -qE 'Final: PC=\$06C6 ' "$TMP/rw7.log"; then
+        pass "--back-to finds the last visit to an address, across snapshots"
+    else fail "--back-to did not reach \$06C6"; fi
+    # A failed search must leave the machine exactly where it was, not
+    # wherever the scan happened to end. $0BFD is never executed.
+    $EMU --disk "$DISK" --break 4A00 --state --back-to 0BFD \
+        >"$TMP/rw8.log" 2>&1
+    $EMU --disk "$DISK" --break 4A00 --state >"$TMP/rw8-ctl.log" 2>&1
+    grep -v 'rewind:\|Host speed\|Emulated time' "$TMP/rw8.log" >"$TMP/rw8.cmp"
+    grep -v 'Host speed\|Emulated time' "$TMP/rw8-ctl.log" >"$TMP/rw8-ctl.cmp"
+    if grep -q 'rewind: \$0BFD is not in the recorded history' "$TMP/rw8.log" &&
+       cmp -s "$TMP/rw8.cmp" "$TMP/rw8-ctl.cmp"; then
+        pass "a failed search leaves the machine bit-identical"
+    else fail "a failed --back-to moved the machine"; fi
+
+    # The replay must be SILENT: it runs bare p2500_step() with the log
+    # detached, so a 250k-instruction rewind must not re-emit one line of
+    # the landmark and watch reporting it passes back through. 27 of the 29
+    # lines this run produces are inside that window, so a non-silent
+    # replay would be unmissable.
+    $EMU --disk "$DISK" --break 4A00 2>"$TMP/rw9-ctl.err" >/dev/null
+    $EMU --disk "$DISK" --break 4A00 --step-back 250000 2>"$TMP/rw9.err" >/dev/null
+    A=$(wc -l <"$TMP/rw9-ctl.err"); B=$(wc -l <"$TMP/rw9.err")
+    if [ "$A" = "$B" ]; then
+        pass "rewinding 250k instructions emits no diagnostics ($A lines either way)"
+    else fail "the replay was not silent ($A lines without it, $B with)"; fi
+
+    # Snapshots are opt-in: nothing records history unless asked, so a
+    # plain run must not mention it at all.
+    if grep -q 'rewind:' "$TMP/rw9-ctl.err" ||
+       grep -q 'rewind:' "$TMP/cli-flat.log"; then
+        fail "history was recorded without being asked for"
+    else pass "history is opt-in - a plain run says nothing about rewind"; fi
+fi
+
+# The GUI's Step back button. Driven by its reported position, like the
+# memory panel's controls, so the suite never pins a pixel column that any
+# layout change would invalidate. The button is disabled while the machine
+# is running, which is why this needs a breakpoint stop first.
+if [ -x ./p2500-gui ] && [ -f "$DISK" ]; then
+    SDL_VIDEODRIVER=dummy ./p2500-gui --disk "$DISK" --frames 8 --panels disasm \
+        --shot-window "$TMP/rwgeom.ppm" >"$TMP/rwgeom.log" 2>&1
+    BACK=$(sed -n 's/.*step-back button \([0-9]*\),\([0-9]*\).*/\1,\2/p' "$TMP/rwgeom.log" | head -1)
+    BRK=$(sed -n 's/.*back-to-break button \([0-9]*\),\([0-9]*\).*/\1,\2/p' "$TMP/rwgeom.log" | head -1)
+    if [ -z "$BACK" ] || [ -z "$BRK" ]; then
+        fail "the disassembly panel did not report its rewind controls"
+    else
+        SDL_VIDEODRIVER=dummy ./p2500-gui --disk "$DISK" --frames 140 \
+            --panels disasm --break 4A00 --mouse "90:$BACK,left" \
+            >"$TMP/rwgui.log" 2>&1
+        SDL_VIDEODRIVER=dummy ./p2500-gui --disk "$DISK" --frames 140 \
+            --panels disasm --break 4A00 >"$TMP/rwgui-ctl.log" 2>&1
+        if grep -q 'rewind: 1 instruction(s) back to \$1014' "$TMP/rwgui.log"; then
+            pass "clicking Step back rewinds the machine one instruction"
+        else fail "the Step back button did nothing"; fi
+        if grep -q 'rewind:' "$TMP/rwgui-ctl.log"; then
+            fail "the GUI rewound without the button being clicked"
+        else pass "no click, no rewind - the button is what does it"; fi
+        # And the refusal is reported too, rather than being a silent no-op:
+        # $4A00 is reached once, so there is no earlier hit to go back to.
+        SDL_VIDEODRIVER=dummy ./p2500-gui --disk "$DISK" --frames 140 \
+            --panels disasm --break 4A00 --mouse "90:$BRK,left" \
+            >"$TMP/rwgui2.log" 2>&1
+        if grep -q 'rewind: nothing to rewind to' "$TMP/rwgui2.log"; then
+            pass "Back to brk says so when there is nothing to go back to"
+        else fail "Back to brk failed silently"; fi
+    fi
+fi
+
 
 echo
 if [ "$fails" -eq 0 ]; then echo "All checks passed."; exit 0; fi

@@ -31,7 +31,7 @@ this software or do this research.
 - Cartridge support including SESAM-key emulation
 - Keyboard input
 - Adjustable emulation speed
-- An SDL3 + Dear ImGui GUI with debugger: device state, memory, disassembly, watches with auto-pause
+- An SDL3 + Dear ImGui GUI with debugger: device state, memory, disassembly, watches with auto-pause, and rewind
 - A headless CLI front-end (`p2500-emu`) for scripted runs, disk-image probing, and automated testing
 - Some tools to build and inspect P2500 CP/M disk images
 
@@ -161,9 +161,52 @@ harness can't also report.
   than `call $E209`: the names are read out of the running machine's own
   page zero and CBIOS jump table, so they belong to the disk that is
   actually booted and there is nothing to show before CP/M is up.
+  While paused, **Step back** / **Back 100** / **Back to brk** run the
+  machine *backwards* — see below.
 - **Log** (F4) — every diagnostic the core produces, filterable by level
   and by substring. *Debug ▸ Verbose device logging* arms the noisiest
   per-device traces (off by default).
+
+## Rewind
+
+The debugger steps backwards. Nothing in the core calls `rand()`, `time()`
+or any host service — the 50 Hz clock strobe and the keyboard strobe are
+both counters driven off the CPU's T-state count — so a replay from a given
+state is bit-identical, and the machine's entire mutable state is one
+struct. Rewinding is therefore a snapshot plus a replay: a ring of 64
+whole-machine snapshots, one per emulated 50 Hz field (~7 MB, ~1.3 s of
+history), and "go to instruction N" restores the newest snapshot at or
+before N and replays forward to it. The replay is silent — no breakpoints
+fire, no diagnostics are emitted — and `make test` asserts the round trip
+is byte-exact rather than assuming it.
+
+In the GUI the buttons are live while paused; the screen rewinds with the
+machine, because it is re-rendered from machine state every frame. The log
+does not rewind: it is a transcript of what happened, and gets a marker
+line instead.
+
+Headlessly, every rewind acts once the run has stopped, so the exit report,
+`--state` and `--disasm` all describe wherever it left the machine:
+
+| Flag | |
+|---|---|
+| `--history` | record snapshots (implied by every flag below; opt-in, because it is not free) |
+| `--step-back N` | go back N instructions |
+| `--seek N` | go to instruction number N |
+| `--back-to ADDR` | the last time the PC was ADDR, anywhere in the recorded history |
+| `--back-to-break` | the last time an enabled breakpoint was standing at the PC |
+| `--verify-rewind N` | go back N and forward again, and report whether the machine came back bit-identical |
+
+There is no reverse step-*over*, and that is a finding rather than a gap:
+the IPL's driver dispatch switches stacks on entry (`$02DA` is
+`ld ($FE81),sp` / `ld sp,$FE81`), so inside a `call $0003` neither the SP
+nor a CALL/RET count recovers the caller's depth. Both rules were built and
+measured against it and both landed inside the dispatcher; `--back-to ADDR`
+answers the same question exactly, and `core/history.h` has the numbers.
+
+Media is outside the snapshots — disk images are immutable today — so a
+rewind across a disk write will need the writes journalled alongside them
+when write support lands.
 
 ## The headless harness
 
@@ -189,6 +232,7 @@ scripted runs, probing, and disk-image inspection.
 | `--disasm ADDR[:COUNT]` | disassemble, bank-aware, with symbol names |
 | `--symbol ADDR:NAME` | name an address yourself; yours wins over a derived name |
 | `--step-over ADDR` | run to ADDR, then run the CALL there to completion and stop after it |
+| `--history` / `--step-back N` / `--seek N` / `--back-to ADDR` / `--back-to-break` / `--verify-rewind N` | rewind — see [Rewind](#rewind) |
 | `--verbose-io` | arm every device's diagnostics (very noisy) |
 | `--no-stuck-detect` | disable the state-hash cycle detector |
 
@@ -247,8 +291,8 @@ runs `tests/run_tests.sh`: checks covering the cartridge-slot (SESAM)
 boot path, the IPL and CP/M boot sequence, disk I/O (including mid-run swaps),
 the video renderer (checked as pixels, not just state), the debugger
 panels, the disassembler (`tests/disasm_crosscheck.py`, cross-checked
-against `z80dasm` over ~34,000 instructions), and the speed control. Exit
-code 1 on any failure.
+against `z80dasm` over ~34,000 instructions), the speed control, and
+rewind. Exit code 1 on any failure.
 
 Most checks drive `p2500-emu`, but `tests/fdc_eot.c` links `libp2500.a`
 directly: it checks that a multi-sector read stops at the track's last

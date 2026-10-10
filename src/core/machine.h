@@ -222,6 +222,37 @@ void p2500_set_log(P2500Machine *m, P2500LogFn fn, void *userdata);
  * default, and only what is explicitly listed here survives. */
 void p2500_reset(P2500Machine *m);
 
+/* Everything a FRONT END attached, as opposed to anything the machine
+ * itself computed: mounted media, the cartridge stream, scripted
+ * keystrokes, the diagnostics sink and the verbose switches.
+ *
+ * It exists because two operations overwrite the whole struct and neither
+ * may take these with it - p2500_reset(), which clears the machine but
+ * keeps the disk in the drive, and a history rewind (core/history.h),
+ * which must not resurrect a pointer the front end has since freed. One
+ * list in one place, so a field added to it cannot be remembered by one
+ * caller and forgotten by the other.
+ *
+ * The ROM images are not here: they are arrays inside the struct, so a
+ * wholesale copy carries them, and p2500_reset() - which zeroes - keeps
+ * them aside itself. */
+typedef struct {
+    const uint8_t *disk[P2500_FDC_MAX_DRIVES];
+    size_t disk_size[P2500_FDC_MAX_DRIVES];
+    const uint8_t *cartridge;
+    size_t cartridge_len;
+    const uint8_t *keys;
+    size_t keys_len;
+    const unsigned long *release_at;
+    bool verbose_unknown_ports;
+    bool fdc_verbose;
+    bool serial_verbose;
+    P2500Log log;
+} P2500Attachments;
+
+void p2500_attachments_save(const P2500Machine *m, P2500Attachments *a);
+void p2500_attachments_restore(P2500Machine *m, const P2500Attachments *a);
+
 /* T-states in one 50 Hz field. The machine's own clock strobe and a
  * front-end's frame boundary are the same event, so a GUI paces itself by
  * running one of these per presented frame. */

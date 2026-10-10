@@ -38,6 +38,9 @@ struct P2500Panels {
                         button_x = -1.0f, button_y = -1.0f; };
     Geom goto_geom;
     Geom watch_geom;
+    /* The disassembly panel's rewind buttons, same purpose: a control the
+     * suite can click rather than one only a person can check. */
+    Geom rewind_geom;
 
     /* Disassembly. */
     bool disasm_follow_pc = true;
@@ -81,6 +84,11 @@ struct P2500PanelActions {
      * budgets, the frame loop - belongs to the front-end, not here. */
     bool resume = false;
     bool reset_baseline = false; /* watches need re-baselining */
+    /* Rewind (core/history.h), which the panels cannot do themselves: the
+     * snapshot ring belongs to the front-end, next to the machine it is
+     * snapshots OF. > 0 is "step back this many instructions". */
+    unsigned long back = 0;
+    bool back_to_break = false;
 };
 
 void p2500_panels_log(P2500Panels &p, P2500LogLevel level, const char *category,

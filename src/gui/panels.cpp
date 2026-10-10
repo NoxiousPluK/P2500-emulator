@@ -287,6 +287,30 @@ static void draw_disasm(P2500Panels &p, const P2500Machine &m, P2500Debug &dbg,
     ImGui::SameLine();
     ImGui::TextDisabled("PC $%04X", m.cpu.pc);
 
+    /* Rewind. Paused only: a machine that is running is somewhere else by
+     * the time the frame is composed, so "back one instruction" from a
+     * moving target would be a different instruction every time.
+     *
+     * There is no reverse step-over button, for a reason that is in
+     * core/history.h: the IPL's driver dispatch switches stacks, so the
+     * caller's depth is not recoverable inside the callee. "Back to $..."
+     * is the honest version of the same question. */
+    ImGui::BeginDisabled(!paused);
+    if (ImGui::Button("Step back")) act.back = 1;
+    p.rewind_geom.button_x = ImGui::GetItemRectMin().x + ImGui::GetItemRectSize().x * 0.5f;
+    p.rewind_geom.button_y = ImGui::GetItemRectMin().y + ImGui::GetItemRectSize().y * 0.5f;
+    ImGui::SetItemTooltip("Back one instruction, by restoring the nearest\n"
+                          "snapshot and replaying up to here. Only while paused.");
+    ImGui::SameLine();
+    if (ImGui::Button("Back 100")) act.back = 100;
+    ImGui::SameLine();
+    if (ImGui::Button("Back to brk")) act.back_to_break = true;
+    p.rewind_geom.field_x = ImGui::GetItemRectMin().x + ImGui::GetItemRectSize().x * 0.5f;
+    p.rewind_geom.field_y = ImGui::GetItemRectMin().y + ImGui::GetItemRectSize().y * 0.5f;
+    ImGui::SetItemTooltip("Back to the last time an enabled breakpoint was\n"
+                          "standing at the PC, before now.");
+    ImGui::EndDisabled();
+
     ImGui::Checkbox("follow PC", &p.disasm_follow_pc);
     ImGui::SameLine();
     /* Attempted every frame rather than once: the table can only be read
