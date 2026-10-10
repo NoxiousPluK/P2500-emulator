@@ -629,6 +629,52 @@ if grep -q -- '--break reached' "$TMP/break.out" &&
     pass "--break stops with PC on the breakpoint"
 else fail "--break did not stop at \$0333"; fi
 
+# Symbols, and the two things built on the one-shot breakpoint. All three
+# are the headless half of debugger conveniences the GUI grew, so they are
+# tested through the CLI for the same reason the panels are: one
+# implementation, one answer.
+GAMEDISK="disks/P25K_G.raw"
+if [ ! -f "$GAMEDISK" ]; then
+    echo "  SKIP  symbols/step-over: $GAMEDISK not present"
+else
+    # Nothing here is a constant of the machine: the table is read out of
+    # page zero and whatever address THIS disk's CBIOS was linked at.
+    $EMU --disk "$GAMEDISK" --max-steps 3000000 --disasm E200:4 \
+        >"$TMP/sym.log" 2>/dev/null
+    if grep -q '^  CONST:$' "$TMP/sym.log" &&
+       grep -q 'C3 86 E3     jp CONST.body' "$TMP/sym.log"; then
+        pass "the CBIOS jump table names itself in a listing"
+    else fail "symbols did not reach the disassembly"; fi
+    # A name the user gave must survive the scan, not be overwritten by it.
+    $EMU --disk "$GAMEDISK" --max-steps 3000000 --symbol E206:POLLKEY \
+        --disasm E206:1 >"$TMP/sym2.log" 2>/dev/null
+    if grep -q '^  POLLKEY:$' "$TMP/sym2.log"; then
+        pass "--symbol wins over the derived name"
+    else fail "--symbol was overwritten by the scan"; fi
+fi
+
+# Step over a CALL: the one-shot must fire on the instruction AFTER it, with
+# the stack back where it started - $1006 is the boot sector's CALL $0003,
+# which goes all the way into the IPL's FDC read and back, so a one-shot
+# without the SP guard would be no test at all.
+./p2500-emu --disk "$DISK" --max-steps 3000000 --step-over 1006 \
+    >"$TMP/over.log" 2>/dev/null
+if grep -q -- '--step-over \$1006: call \$0003' "$TMP/over.log" &&
+   grep -q -- '--step-over returned' "$TMP/over.log" &&
+   grep -qE 'Final: PC=\$1009 SP=\$FE6F' "$TMP/over.log"; then
+    pass "--step-over runs a CALL to completion and stops after it"
+else fail "--step-over did not return to the instruction after the CALL"; fi
+
+# And on something that is not a CALL it must say so and single-step, not
+# set a breakpoint on the following address - a JP never arrives there.
+./p2500-emu --disk "$DISK" --max-steps 3000000 --step-over 1002 \
+    >"$TMP/over2.log" 2>/dev/null
+if grep -q -- '--step-over: not a CALL' "$TMP/over2.log" &&
+   grep -q -- 'one instruction executed' "$TMP/over2.log" &&
+   grep -qE 'Final: PC=\$1003' "$TMP/over2.log"; then
+    pass "--step-over single-steps anything that is not a CALL"
+else fail "--step-over mishandled a non-CALL"; fi
+
 echo "== 9. Core diagnostics go through the log callback"
 # The core never touches stderr directly; the CLI installs a sink that adds
 # the "[cat] " prefix. Check every device category still reaches it.

@@ -207,6 +207,19 @@ int main(int argc, char **argv) {
     struct { uint16_t addr; unsigned count; } disasms[MAX_DISASM];
     int num_disasms = 0;
     const char *ram_dump_path = NULL;
+    /* --step-over ADDR - run to ADDR, then run the CALL there to completion
+     * and stop on the instruction after it. The headless half of the GUI's
+     * Step over button, and the reason that button's SP guard has a test:
+     * "where does this CALL come back to, and with what" is a question the
+     * harness could not ask before. */
+    long step_over_addr = -1;
+    bool step_over_armed = false;
+    /* The instruction at ADDR is not always a CALL. "Step over" anything
+     * else means a plain single step - and a single step cannot be a
+     * breakpoint on the next address, because a JP or RET does not go
+     * there. So it is counted, not watched. */
+    unsigned long step_over_stop_at = 0;
+    bool step_over_counting = false;
     bool stuck_detect = true;
     /* --swap-at MS:PATH - change the disk in the drive partway through a
      * run, the way a person would. Reads pick the new disk up at once - a
@@ -343,6 +356,24 @@ int main(int argc, char **argv) {
                 fprintf(stderr, "too many --break args\n"); return 1;
             }
         }
+        else if (!strcmp(argv[i], "--symbol") && i + 1 < argc) {
+            char *arg = argv[++i];
+            char *colon = strchr(arg, ':');
+            if (!colon || !colon[1]) {
+                fprintf(stderr, "bad --symbol syntax, want ADDR:NAME\n"); return 1;
+            }
+            *colon = '\0';
+            if (p2500_debug_add_symbol(&dbg, (uint16_t)strtoul(arg, NULL, 16),
+                                       colon + 1) < 0) {
+                fprintf(stderr, "too many --symbol args\n"); return 1;
+            }
+        }
+        else if (!strcmp(argv[i], "--step-over") && i + 1 < argc) {
+            step_over_addr = (long)strtoul(argv[++i], NULL, 16);
+            if (p2500_debug_add_break(&dbg, (uint16_t)step_over_addr) < 0) {
+                fprintf(stderr, "too many breakpoints for --step-over\n"); return 1;
+            }
+        }
         else if (!strcmp(argv[i], "--state")) dump_state = true;
         else if (!strcmp(argv[i], "--disasm") && i + 1 < argc) {
             if (num_disasms >= MAX_DISASM) { fprintf(stderr, "too many --disasm args\n"); return 1; }
@@ -379,8 +410,9 @@ int main(int argc, char **argv) {
                             "  [--watch ADDR[:LEN] ...] [--watch-break ADDR[:LEN] ...]\n"
                             "  [--count ADDR ...] [--type STRING] [--type-after MS]\n"
                             "  [--type-at MS:STRING ...]\n"
-                            "  [--break ADDR ...] [--swap-at MS:PATH ...] [--push-at MS:STRING ...]\n"
-                            "  [--state] [--disasm ADDR[:COUNT] ...]\n"
+                            "  [--break ADDR ...] [--step-over ADDR]\n"
+                            "  [--swap-at MS:PATH ...] [--push-at MS:STRING ...]\n"
+                            "  [--state] [--disasm ADDR[:COUNT] ...] [--symbol ADDR:NAME ...]\n"
                             "  [--no-stuck-detect]\n", argv[0]);
             return 1;
         }
@@ -521,12 +553,37 @@ int main(int argc, char **argv) {
             wall_sleep(due - (wall_seconds() - wall_start));
         }
 
-        if (p2500_debug_before_step(&dbg, &m, step)) {
-            /* A watchpoint stops one instruction past the write; the report
-             * above names the instruction that did it. */
-            stop_reason = dbg.hit_watch >= 0 ? "--watch-break: a watched byte changed"
-                                             : "--break reached";
+        if (step_over_counting && step >= step_over_stop_at) {
+            stop_reason = "--step-over: one instruction executed";
             break;
+        }
+
+        if (p2500_debug_before_step(&dbg, &m, step)) {
+            /* --step-over's breakpoint is not a stop: it is the moment to
+             * arm the one-shot and keep going. */
+            if (step_over_addr >= 0 && !step_over_armed && dbg.hit_break >= 0 &&
+                m.cpu.pc == (uint16_t)step_over_addr) {
+                char over[96];
+                /* Names first, so the line says what it is stepping over
+                 * rather than quoting an address back. */
+                p2500_debug_scan_symbols(&dbg, &m);
+                p2500_disasm_sym(&m, &dbg, m.cpu.pc, over, sizeof over);
+                step_over_armed = true;
+                printf("--step-over $%04X: %s\n", m.cpu.pc, over);
+                if (!p2500_debug_step_over(&dbg, &m)) {
+                    printf("--step-over: not a CALL, single-stepping instead\n");
+                    step_over_counting = true;
+                    step_over_stop_at = step + 1;
+                }
+                p2500_debug_resume(&dbg);
+            } else {
+                /* A watchpoint stops one instruction past the write; the
+                 * report above names the instruction that did it. */
+                stop_reason = dbg.hit_watch >= 0 ? "--watch-break: a watched byte changed"
+                            : dbg.hit_one_shot  ? "--step-over returned"
+                                                : "--break reached";
+                break;
+            }
         }
 
         for (int pi = 0; pi < num_pushes; pi++) {
@@ -703,6 +760,17 @@ int main(int argc, char **argv) {
                (r[10] & 0x60) == 0x20 ? ", hidden" :
                (r[10] & 0x40) ? ", blinking" : "");
     }
+    /* Names, read out of the machine as it stands now rather than from a
+     * table: before CP/M is up this adds nothing and the listing is
+     * unchanged, which is the honest answer at that point. --symbol names
+     * were added at parse time and so survive this. */
+    {
+        int found = p2500_debug_scan_symbols(&dbg, &m);
+        if (found > 0 && num_disasms > 0)
+            printf("\nSymbols: %d from CP/M's page zero and CBIOS jump table"
+                   " (%d in all)\n", found, dbg.syms);
+    }
+
     printf("Interrupts (daisy chain order, requests/acknowledged):\n ");
     for (int i = 0; i < P2500_INT_SOURCES; i++) {
         int src = p2500_intctl_chain_order[i];
@@ -711,9 +779,12 @@ int main(int argc, char **argv) {
                m.intctl.under_service[src] ? " (in service)" : "");
     }
     printf("\n");
-    printf("Final: PC=$%04X SP=$%04X A=$%02X BC=$%02X%02X DE=$%02X%02X HL=$%02X%02X "
-           "I=$%02X IM=%d IFF1=%d halted=%d\n",
-           m.cpu.pc, m.cpu.sp, m.cpu.a, m.cpu.b, m.cpu.c, m.cpu.d, m.cpu.e,
+    const char *final_sym = p2500_debug_symbol(&dbg, m.cpu.pc);
+    printf("Final: PC=$%04X%s%s%s SP=$%04X A=$%02X BC=$%02X%02X DE=$%02X%02X "
+           "HL=$%02X%02X I=$%02X IM=%d IFF1=%d halted=%d\n",
+           m.cpu.pc, final_sym ? " (" : "", final_sym ? final_sym : "",
+           final_sym ? ")" : "",
+           m.cpu.sp, m.cpu.a, m.cpu.b, m.cpu.c, m.cpu.d, m.cpu.e,
            m.cpu.h, m.cpu.l, m.cpu.i, m.cpu.interrupt_mode, m.cpu.iff1, m.cpu.halted);
 
     if (ring_full) {
@@ -763,8 +834,10 @@ int main(int argc, char **argv) {
         printf("\n--disasm $%04X:%u\n", disasms[di].addr, disasms[di].count);
         uint16_t at = disasms[di].addr;
         for (unsigned k = 0; k < disasms[di].count; k++) {
-            char text[80];
-            int len = p2500_disasm(&m, at, text, sizeof text);
+            char text[96];
+            int len = p2500_disasm_sym(&m, &dbg, at, text, sizeof text);
+            const char *label = p2500_debug_symbol(&dbg, at);
+            if (label) printf("  %s:\n", label);
             printf("  $%04X: ", at);
             for (int b = 0; b < 4; b++)
                 if (b < len) printf("%02X ", p2500_peek(&m, (uint16_t)(at + b)));

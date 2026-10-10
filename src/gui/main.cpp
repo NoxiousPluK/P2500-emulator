@@ -786,6 +786,11 @@ static void draw_menu_bar(App *app)
         if (ImGui::MenuItem("Reset", "Ctrl+R")) {
             p2500_reset(&app->m);
             p2500_debug_baseline(&app->dbg, &app->m);
+            /* The names belonged to the CP/M that was running: a different
+             * disk links its CBIOS somewhere else, so they have to be read
+             * again rather than carried across. */
+            p2500_debug_clear_symbols(&app->dbg);
+            app->dbg.one_shot_armed = false;
             set_status(app, "reset - media still attached");
         }
         if (ImGui::MenuItem(app->paused ? "Unpause" : "Pause", "F12")) toggle_pause(app);
@@ -1045,6 +1050,11 @@ static void hit_stop(App *app)
                          app->m.total_instructions, a, app->m.cpu.pc);
         SDL_Log("watchpoint: $%04X changed, stopped at $%04X after %lu instructions",
                 a, app->m.cpu.pc, app->m.total_instructions);
+    } else if (app->dbg.hit_one_shot) {
+        set_status(app, "stopped at $%04X", app->m.cpu.pc);
+        p2500_panels_log(app->panels, P2500_LOG_INFO, "brk",
+                         "[step %lu] ran to $%04X",
+                         app->m.total_instructions, app->m.cpu.pc);
     } else {
         set_status(app, "stopped at breakpoint $%04X", app->m.cpu.pc);
         p2500_panels_log(app->panels, P2500_LOG_INFO, "brk",
@@ -1063,7 +1073,8 @@ static void hit_stop(App *app)
  * comfortably faster than the real machine. */
 static void run_machine(App *app, unsigned long tstates)
 {
-    if (!app->dbg.breaks && !app->dbg.watches && !app->dbg.counts) {
+    if (!app->dbg.breaks && !app->dbg.watches && !app->dbg.counts &&
+        !app->dbg.one_shot_armed) {
         p2500_run_tstates(&app->m, tstates);
         return;
     }
@@ -1382,7 +1393,7 @@ SDL_AppResult SDL_AppEvent(void *appstate, SDL_Event *event)
         /* Menu accelerators win over the guest, which is why Ctrl-C still
          * reaches CP/M: it is deliberately not one of them. */
         if (ctrl && k == SDLK_O) { open_disk_dialog(app, 0); return SDL_APP_CONTINUE; }
-        if (ctrl && k == SDLK_R) { p2500_reset(&app->m); p2500_debug_baseline(&app->dbg, &app->m); set_status(app, "reset - media still attached"); return SDL_APP_CONTINUE; }
+        if (ctrl && k == SDLK_R) { p2500_reset(&app->m); p2500_debug_baseline(&app->dbg, &app->m); p2500_debug_clear_symbols(&app->dbg); app->dbg.one_shot_armed = false; set_status(app, "reset - media still attached"); return SDL_APP_CONTINUE; }
         if (ctrl && k == SDLK_Q) return SDL_APP_SUCCESS;
         if (k == SDLK_F10) { save_screenshot(app); return SDL_APP_CONTINUE; }
         if (k == SDLK_F12) { toggle_pause(app); return SDL_APP_CONTINUE; }
@@ -1555,6 +1566,11 @@ SDL_AppResult SDL_AppIterate(void *appstate)
             SDL_Log("guest text input: %s", app->text_input_was ? "on" : "off");
         }
         if (want_pause_toggle) toggle_pause(app);
+        /* Run-to-cursor and step-over: the panel has armed the one-shot, so
+         * all that is left is to let the machine run. Resuming here rather
+         * than stepping a fixed budget is what makes them both honour
+         * everything else - watches, breakpoints, the pacing. */
+        if (act.resume && app->paused) toggle_pause(app);
         /* Stepping runs after the frame is composed, so the listing the user
          * clicked is the state the step started from. ~0 means "one 50 Hz
          * field", the same budget the free-running loop uses. */

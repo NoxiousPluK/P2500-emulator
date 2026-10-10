@@ -41,6 +41,10 @@ struct P2500Panels {
 
     /* Disassembly. */
     bool disasm_follow_pc = true;
+    /* Substitute names for addresses in the listing. The table is derived
+     * from the running machine (p2500_debug_scan_symbols), so before CP/M
+     * is up there is nothing to substitute and this changes nothing. */
+    bool disasm_symbols = true;
     uint16_t disasm_addr = 0x0000;
     char disasm_entry[8] = "";
     char break_entry[8] = "";
@@ -71,7 +75,11 @@ struct P2500Panels {
  * the machine themselves - pacing belongs to the frame loop. */
 struct P2500PanelActions {
     unsigned long steps = 0; /* instructions to execute, honouring breakpoints */
-    bool run_to_cursor = false;
+    /* Run-to-cursor and step-over both work by arming the one-shot
+     * breakpoint in P2500Debug and then letting the machine run: the panel
+     * arms it and asks to be resumed, because what "run" means - pacing,
+     * budgets, the frame loop - belongs to the front-end, not here. */
+    bool resume = false;
     bool reset_baseline = false; /* watches need re-baselining */
 };
 

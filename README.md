@@ -156,7 +156,11 @@ harness can't also report.
   byte changes and names the instruction that wrote it; ticking `stop`
   turns it into a watchpoint that pauses the machine there.
 - **Disassembly** (F3) — around PC, with a clickable breakpoint gutter and
-  Step / Step 100 / Step field.
+  Step / Step over / Step 100 / Step field. Right-click any line for *Run
+  to here*. With **symbols** ticked the listing reads `call CONIN` rather
+  than `call $E209`: the names are read out of the running machine's own
+  page zero and CBIOS jump table, so they belong to the disk that is
+  actually booted and there is nothing to show before CP/M is up.
 - **Log** (F4) — every diagnostic the core produces, filterable by level
   and by substring. *Debug ▸ Verbose device logging* arms the noisiest
   per-device traces (off by default).
@@ -182,7 +186,9 @@ scripted runs, probing, and disk-image inspection.
 | `--watch ADDR[:LEN]` / `--count ADDR` / `--break ADDR` | trace writes, count executions, stop |
 | `--watch-break ADDR[:LEN]` | a watchpoint — stop the run when that byte changes |
 | `--state` | print every device's live state |
-| `--disasm ADDR[:COUNT]` | disassemble, bank-aware |
+| `--disasm ADDR[:COUNT]` | disassemble, bank-aware, with symbol names |
+| `--symbol ADDR:NAME` | name an address yourself; yours wins over a derived name |
+| `--step-over ADDR` | run to ADDR, then run the CALL there to completion and stop after it |
 | `--verbose-io` | arm every device's diagnostics (very noisy) |
 | `--no-stuck-detect` | disable the state-hash cycle detector |
 

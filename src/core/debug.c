@@ -245,6 +245,126 @@ int p2500_disasm(const P2500Machine *m, uint16_t addr, char *buf, size_t buflen)
 }
 
 /* ======================================================================== *
+ *  Symbols
+ *
+ *  Addresses with names on them, and the disassembly that uses them. The
+ *  names are not written down anywhere: CP/M's BIOS sits wherever this
+ *  particular CBIOS was linked, so they are read out of the machine's own
+ *  page-zero vectors and jump table every time.
+ * ======================================================================== */
+
+int p2500_debug_add_symbol(P2500Debug *d, uint16_t addr, const char *name)
+{
+    if (!name || !*name) return -1;
+    for (int i = 0; i < d->syms; i++)
+        if (d->sym[i].addr == addr) return i;   /* first name wins */
+    if (d->syms >= P2500_DEBUG_MAX_SYMBOLS) return -1;
+    int i = d->syms++;
+    d->sym[i].addr = addr;
+    snprintf(d->sym[i].name, sizeof d->sym[i].name, "%s", name);
+    return i;
+}
+
+void p2500_debug_clear_symbols(P2500Debug *d) { d->syms = 0; }
+
+const char *p2500_debug_symbol(const P2500Debug *d, uint16_t addr)
+{
+    if (!d) return NULL;
+    for (int i = 0; i < d->syms; i++)
+        if (d->sym[i].addr == addr) return d->sym[i].name;
+    return NULL;
+}
+
+/* CP/M 2.2's BIOS jump table, in the order the standard fixes it. */
+static const char *const CBIOS_ENTRIES[17] = {
+    "BOOT", "WBOOT", "CONST", "CONIN", "CONOUT", "LIST", "PUNCH", "READER",
+    "HOME", "SELDSK", "SETTRK", "SETSEC", "SETDMA", "READ", "WRITE",
+    "LISTST", "SECTRAN"
+};
+
+static uint16_t peek16(const P2500Machine *m, uint16_t addr)
+{
+    return (uint16_t)(p2500_peek(m, addr) | (p2500_peek(m, (uint16_t)(addr + 1)) << 8));
+}
+
+int p2500_debug_scan_symbols(P2500Debug *d, const P2500Machine *m)
+{
+    /* Page zero has to hold CP/M's two vectors, and the jump table they
+     * lead to has to be 17 JPs. Both gates matter: the IPL also leaves a
+     * JP at $0000, and $0000-$0002 alone would happily "find" a table in
+     * whatever the boot sector left behind. */
+    if (p2500_peek(m, 0x0000) != 0xC3 || p2500_peek(m, 0x0005) != 0xC3) return 0;
+    const uint16_t table = (uint16_t)(peek16(m, 0x0001) - 3);
+    for (int i = 0; i < 17; i++)
+        if (p2500_peek(m, (uint16_t)(table + i * 3)) != 0xC3) return 0;
+
+    const int before = d->syms;
+    p2500_debug_add_symbol(d, 0x0005, "BDOS");
+    p2500_debug_add_symbol(d, peek16(m, 0x0006), "BDOS.body");
+    /* The two page-zero buffers every CP/M program uses, named because a
+     * listing full of $005C and $0080 is a listing you have to translate. */
+    p2500_debug_add_symbol(d, 0x005C, "FCB");
+    p2500_debug_add_symbol(d, 0x0080, "DMABUF");
+    for (int i = 0; i < 17; i++) {
+        const uint16_t slot = (uint16_t)(table + i * 3);
+        char body[P2500_DEBUG_SYMBOL_LEN];
+        /* The slot gets the bare name because that is the documented entry
+         * point and what every call site names; the implementation behind
+         * it gets `.body`, so stepping into one still reads as itself. */
+        p2500_debug_add_symbol(d, slot, CBIOS_ENTRIES[i]);
+        snprintf(body, sizeof body, "%s.body", CBIOS_ENTRIES[i]);
+        p2500_debug_add_symbol(d, peek16(m, (uint16_t)(slot + 1)), body);
+    }
+    return d->syms - before;
+}
+
+/* Exactly four hex digits, and not a fifth: `$E206` is an address, `$0A`
+ * is an 8-bit immediate, and nothing in this decoder prints five. */
+static bool hex4_at(const char *s, uint16_t *out)
+{
+    unsigned v = 0;
+    for (int i = 0; i < 4; i++) {
+        char c = s[i];
+        int nib;
+        if (c >= '0' && c <= '9') nib = c - '0';
+        else if (c >= 'A' && c <= 'F') nib = c - 'A' + 10;
+        else return false;
+        v = v * 16u + (unsigned)nib;
+    }
+    char after = s[4];
+    if ((after >= '0' && after <= '9') || (after >= 'A' && after <= 'F')) return false;
+    *out = (uint16_t)v;
+    return true;
+}
+
+int p2500_disasm_sym(const P2500Machine *m, const P2500Debug *d, uint16_t addr,
+                     char *buf, size_t buflen)
+{
+    char raw[96];
+    int len = p2500_disasm(m, addr, raw, sizeof raw);
+    if (!d || d->syms == 0) {
+        snprintf(buf, buflen, "%s", raw);
+        return len;
+    }
+    size_t o = 0;
+    for (size_t i = 0; raw[i];) {
+        uint16_t target;
+        const char *name = NULL;
+        if (raw[i] == '$' && hex4_at(raw + i + 1, &target))
+            name = p2500_debug_symbol(d, target);
+        if (name) {
+            for (size_t k = 0; name[k] && o + 1 < buflen; k++) buf[o++] = name[k];
+            i += 5;
+        } else {
+            if (o + 1 < buflen) buf[o++] = raw[i];
+            i++;
+        }
+    }
+    if (buflen) buf[o < buflen ? o : buflen - 1] = '\0';
+    return len;
+}
+
+/* ======================================================================== *
  *  Watches, counters, breakpoints
  * ======================================================================== */
 
@@ -254,6 +374,33 @@ void p2500_debug_init(P2500Debug *d)
     d->hit_break = -1;
     d->hit_watch = -1;
     d->last_pc = 0xFFFF;
+}
+
+void p2500_debug_run_to(P2500Debug *d, uint16_t addr)
+{
+    d->one_shot = addr;
+    d->one_shot_armed = true;
+    d->one_shot_use_sp = false;
+}
+
+bool p2500_debug_step_over(P2500Debug *d, const P2500Machine *m)
+{
+    const uint8_t op = p2500_peek(m, m->cpu.pc);
+    /* CALL nn in all nine of its forms, and the eight RSTs. A conditional
+     * CALL whose condition is false just falls through to the next
+     * instruction, which is the same address this arms, so there is no need
+     * to evaluate the flags. */
+    const bool is_call = op == 0xCD || (op & 0xC7) == 0xC4 || (op & 0xC7) == 0xC7;
+    if (!is_call) return false;
+    char text[96];
+    const int len = p2500_disasm(m, m->cpu.pc, text, sizeof text);
+    d->one_shot = (uint16_t)(m->cpu.pc + len);
+    d->one_shot_armed = true;
+    d->one_shot_use_sp = true;
+    /* The CALL pushes two bytes, so on return SP is back to what it is now.
+     * Anything deeper is the callee's own recursion passing through. */
+    d->one_shot_sp_floor = m->cpu.sp;
+    return true;
 }
 
 int p2500_debug_add_watch(P2500Debug *d, uint16_t addr, uint16_t len)
@@ -331,6 +478,7 @@ void p2500_debug_resume(P2500Debug *d)
 {
     d->hit_break = -1;
     d->hit_watch = -1;
+    d->hit_one_shot = false;
     d->skip_one = true;
 }
 
@@ -382,6 +530,12 @@ bool p2500_debug_before_step(P2500Debug *d, const P2500Machine *m, unsigned long
     if (stop) return true;
 
     if (d->skip_one) { d->skip_one = false; return false; }
+    if (d->one_shot_armed && d->one_shot == pc &&
+        (!d->one_shot_use_sp || m->cpu.sp >= d->one_shot_sp_floor)) {
+        d->one_shot_armed = false;
+        d->hit_one_shot = true;
+        return true;
+    }
     for (int i = 0; i < d->breaks; i++) {
         if (!d->brk[i].enabled || d->brk[i].addr != pc) continue;
         d->hit_break = i;

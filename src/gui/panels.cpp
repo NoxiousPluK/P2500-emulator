@@ -272,6 +272,15 @@ static void draw_disasm(P2500Panels &p, const P2500Machine &m, P2500Debug &dbg,
     ImGui::SameLine();
     if (ImGui::Button("Step")) act.steps = 1;
     ImGui::SameLine();
+    /* Step over: run the CALL at the PC to completion and stop on the
+     * instruction after it. On anything that is not a CALL or RST there is
+     * nothing to step over, so it degrades to a single step - which is what
+     * p2500_debug_step_over() reports by returning false. */
+    if (ImGui::Button("Step over")) {
+        if (p2500_debug_step_over(&dbg, &m)) act.resume = true;
+        else act.steps = 1;
+    }
+    ImGui::SameLine();
     if (ImGui::Button("Step 100")) act.steps = 100;
     ImGui::SameLine();
     if (ImGui::Button("Step field")) act.steps = ~0UL; /* one 50 Hz field */
@@ -279,6 +288,16 @@ static void draw_disasm(P2500Panels &p, const P2500Machine &m, P2500Debug &dbg,
     ImGui::TextDisabled("PC $%04X", m.cpu.pc);
 
     ImGui::Checkbox("follow PC", &p.disasm_follow_pc);
+    ImGui::SameLine();
+    /* Attempted every frame rather than once: the table can only be read
+     * out of a machine that has finished booting, and this is what notices
+     * that it has. It is a two-byte test when the answer is no, and
+     * idempotent when the answer is yes. */
+    if (dbg.syms == 0) p2500_debug_scan_symbols(&dbg, &m);
+    ImGui::Checkbox("symbols", &p.disasm_symbols);
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("%d names, read out of CP/M's page zero and CBIOS"
+                          " jump table", dbg.syms);
     ImGui::SameLine();
     uint16_t want = 0;
     if (addr_input("from", p.disasm_entry, sizeof p.disasm_entry, &want)) {
@@ -297,8 +316,14 @@ static void draw_disasm(P2500Panels &p, const P2500Machine &m, P2500Debug &dbg,
         uint16_t at = p.disasm_addr;
         const int lines = 48;
         for (int i = 0; i < lines; i++) {
-            char text[80];
-            int len = p2500_disasm(&m, at, text, sizeof text);
+            char text[96];
+            const P2500Debug *syms = p.disasm_symbols ? &dbg : nullptr;
+            int len = p2500_disasm_sym(&m, syms, at, text, sizeof text);
+            if (const char *label = p2500_debug_symbol(syms, at)) {
+                ImGui::Dummy(ImVec2(ImGui::GetTextLineHeight(), 0.0f));
+                ImGui::SameLine();
+                ImGui::TextColored(ImVec4(0.55f, 0.78f, 1.0f, 1.0f), "%s:", label);
+            }
             char bytes[16] = "";
             size_t bo = 0;
             for (int b = 0; b < len && b < 4; b++)
@@ -325,6 +350,22 @@ static void draw_disasm(P2500Panels &p, const P2500Machine &m, P2500Debug &dbg,
             ImGui::SameLine();
             if (at == m.cpu.pc) ImGui::Text(">$%04X  %-12s %s", at, bytes, text);
             else ImGui::TextDisabled(" $%04X  %-12s %s", at, bytes, text);
+            /* Right-click the line, not the gutter dot: the dot is one
+             * character wide and is already the breakpoint toggle. */
+            ImGui::PushID(2000 + i);
+            if (ImGui::BeginPopupContextItem("line")) {
+                ImGui::TextDisabled("$%04X", at);
+                ImGui::Separator();
+                if (ImGui::MenuItem("Run to here")) {
+                    p2500_debug_run_to(&dbg, at);
+                    act.resume = true;
+                }
+                if (ImGui::MenuItem(p2500_debug_find_break(&dbg, at) >= 0
+                                        ? "Clear breakpoint" : "Set breakpoint"))
+                    p2500_debug_toggle_break(&dbg, at);
+                ImGui::EndPopup();
+            }
+            ImGui::PopID();
             at = (uint16_t)(at + len);
         }
     }
@@ -334,6 +375,17 @@ static void draw_disasm(P2500Panels &p, const P2500Machine &m, P2500Debug &dbg,
     uint16_t addr = 0;
     if (addr_input("add breakpoint", p.break_entry, sizeof p.break_entry, &addr))
         p2500_debug_add_break(&dbg, addr);
+    /* The one-shot is deliberately not in the list below - it is not the
+     * user's breakpoint - but a run that is going to stop somewhere should
+     * say where, or the stop looks like a bug. */
+    if (dbg.one_shot_armed) {
+        ImGui::TextColored(ImVec4(0.55f, 0.78f, 1.0f, 1.0f),
+                           dbg.one_shot_use_sp ? "stepping over, back to $%04X"
+                                               : "running to $%04X",
+                           dbg.one_shot);
+        ImGui::SameLine();
+        if (ImGui::SmallButton("cancel")) dbg.one_shot_armed = false;
+    }
     for (int i = 0; i < dbg.breaks; i++) {
         ImGui::PushID(1000 + i);
         ImGui::Checkbox("", &dbg.brk[i].enabled);
