@@ -35,11 +35,21 @@ Verification, printed per file:
   flags four false positives on STARTREK.BAS alone.
 
 usage: tools/cpm_extract.py IMAGE.raw OUTDIR [--keep-padding] [--quiet]
-                                   [--double-step]
+                                   [--double-step] [--holes FILE]
 
 --double-step salvages a dump that captured only every second track (see
 tools/imd_tool.py verify). Logical track t then lives at index t/2 and odd
 t is a hole, zero-filled; each file reports how much of it survived.
+
+--holes FILE is the general form of the same thing, and the better one. An
+image normalised by `imd_tool.py convert` is indexed by ID cylinder, so a
+track that was never read is already in its right place - but it is filled
+with a constant, and a constant is indistinguishable from content once it is
+in the file. The sidecar `imd_tool.py convert --holes` writes names those
+regions per sector, so the recovery percentages mean the same thing they do
+under --double-step without the gap pattern having to be guessed from a
+stride. Prefer it: it also expresses a single unreadable sector, which a
+stride cannot.
 """
 
 import sys
@@ -64,10 +74,43 @@ SKEW = [(l * 2) % SECTORS_PER_TRACK + (l * 2) // SECTORS_PER_TRACK
 BLS_CANDIDATES = [(2048, 1), (1024, 0), (4096, 3), (16384, 15)]
 
 
+def read_hole_map(path: Path):
+    """Parse an imd_tool.py hole map into {(track, sector_id), ...}.
+
+    Returns (holes, declared_tracks). Lines are `track N` for a whole
+    0-based raw track or `sector N S` for one 1-based sector of it."""
+    holes, declared = set(), None
+    for lineno, line in enumerate(path.read_text().splitlines(), 1):
+        line = line.split("#", 1)[0].strip()
+        if not line:
+            continue
+        parts = line.split()
+        if parts[0] == "image":
+            continue
+        elif parts[0] == "geometry" and len(parts) >= 4:
+            declared = int(parts[1])
+            if (int(parts[2]), int(parts[3])) != (SECTORS_PER_TRACK, SECTOR_SIZE):
+                raise SystemExit(
+                    f"{path}:{lineno}: hole map is for {parts[2]}x{parts[3]}-byte "
+                    f"tracks, this tool reads {SECTORS_PER_TRACK}x{SECTOR_SIZE}")
+        elif parts[0] == "track" and len(parts) == 2:
+            t = int(parts[1])
+            holes.update((t, s) for s in range(1, SECTORS_PER_TRACK + 1))
+        elif parts[0] == "sector" and len(parts) == 3:
+            holes.add((int(parts[1]), int(parts[2])))
+        else:
+            raise SystemExit(f"{path}:{lineno}: cannot parse {line!r}")
+    return holes, declared
+
+
 class Image:
-    def __init__(self, data: bytes, double_step: bool = False):
+    def __init__(self, data: bytes, double_step: bool = False, holes=None):
         self.data = data
         self.tracks = len(data) // (SECTOR_SIZE * SECTORS_PER_TRACK)
+        # Sectors the dump never captured, as {(raw track, 1-based sector id)}.
+        # The image has bytes there - it has to have something - and this is
+        # the only record that they are filler rather than data.
+        self.holes = holes or set()
         # A double-stepped dump holds only the EVEN logical tracks, stored
         # consecutively. CP/M logical track t is read as FDC cylinder t + 1
         # (the Philips +1 convention), and these images carry ID cylinders
@@ -85,11 +128,13 @@ class Image:
         return idx if idx < self.tracks else None
 
     def logical_sector(self, track: int, lsec: int) -> bytes:
-        """Sector by LOGICAL track; b"" when that track was never captured."""
+        """Sector by LOGICAL track; b"" when it was never captured."""
         idx = self.raw_track(track)
         if idx is None:
             return b""
         phys = SKEW[lsec]
+        if (idx, phys + 1) in self.holes:
+            return b""
         off = (idx * SECTORS_PER_TRACK + phys) * SECTOR_SIZE
         return self.data[off:off + SECTOR_SIZE]
 
@@ -330,11 +375,32 @@ def verify(blob: bytes, ext: str, bls: int):
 
 
 def main() -> None:
-    args = [a for a in sys.argv[1:] if not a.startswith("--")]
+    argv, args = sys.argv[1:], []
+    i = 0
+    while i < len(argv):
+        if argv[i] == "--holes":
+            i += 2                      # flag and its value
+        elif argv[i].startswith("--"):
+            i += 1
+        else:
+            args.append(argv[i]); i += 1
     if len(args) < 2:
         print(__doc__.strip().splitlines()[-1])
         raise SystemExit(1)
-    img = Image(Path(args[0]).read_bytes(), "--double-step" in sys.argv)
+    holes, declared = set(), None
+    if "--holes" in sys.argv:
+        i = sys.argv.index("--holes")
+        if i + 1 >= len(sys.argv):
+            raise SystemExit("--holes needs a file")
+        holes, declared = read_hole_map(Path(sys.argv[i + 1]))
+    if holes and "--double-step" in sys.argv:
+        raise SystemExit("--holes and --double-step are two ways to say the same "
+                         "thing; an imd_tool-normalised image needs only --holes")
+    data = Path(args[0]).read_bytes()
+    img = Image(data, "--double-step" in sys.argv, holes)
+    if declared is not None and declared != img.tracks:
+        raise SystemExit(f"hole map declares {declared} tracks but "
+                         f"{args[0]} holds {img.tracks} - wrong pair of files?")
     rc = extract(img, Path(args[1]),
                  "--keep-padding" in sys.argv, "--quiet" in sys.argv)
     raise SystemExit(1 if rc else 0)
