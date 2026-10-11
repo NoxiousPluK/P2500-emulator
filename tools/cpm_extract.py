@@ -168,7 +168,14 @@ def extract(img: Image, outdir: Path, keep_padding: bool, quiet: bool) -> int:
     entries = read_directory(img, dir_track)
     live = live_entries(entries)
 
-    data_tracks = img.tracks - dir_track
+    # A double-stepped dump holds only HALF the logical tracks, so the disk
+    # it came from is twice as long as the file. Sizing the block space off
+    # the file instead rejects every block in the top half as "past end of
+    # disk" - including the ones that WERE captured, since a block at
+    # logical track 2 + b/2 is present whenever that track is even. Files
+    # living entirely up there came out as 0 bytes.
+    logical_tracks = img.tracks * (2 if img.double_step else 1)
+    data_tracks = logical_tracks - dir_track
     derive_total = lambda bls: data_tracks * SECTORS_PER_TRACK * SECTOR_SIZE // bls
     bls, exm, wide = derive_format(entries, derive_total)
     total_blocks = derive_total(bls)
