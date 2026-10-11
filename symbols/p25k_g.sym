@@ -23,7 +23,15 @@
 #   - the rest of PBIOS, by walking both builds' disassembly in lockstep
 #     from those entry points: every name below had at least two
 #     instructions whose operands say so, or was confirmed by hand
-#   - the CBIOS half, from G's own SELDSK, CONIN and CONOUT bodies
+#   - the CBIOS half, read end to end against the same dump taken from
+#     P25K_B. The 17 jump-table slots and their bodies are derived from
+#     page zero at run time and are deliberately absent here; what this
+#     file names is everything BETWEEN them. There is no IN and no OUT
+#     anywhere in $E2B2-$E629 - this CBIOS is a pure client of PBIOS's
+#     request layer - so every device access is `ld de,<block> / call
+#     REQ.SUBMIT`, and the eight static request blocks below are what
+#     made the module readable. Write-up: p25k_g-cbios.md in the
+#     research repo
 #   - three tables, by content: the baud table and the sector-translate
 #     table are byte-identical to B's, and the escape table has the same
 #     {code, pointer} records
@@ -34,6 +42,24 @@
 # in demos/p2500.inc does not work), KEYXLAT.TAB (no key translation
 # table - no cursor diamond, no dead keys), ESC.COUNT and CONOUT.XLAT
 # (G's CONOUT only posts a request; the screen driver owns the escapes).
+#
+# And three structures here have no counterpart in cpm.sym, for the same
+# reason: BANNER.REQ (G's CBIOS prints "PHILIPS P2000B / CP/M 2.2 - 58K"
+# on a cold boot; B's prints nothing - its banner comes from the loader
+# and is not resident once CP/M is up), DPB.ALT (a second, 1K-block 132K
+# format B does not carry), and the whole DRI blocking/deblocking
+# variable block at $E748-$E758, which is a different disk
+# implementation rather than a relocation of B's.
+#
+# Cross-checked the way cpm.sym is (tools/sym_check.py in the research
+# repo, 16-byte windows over $E200-$FFFF), with a second run of the SAME
+# disk as the control:
+#
+#   P25K_G run 2   140 of 143 same address, 0 moved - so these names are
+#                  stable, not artefacts of one run. The 3 that do not
+#                  compare are live data (HSTBUF, KBD.RING, GENQ.BUF)
+#   P25K_B         3 same, 9 moved, 128 absent - which is the measurement
+#                  behind "a different implementation, not a relocation"
 #
 # Fingerprint, so `--symbols auto` can recognise this build without
 # being told which disk is in the drive:
@@ -82,8 +108,9 @@ E3C3 CAPS.MASK      ; $DF as shipped, and ANDed with the input - so this
                     ; case. Verified by typing: `DIR` echoes `DIR` here
                     ; and `dir` on P25K_B
 E3C4 KBD.REQ        ; the console-in request block
-E3C6 KBD.REQ.BUSY   ; CONIN spins on this before posting
-E3C8 KBD.REQ.STAT   ; and waits for $80 here
+E3C6 KBD.REQ.STAT   ; +2 of the block: CONIN spins on this reaching 0
+E3C8 KBD.REQ.DATA   ; +4: the returned code. $80 is not a character -
+                    ; it is the capitals-lock key, and CAPS.CHECK eats it
 E3C9 KBD.REQ2       ; a second block for device $30, posted by BOOT
 
 # ---- PBIOS: the request and driver layer
@@ -178,3 +205,91 @@ F923 DISK.F07
 F92F DISK.F04
 F93E DISK.F05
 F94D DISK.F08
+
+# ---- CBIOS: the request-block layout, which is what this CBIOS is made of
+#      Every device access in $E2B2-$E629 is `ld de,<block> / call
+#      REQ.SUBMIT`. There is no IN and no OUT anywhere in this CBIOS - it
+#      is a pure client of PBIOS's request layer. Block header:
+#        +0 function  +1 device id  +2 status  +3 data length  +4.. data
+E33E BANNER.REQ      ; [05][31][00][20] + "PHILIPS P2000B\r\nCP/M 2.2 - 58K\r\n"
+E342 BANNER.TEXT     ; 32 bytes - and an in-CBIOS statement of the build size
+E3DA CONOUT.REQ      ; [05][31][00][01] - the one-character screen write
+E3DE CONOUT.CHAR     ; +4: CONOUT stores C here, then submits
+E405 PRINTER.MSG     ; "ACTIVATE PRINTER AND PRESS RETURN OR SPACE TO IGNORE"
+E44A LIST.REQ        ; [05][40][00][01] - one character to device $40
+E44E LIST.CHAR       ; +4: LIST stores C here
+E45D LISTST.REQ      ; [03][40][00][00] - printer status
+E461 LISTST.DATA     ; +4: non-zero means ready
+E62A DISK.IO.REQ     ; [04|05][unit][status][00] then +4 track, +5 physical
+                     ; sector, +6 count, +8 DMA ($E648). Submitted twice at
+                     ; most: one retry, then ERFLAG
+E634 DISK.SEL.REQ    ; [01][unit] + an 18-byte drive-parameter block, issued
+                     ; before every host transfer. Only +1 (the unit) and
+                     ; +16 (the DRIVE.MAP byte) are rewritten per call
+E644 DISK.SEL.TYPE   ; +16: the drive type copied out of DRIVE.MAP
+
+# ---- CBIOS: the paths between the entry points. The 17 jump-table slots
+#      and their bodies are derived from page zero at run time and are
+#      deliberately absent; these are the internals those bodies share.
+E2A1 DPB.ALT.PTR     ; -> $E282. Read by NOTHING resident: a patch point
+E2A3 DPB.PTR         ; -> $E273, likewise unread
+E2A5 DPHTAB.PTR      ; -> $E233, likewise - SELDSK uses an immediate instead
+E2A9 CCP.JP          ; jp $CC00; BOOT ends with it, and its operand doubles
+                     ; as the CCP load address WBOOT reads as a word
+E2AC BDOS.JP         ; jp $D406; WBOOT calls page zero's BDOS through it
+E282 DPB.ALT         ; a complete second 15-byte DPB: SPT 32, 1K blocks
+                     ; (BSH/BLM 3/7), DSM 131, DRM 63, AL0 $C0, CKS 16,
+                     ; OFF 2 - a 132K, 35-track format. No counterpart on
+                     ; P25K_B, and nothing on this disk can select it
+E313 BOOT.COMMON     ; where BOOT and WBOOT join: build page zero's jps,
+                     ; SETDMA $0080, then jp CCP.JP with C = ($0004)
+E362 SYSCPM.FCB      ; [01]"SYSCPM  PHI" - WBOOT reloads the CCP/BDOS by
+                     ; asking BDOS to open and read this file, 17 records
+                     ; to $CC00. Not a system-track read
+E479 SELDSK.DPH      ; drive*16 + $E233; also called by READ and HSTWRITE
+E3EE LIST.PROMPT     ; the printer-not-ready dialogue, driven by CONIN
+E3FF LIST.DISABLE    ; writes $C9 over $E3DF - SPACE patches LIST's own
+                     ; entry point to RET for the rest of the session, and
+                     ; a warm boot does not undo it because WBOOT reloads
+                     ; SYSCPM.PHI only. Cold boot is the only way back
+E4D1 RWSETUP         ; READ's tail: readop=1, rsflag=1, wrtype=2
+E4E5 WRITE.PREP      ; WRITE's head: wrtype=C, and on wrtype 2 (write to an
+                     ; unallocated block) prime UNACNT=16 - which is
+                     ; 2048/128, so it is the block size restated
+E53B UNASEC.NEXT     ; advances UNASEC by searching SECTRAN.TAB for the
+                     ; current entry and taking the one after it - the skew
+                     ; table used as a successor function. The track-wrap
+                     ; case above it falls into this and overwrites its own
+                     ; UNASEC=1 (the `jr c` at $E539 can never be taken
+                     ; after `cp $20`), so write-ahead is simply lost at a
+                     ; track boundary and the safe pre-read takes over
+E55B RWCOMMON        ; HSTSEC = (sector-1)>>1, then the host-buffer
+                     ; compare, the 128-byte LDIR, and the write-through
+E5F5 HSTREAD         ; function $04 on the drive's own device id
+E5F9 HSTWRITE        ; function $05
+E648 HSTBUF          ; 256 bytes, $E648-$E747 - so a physical sector is 256
+                     ; bytes and holds two CP/M records
+
+# ---- CBIOS: the blocking/deblocking state. These are Digital Research's
+#      published sample names: this CBIOS is that skeleton, with the host
+#      buffer at $E648 and a 2048-byte allocation block.
+E748 HSTSEC          ; physical sector = (CP/M sector - 1) >> 1
+E749 DMAADDR         ; SETDMA stores BC here
+E74D SECTOR.CUR      ; SETSEC; 1-based and already translated
+E74E HSTACT          ; host buffer holds something
+E74F HSTWRT          ; host buffer is dirty
+E750 UNACNT          ; records left in the unallocated block, primed to 16
+E751 UNADRV
+E752 UNATRK
+E753 UNASEC          ; held translated, not logical - see UNASEC.NEXT
+E754 ERFLAG          ; $FF after both tries of DISK.IO.REQ fail
+E755 RSFLAG          ; the host sector must be pre-read
+E756 READOP
+E757 WRTYPE          ; BDOS's C: 0 normal, 1 directory, 2 unallocated
+E758 DIRSEC          ; NOT a DRI name. READ sets it when the sector asked
+                     ; for is track OFF, sector 1 - the first directory
+                     ; sector - and RWCOMMON then skips the host-buffer
+                     ; tag compare, forcing a physical re-read. With no
+                     ; media-change line, this is how a swapped disk is
+                     ; noticed at the top of every directory scan
+E769 STACK.TOP       ; BOOT and WBOOT both set SP here
