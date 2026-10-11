@@ -27,6 +27,7 @@ this software or do this research.
 
 - Full Z80 CPU emulation with a real IM2 interrupt daisy chain (CTC, PIO, DMA, FDC)
 - CP/M 2.2 boot from floppy disk images, including disk swapping
+- Reading and writing (into the image in memory, saved only when you ask) disks
 - MC6845 CRTC-driven text video (80×24, 8×12 cells) and 512×256 high-resolution graphics mode
 - Cartridge support including SESAM-key emulation
 - Keyboard input
@@ -138,6 +139,7 @@ against a real key, or load an arbitrary cartridge ROM file.
 | `--rom PATH` / `--charrom PATH` | boot EPROM, character generator |
 | `--scale N` | initial window zoom (the window is resizable and letterboxes with integer scaling) |
 | `--window WxH` | an explicit initial window size instead, for a window the screen does not divide evenly |
+| `--write-protect LETTERS` | mount those drives read-only, e.g. `--write-protect ab` |
 | `--speed X` \| `unlimited` | initial emulation speed |
 | `--no-caps-lock` | boot with capitals lock off |
 | `--panels LIST` | open specific debugger panels at startup |
@@ -227,9 +229,12 @@ nor a CALL/RET count recovers the caller's depth. Both rules were built and
 measured against it and both landed inside the dispatcher; `--back-to ADDR`
 answers the same question exactly, and `core/history.h` has the numbers.
 
-Media is outside the snapshots — disk images are immutable today — so a
-rewind across a disk write will need the writes journalled alongside them
-when write support lands.
+Media is outside the snapshots, by the same design that stops a rewind resurrecting
+a pointer the front end has freed. That has the consequence that a rewind does not
+un-write a sector. However it does do is avoid writing it twice; the FDC is told
+to stage and drop a write during the silent replay, so replaying over a write leaves
+the disk exactly as the first pass left it. Rewind past a write and then diverge,
+and the disk still holds what the abandoned future wrote.
 
 ## Symbol files
 
@@ -337,6 +342,8 @@ scripted runs, probing, and disk-image inspection.
 | `--disks A[,B[,C[,D]]]` | attach images to the four drives in order; an empty field skips one |
 | `--disk PATH` / `--disk-b` / `--disk-c` / `--disk-d` | the same, one drive at a time |
 | `--swap-at MS:PATH` | change disks at an emulated-time offset; `MS:B:PATH` targets a drive |
+| `--save-disk PATH` / `--save-disk-b` / `--save-disk-c` / `--save-disk-d` | write that drive's image out at exit |
+| `--write-protect LETTERS` | mount those drives read-only, e.g. `--write-protect ab` |
 | `--cartridge PATH` | attach a byte stream to the port $0F cartridge slot (e.g. a SESAM dongle stream) |
 | `--type STRING` / `--type-after MS` / `--type-at MS:STRING` | scripted keystrokes via the queue |
 | `--push-at MS:STRING` | keystrokes via the live ring — the same path a GUI keypress takes |
@@ -367,8 +374,41 @@ ratio and the instruction rate the host managed.
 Disks can be changed mid-run, and CP/M handles it as on real hardware: a
 swapped-in disk is readable immediately (`DIR` lists it with no warm
 boot), but write access to it is marked unavailable until a warm boot
-(Ctrl-C) clears the flag — writing to disk is not yet implemented, so
-that flag currently has no other visible effect.
+(Ctrl-C) clears the flag. That is the DPB's `CKS` of 16 doing its job —
+these drives are checksummed as removable media, so BDOS notices the
+directory changed under it.
+
+## Writing to disk
+
+A mounted disk is writable, but nothing is ever written back to the file
+it came from. Writes land in the image held in memory; keeping them is an
+explicit action:
+
+- GUI: *File ▸ Save Disk As…*, per drive. The menu's right-hand column
+  shows how many sectors the guest has written.
+  *File ▸ Write-protect* toggles the tab per drive.
+- CLI: `--save-disk PATH` writes drive A's image out at exit
+  (`--save-disk-b/-c/-d` for the others), and `--write-protect ab` mounts
+  those drives read-only.
+
+That policy is deliberate. The cost is that an eject, a new disk in the
+same drive, or quitting without saving discards the changes. The GUI says
+so in its status line and its log.
+
+A read-only mount uses the write-protect tab signal.
+`SENSE DRIVE STATUS` reports WP in ST3, and a write terminates with
+NW in ST1, both as the µPD765 datasheet specifies. This CBIOS does not
+consult WP before writing; it issues the command and reports the failure
+through BDOS, which surfaces as `Bdos Err On A: Bad Sector`.
+
+Both `WRITE DATA` and `READ DATA` move their bytes through the Z80A-DMA
+model in one block rather than byte-at-a-time. That costs no CPU-visible
+state: the Main Status Register's EXM bit is set only during a *non-DMA*
+execution phase, and every `SPECIFY` this project has traced programs
+ND=0, so a real controller in this machine never raises EXM either.
+
+`FORMAT TRACK` is implemented from the datasheet and is the one FDC
+command that no known surviving P2500 software exercises.
 
 ## Building disk images
 

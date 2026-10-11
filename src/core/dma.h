@@ -157,14 +157,31 @@ void p2500_dma_write(P2500Dma *dma, uint8_t value); /* port $16 */
  * one the DMA's own count cut short. */
 size_t p2500_dma_deliver(P2500Dma *dma, uint8_t *ram, const uint8_t *src, size_t len);
 
-/* How many bytes this DMA would accept right now - its programmed block
- * length, clamped to the room left below the top of RAM, or 0 if it is
- * not enabled for an IO->memory transfer. The FDC needs this *before*
- * delivering: whether a read terminates normally or hits the end of the
- * cylinder depends on whether the requester wanted more than the track
- * had left, and after the fact a short transfer and an exact fit look
- * the same. */
-size_t p2500_dma_requested_bytes(const P2500Dma *dma);
+/* The other direction, and the mirror image of the above in every
+ * respect: called by fdc.c for a WRITE DATA command, it copies up to the
+ * DMA's programmed block_length bytes out of RAM at the Port B address
+ * into `dst` (the media), fires the same end-of-block interrupt, and
+ * returns how many bytes it moved. No-op unless the DMA has been enabled
+ * for a memory->IO transfer - the direction the firmware selects by
+ * clearing WR0's D2, which is how a write is told from a read before a
+ * single byte moves.
+ *
+ * Direction is the ONLY asymmetry between the two. The P2500's floppy
+ * driver programs identical register streams either way - traced on a
+ * `SAVE` from the CCP: WR0 $6D for the read, $69 for the write, and every
+ * byte after it the same - so a write that moves nothing is a direction
+ * bug and nothing else. */
+size_t p2500_dma_fetch(P2500Dma *dma, const uint8_t *ram, uint8_t *dst, size_t len);
+
+/* How many bytes this DMA would move right now in each direction - its
+ * programmed block length, clamped to the room left below the top of RAM,
+ * or 0 if it is not enabled for a transfer that way. The FDC needs this
+ * *before* moving anything: whether a transfer terminates normally or
+ * hits the end of the cylinder depends on whether the DMA wanted more
+ * than the track had left, and after the fact a short transfer and an
+ * exact fit look the same. */
+size_t p2500_dma_requested_bytes(const P2500Dma *dma);  /* IO->memory */
+size_t p2500_dma_offered_bytes(const P2500Dma *dma);    /* memory->IO */
 
 #ifdef __cplusplus
 }

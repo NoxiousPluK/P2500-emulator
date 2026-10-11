@@ -27,11 +27,35 @@ extern "C" {
  * read/write) are the real P2500 ports, confirmed independently against
  * the CP/M-era CBIOS disassembly.
  *
- * READ DATA's sector bytes are delivered via the real Z80A-DMA model
- * (dma.{c,h}, port $16) in one shot (the moment the command's parameter
- * bytes are complete) rather than byte-by-byte in step with the uPD765's
- * actual transfer timing - see dma.c for the block length/destination
- * decode this pulls from.
+ * READ DATA's and WRITE DATA's sector bytes move through the real Z80A-DMA
+ * model (dma.{c,h}, port $16) in one shot (the moment the command's
+ * parameter bytes are complete) rather than byte-by-byte in step with the
+ * uPD765's actual transfer timing - see dma.c for the block
+ * length/address/direction decode this pulls from. The two commands are
+ * one function here (do_read_write), because on a real uPD765 they differ
+ * in exactly three things: which way the bytes go, whether a
+ * write-protected disk refuses, and the DT bit in ST1. Everything else -
+ * the geometry, the EOT bound, the result-phase ID advance - is shared
+ * hardware behaviour, so sharing the code keeps the two from drifting.
+ *
+ * What the one-shot transfer does NOT cost us is EXM, the Main Status
+ * Register's "execution phase in progress" bit. EXM is set only during a
+ * NON-DMA execution phase, and this machine never has one: every SPECIFY
+ * this project has traced - $03 $30 $24 from the IPL, $03 $F0 $0A from
+ * CBIOS, identical on all four bootable disks - carries ND=0 in bit 0 of
+ * its second parameter byte, selecting DMA mode. So EXM reads 0 on real
+ * hardware here too, and modelling it would mean modelling a mode no
+ * P2500 firmware selects.
+ *
+ * WRITE DATA needs somewhere to put the bytes, and media mounted through
+ * p2500_fdc_attach() is const - a read-only mount, which is not a
+ * limitation to apologise for but the model of a disk with its
+ * write-protect tab in place: SENSE DRIVE STATUS reports WP and a write
+ * to it terminates with NW, exactly as the hardware does. Media mounted
+ * through p2500_fdc_attach_writable() accepts writes, into the caller's
+ * own buffer and never to a file - persisting that buffer is a front-end
+ * decision (p2500-emu's --save-disk, the GUI's File menu), so the only
+ * copies of rare media cannot be damaged by a guest program.
  *
  * RECALIBRATE and SEEK are asynchronous on real hardware (no immediate
  * result phase - completion is signalled by an interrupt, and the driver
@@ -118,6 +142,15 @@ typedef struct {
      * The unit comes from the command's second byte, bits 0-1. */
     const uint8_t *disk[P2500_FDC_MAX_DRIVES];
     size_t disk_size[P2500_FDC_MAX_DRIVES];
+    /* Non-NULL, and equal to disk[u], when that drive's media accepts
+     * writes; NULL is a write-protected disk. Two pointers rather than one
+     * plus a flag so that the const-correctness of the read path survives:
+     * nothing can write through disk[] by accident. */
+    uint8_t *disk_rw[P2500_FDC_MAX_DRIVES];
+    /* Sectors this run has written into each drive's buffer. The front end
+     * reads them to know whether an image is worth saving and to say so
+     * before an eject throws the changes away - a silent drop otherwise. */
+    unsigned long sectors_written[P2500_FDC_MAX_DRIVES];
     uint8_t unit; /* unit selected by the command being executed */
 
     /* set once by machine.c at init: the flat 64K RAM image (destination
@@ -132,6 +165,22 @@ typedef struct {
     P2500FdcInterruptCallback on_interrupt;
     void *interrupt_userdata;
 
+    /* Set by core/history.c around a silent replay. A rewind restores a
+     * snapshot and re-executes forward, so every WRITE DATA between the
+     * snapshot and the target would be performed a second time - into
+     * media that already holds it, since the guest's RAM is identical.
+     * Suppressing the commit (not the DMA transfer, and not the interrupt,
+     * which the replayed code is waiting on) is what keeps a rewind free of
+     * side effects, which is the property --verify-rewind asserts for
+     * everything that lives inside the machine struct and the media does
+     * not.
+     *
+     * It does not make a rewind undo a write: media is the front end's
+     * buffer, outside the snapshot ring by the same design that stops a
+     * rewind resurrecting a pointer the front end has freed. Rewind past a
+     * write and then diverge, and the disk still holds it. */
+    bool suppress_writes;
+
     bool verbose;
 } P2500Fdc;
 
@@ -140,6 +189,13 @@ void p2500_fdc_init(P2500Fdc *fdc, const uint8_t *disk, size_t disk_size);
 /* Attach (or with NULL, eject) the image in a drive. Unit 0 is A:. */
 void p2500_fdc_attach(P2500Fdc *fdc, unsigned unit,
                       const uint8_t *data, size_t size);
+/* The same, for media the guest may write to: `data` is the front end's own
+ * buffer and the FDC writes sectors into it in place. Nothing here ever
+ * touches a file. Attaching read-only media over it (p2500_fdc_attach, or
+ * NULL to eject) clears the writable pointer too, so a drive cannot be left
+ * holding a stale one. */
+void p2500_fdc_attach_writable(P2500Fdc *fdc, unsigned unit,
+                               uint8_t *data, size_t size);
 /* Fires one of the uPD765's real, well-documented post-reset unsolicited
  * interrupts - a real chip generates one per
  * configured drive shortly after coming out of reset, before any

@@ -104,7 +104,7 @@ gui_report() {
 SECTIONS='1:sesam 1b:banner 2:ipl 3:cpm 4:dir 4a:driveb 4b:swap 4c:game
 5:banktrip 6:render 7:gui 8:debug 9:log 10:cpmbuild 11:graphics 12:demos
 13:speed 14:eot 15:rewind 16:symbols 17:drives 18:derived 19:images
-20:sysinfo 21:lamps 22:cart'
+20:sysinfo 21:lamps 22:cart 23:write'
 
 usage() {
     cat <<USAGE
@@ -2082,6 +2082,147 @@ base, key = reads(sys.argv[1]), reads(sys.argv[2])
 print("    baseline %d reads, bootable cartridge %d" % (base, key))
 sys.exit(0 if base == 32 and key > base * 10 else 1)
 CARTTRAFFIC
+}
+
+sec_23() {
+echo "== 23. Writing to disk: CP/M's own SAVE and PIP, then read back (T30)"
+# The end-to-end claim: a guest program writes a file, the image carries it,
+# and a SECOND boot of the saved image finds it. Reading it back on a fresh
+# machine is what makes this a test of the data path rather than of the
+# directory buffer that is still in RAM.
+#
+# $DISK is never written: --save-disk writes the in-memory image out to a
+# path of our choosing, which is the whole persistence policy - nothing in
+# this emulator can damage an original.
+cp "$DISK" "$TMP/w.raw"
+$EMU --disk "$TMP/w.raw" --max-steps 40000000 \
+     --type-at '4000:SAVE 1 ZZ.COM\r' --type-at '20000:DIR\r' \
+     --save-disk "$TMP/saved.raw" --dump-vram "$TMP/w.bin" \
+     >"$TMP/w.log" 2>&1
+screen "$TMP/w.bin" >"$TMP/w.screen"
+if grep -q 'ZZ *COM' "$TMP/w.screen"; then
+    pass "SAVE writes a file CP/M's own DIR then lists"
+else fail "SAVE did not produce a directory entry"; fi
+if grep -q 'Wrote A: .*1 sector' "$TMP/w.log" || grep -q 'Wrote A: .*[2-9] sector' "$TMP/w.log"; then
+    pass "the FDC counted the sectors the guest wrote"
+else fail "no sectors were counted as written"; fi
+# The source image must be untouched whatever the guest did.
+if cmp -s "$TMP/w.raw" "$DISK"; then
+    pass "the file the disk was loaded from is byte-identical afterwards"
+else fail "the source image was modified"; fi
+if [ -s "$TMP/saved.raw" ] && ! cmp -s "$TMP/saved.raw" "$DISK"; then
+    pass "--save-disk wrote an image that differs from the original"
+else fail "--save-disk produced nothing, or nothing changed"; fi
+
+# Boot the saved image. This is the discriminating half: a write that only
+# updated the in-RAM directory would pass everything above and fail here.
+$EMU --disk "$TMP/saved.raw" --max-steps 20000000 --type-at '4000:DIR\r' \
+     --dump-vram "$TMP/r.bin" >"$TMP/r.log" 2>&1
+screen "$TMP/r.bin" >"$TMP/r.screen"
+if grep -q '58K CP/M Ver. 2.2' "$TMP/r.screen"; then
+    pass "the written-to image still boots"
+else fail "the written-to image no longer boots"; fi
+if grep -q 'ZZ *COM' "$TMP/r.screen"; then
+    pass "a fresh boot of it finds the file"
+else fail "the file did not survive the save/reload"; fi
+
+# PIP: a real utility, copying a real file. Comparing the copy against its
+# source byte for byte proves the data blocks landed where the directory
+# says they did - the directory alone parses either way.
+cp "$DISK" "$TMP/p.raw"
+$EMU --disk "$TMP/p.raw" --max-steps 120000000 \
+     --type-at '4000:PIP COPY.COM=SYSGEN.COM\r' \
+     --save-disk "$TMP/pip.raw" >"$TMP/pip.log" 2>&1
+if python3 tools/cpm_extract.py "$TMP/pip.raw" "$TMP/pipex" --quiet >"$TMP/pipex.log" 2>&1 &&
+   cmp -s "$TMP/pipex/COPY.COM" "$TMP/pipex/SYSGEN.COM"; then
+    pass "PIP's copy is byte-identical to its source on the saved image"
+else
+    fail "PIP's copy is missing or does not match its source"
+    sed 's/^/    /' "$TMP/pipex.log"
+fi
+
+# The write-protect tab. CBIOS does not consult ST3's WP bit - it issues the
+# write anyway and reports the failure through BDOS - so what this asserts
+# is that the refusal reaches the guest at all, and that the image really is
+# untouched. A model that ignored the tab would pass neither.
+cp "$DISK" "$TMP/wp.raw"
+$EMU --disk "$TMP/wp.raw" --write-protect a --max-steps 40000000 \
+     --type-at '4000:SAVE 1 ZZ.COM\r' --verbose-io \
+     --save-disk "$TMP/wpsaved.raw" --dump-vram "$TMP/wp.bin" \
+     >"$TMP/wp.log" 2>&1
+screen "$TMP/wp.bin" >"$TMP/wp.screen"
+if grep -q 'media is write-protected' "$TMP/wp.log"; then
+    pass "a write to write-protected media is refused by the controller"
+else fail "the write-protect tab was ignored"; fi
+if grep -qi 'Bdos Err On A' "$TMP/wp.screen"; then
+    pass "and the guest is told, through BDOS"
+else fail "the guest saw no error"; fi
+if cmp -s "$TMP/wpsaved.raw" "$DISK"; then
+    pass "the write-protected image is byte-identical to the original"
+else fail "a write-protected image was modified"; fi
+
+# The GUI's half of the policy: the only notice a user gets that an image
+# has been written to is the count beside File > Save Disk As... That is a
+# claim about pixels, so it is checked in pixels - the same submenu, with
+# and without a guest that wrote, and the two must differ. Checking only
+# the "after" capture would pass against a menu that always said something.
+if [ -x ./p2500-gui ]; then
+    # Spelled out twice rather than looped: the push argument carries
+    # spaces, and a variable holding it would word-split back into four
+    # arguments. The mouse path is click File (the lamp report gives no
+    # menu coordinates), hover "Save Disk As...", then step right into the
+    # submenu - so adding a File item above it moves the target and this
+    # fails loudly (nothing differs) rather than passing vacuously.
+    cp "$DISK" "$TMP/g.raw"
+    SDL_VIDEODRIVER=dummy ./p2500-gui --disk "$TMP/g.raw" --speed unlimited \
+        --frames 900 --push-at '4000:SAVE 1 ZZ.COM\r' \
+        --mouse '800:20,11,left' --mouse '820:60,119' --mouse '860:100,119' \
+        --shot-window "$TMP/menu-wrote.ppm" >"$TMP/menu-wrote.log" 2>&1
+    cp "$DISK" "$TMP/g.raw"   # the written image must not seed the next run
+    SDL_VIDEODRIVER=dummy ./p2500-gui --disk "$TMP/g.raw" --speed unlimited \
+        --frames 900 \
+        --mouse '800:20,11,left' --mouse '820:60,119' --mouse '860:100,119' \
+        --shot-window "$TMP/menu-clean.ppm" >"$TMP/menu-clean.log" 2>&1
+    python3 - "$TMP/menu-wrote.ppm" "$TMP/menu-clean.ppm" <<'MENUCOUNT' && pass "the File menu shows a written-sector count, and only when there is one" || fail "the Save Disk As... submenu does not report writes"
+import sys
+def load(p):
+    f = open(p, 'rb')
+    assert f.readline().strip() == b'P6'
+    w, h = map(int, f.readline().split()); f.readline()
+    return w, h, f.read()
+w, h, a = load(sys.argv[1]); _, _, b = load(sys.argv[2])
+# The submenu sits to the right of the File dropdown, below the bar. The
+# count is the only thing in it that a write changes.
+diff = sum(a[(y*w+x)*3:(y*w+x)*3+3] != b[(y*w+x)*3:(y*w+x)*3+3]
+           for y in range(100, 200) for x in range(210, 560))
+print("    %d pixel(s) differ in the submenu" % diff)
+sys.exit(0 if diff > 50 else 1)
+MENUCOUNT
+else
+    echo "  (skipped: no ./p2500-gui)"
+fi
+
+# tests/fdc_write links libp2500.a directly, for the paths no guest program
+# in this corpus takes: FORMAT TRACK, a write that outlives its track, a DMA
+# programmed the wrong way round, and the write-protect refusal in
+# isolation. Its lines are replayed through pass/fail so they count here
+# rather than merely appearing - same arrangement as section 14, and read
+# from files because a `while read` off a pipe counts in a subshell.
+if [ -x ./tests/fdc_write ]; then
+    ./tests/fdc_write >"$TMP/fdc-write.log" 2>&1
+    wrc=$?
+    sed -n 's/^  PASS  //p' "$TMP/fdc-write.log" >"$TMP/fdc-write.pass"
+    sed -n 's/^  FAIL  //p' "$TMP/fdc-write.log" >"$TMP/fdc-write.fail"
+    while IFS= read -r c; do pass "$c"; done <"$TMP/fdc-write.pass"
+    while IFS= read -r c; do fail "$c"; done <"$TMP/fdc-write.fail"
+    if [ ! -s "$TMP/fdc-write.pass" ] && [ ! -s "$TMP/fdc-write.fail" ]; then
+        fail "tests/fdc_write named no checks at all"
+    elif [ "$wrc" -ne 0 ] && [ ! -s "$TMP/fdc-write.fail" ]; then
+        fail "tests/fdc_write exited $wrc without naming a failed check"
+    fi
+else
+    fail "tests/fdc_write is not built (make tests/fdc_write)"
+fi
 }
 
 ran=0

@@ -238,7 +238,12 @@ void p2500_reset(P2500Machine *m);
  * them aside itself. */
 typedef struct {
     const uint8_t *disk[P2500_FDC_MAX_DRIVES];
+    uint8_t *disk_rw[P2500_FDC_MAX_DRIVES];
     size_t disk_size[P2500_FDC_MAX_DRIVES];
+    /* Carried for the same reason as the pointers: a reset does not put
+     * written sectors back, and a rewind must not make the front end
+     * believe an image it has already modified is still clean. */
+    unsigned long sectors_written[P2500_FDC_MAX_DRIVES];
     const uint8_t *cartridge;
     size_t cartridge_len;
     const uint8_t *keys;

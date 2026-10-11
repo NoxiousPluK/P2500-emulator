@@ -397,7 +397,9 @@ bool p2500_load_rom(P2500Machine *m, const char *path) {
 void p2500_attachments_save(const P2500Machine *m, P2500Attachments *a) {
     for (int d = 0; d < P2500_FDC_MAX_DRIVES; d++) {
         a->disk[d] = m->fdc.disk[d];
+        a->disk_rw[d] = m->fdc.disk_rw[d];
         a->disk_size[d] = m->fdc.disk_size[d];
+        a->sectors_written[d] = m->fdc.sectors_written[d];
     }
     a->cartridge = m->cartridge.stream;
     a->cartridge_len = m->cartridge.stream_len;
@@ -413,7 +415,9 @@ void p2500_attachments_save(const P2500Machine *m, P2500Attachments *a) {
 void p2500_attachments_restore(P2500Machine *m, const P2500Attachments *a) {
     for (int d = 0; d < P2500_FDC_MAX_DRIVES; d++) {
         m->fdc.disk[d] = a->disk[d];
+        m->fdc.disk_rw[d] = a->disk_rw[d];
         m->fdc.disk_size[d] = a->disk_size[d];
+        m->fdc.sectors_written[d] = a->sectors_written[d];
     }
     m->cartridge.stream = a->cartridge;
     m->cartridge.stream_len = a->cartridge_len;

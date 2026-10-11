@@ -164,6 +164,15 @@ struct App {
     SDL_AtomicInt disk_pending;  /* set by the file-dialog callback */
     char disk_path[1024];
     unsigned pending_unit;       /* which drive the dialog was opened for */
+    /* Writes land in the mounted image's own buffer and never in the file
+     * it was read from - several of this project's images are the only
+     * copies there are, so persisting one is an explicit File-menu action.
+     * A bit set here mounts that drive with its write-protect tab in
+     * place, which the guest sees as WP in SENSE DRIVE STATUS. */
+    unsigned write_protect;
+    SDL_AtomicInt save_pending;
+    char save_path[1024];
+    unsigned saving_unit;
     char status[160];            /* last action, shown at the right of the bar */
 
     /* Cartridge slot (port $0F) - SESAM keys are its best-documented use,
@@ -332,9 +341,16 @@ static void mount_disk(App *app, unsigned unit, const char *path)
     size_t n = 0;
     uint8_t *buf = read_whole_file(path, &n);
     if (!buf) { set_status(app, "could not read %s", path); return; }
+    if (app->disk[unit] && app->m.fdc.sectors_written[unit])
+        SDL_Log("drive %c: replaced with %lu written sector(s) unsaved",
+                'A' + (int)unit, app->m.fdc.sectors_written[unit]);
     free(app->disk[unit]);
     app->disk[unit] = buf;
-    p2500_fdc_attach(&app->m.fdc, unit, buf, n);
+    if (app->write_protect & (1u << unit))
+        p2500_fdc_attach(&app->m.fdc, unit, buf, n);
+    else
+        p2500_fdc_attach_writable(&app->m.fdc, unit, buf, n);
+    app->m.fdc.sectors_written[unit] = 0;
     /* The snapshots describe a machine that was reading the old disk, and
      * one of them holds a pointer into the buffer just freed. */
     p2500_history_clear(app->hist);
@@ -352,14 +368,24 @@ static void mount_disk(App *app, unsigned unit, const char *path)
 static void eject_disk(App *app, unsigned unit)
 {
     if (unit >= P2500_FDC_MAX_DRIVES || !app->disk[unit]) return;
+    /* An eject throws away whatever the guest wrote, since nothing was
+     * written back to a file. Saying so is the point: a silent drop is
+     * worse than a refusal, and this is the only notice the user gets. */
+    const unsigned long written = app->m.fdc.sectors_written[unit];
     p2500_fdc_attach(&app->m.fdc, unit, NULL, 0);
+    app->m.fdc.sectors_written[unit] = 0;
     p2500_history_clear(app->hist);
     free(app->disk[unit]);
     app->disk[unit] = NULL;
     app->disk_name[unit][0] = '\0';
     app->disk_id[unit][0] = '\0';
-    set_status(app, "%c: empty", 'A' + (int)unit);
-    SDL_Log("drive %c: ejected", 'A' + (int)unit);
+    if (written)
+        set_status(app, "%c: empty - %lu written sector(s) discarded",
+                   'A' + (int)unit, written);
+    else
+        set_status(app, "%c: empty", 'A' + (int)unit);
+    SDL_Log("drive %c: ejected (%lu written sector(s) discarded)",
+            'A' + (int)unit, written);
 }
 
 /* SDL may run this on another thread, so it only parks the path and raises a
@@ -626,6 +652,48 @@ static void open_disk_dialog(App *app, unsigned unit)
     app->pending_unit = unit;
     SDL_ShowOpenFileDialog(disk_chosen, app, app->window,
                            filters, SDL_arraysize(filters), NULL, false);
+}
+
+/* Another thread, same discipline as disk_chosen(): park the path, raise a
+ * flag, and let SDL_AppIterate do the file I/O. */
+static void SDLCALL save_chosen(void *userdata, const char *const *filelist, int)
+{
+    App *app = (App *)userdata;
+    if (!filelist || !filelist[0]) return; /* cancelled, or the dialog failed */
+    SDL_strlcpy(app->save_path, filelist[0], sizeof app->save_path);
+    SDL_SetAtomicInt(&app->save_pending, 1);
+}
+
+/* Writing a mounted image out is always "save as": the machine never
+ * writes back over the file a disk came from, so there is no in-place save
+ * to offer and no way for a guest program to damage an original. */
+static void open_save_dialog(App *app, unsigned unit)
+{
+    static const SDL_DialogFileFilter filters[] = {
+        { "Disk images", "raw;img;dsk" },
+        { "All files", "*" },
+    };
+    if (unit >= P2500_FDC_MAX_DRIVES || !app->disk[unit]) return;
+    app->saving_unit = unit;
+    SDL_ShowSaveFileDialog(save_chosen, app, app->window,
+                           filters, SDL_arraysize(filters), app->disk_name[unit]);
+}
+
+static void save_disk(App *app, unsigned unit, const char *path)
+{
+    if (unit >= P2500_FDC_MAX_DRIVES || !app->disk[unit]) return;
+    const size_t n = app->m.fdc.disk_size[unit];
+    SDL_IOStream *io = SDL_IOFromFile(path, "wb");
+    if (!io || SDL_WriteIO(io, app->disk[unit], n) != n) {
+        if (io) SDL_CloseIO(io);
+        set_status(app, "could not write %s: %s", path, SDL_GetError());
+        return;
+    }
+    SDL_CloseIO(io);
+    const char *base = SDL_strrchr(path, '/');
+    set_status(app, "%c: saved to %s (%lu sector(s) written)", 'A' + (int)unit,
+               base ? base + 1 : path, app->m.fdc.sectors_written[unit]);
+    SDL_Log("drive %c: %zu bytes written to %s", 'A' + (int)unit, n, path);
 }
 
 /* Deliberately not the default ImGui look: square, dark, and on the same
@@ -895,6 +963,46 @@ static void draw_menu_bar(App *app)
         if (ImGui::MenuItem("Load Disk C...")) open_disk_dialog(app, 2);
         if (ImGui::MenuItem("Load Disk D...")) open_disk_dialog(app, 3);
         ImGui::Separator();
+        /* Writes go into the mounted image's buffer and nowhere else, so
+         * keeping them is this menu's job. The shortcut column carries the
+         * written-sector count rather than a key, which is the one thing a
+         * user needs in order to decide whether to bother - and makes a
+         * drive the guest has written to visible without a tooltip. */
+        if (ImGui::BeginMenu("Save Disk As...")) {
+            for (unsigned u = 0; u < P2500_FDC_MAX_DRIVES; u++) {
+                char label[32], count[32] = "";
+                SDL_snprintf(label, sizeof label, "Disk %c...", 'A' + (int)u);
+                const unsigned long w = app->m.fdc.sectors_written[u];
+                if (w) SDL_snprintf(count, sizeof count, "%lu sector%s", w, w == 1 ? "" : "s");
+                else if (app->write_protect & (1u << u)) SDL_strlcpy(count, "write-protected", sizeof count);
+                if (ImGui::MenuItem(label, count, false, app->disk[u] != NULL))
+                    open_save_dialog(app, u);
+            }
+            ImGui::EndMenu();
+        }
+        /* The physical write-protect tab, per drive. Toggling it re-attaches
+         * the same buffer through the other entry point, so it takes effect
+         * on the next command the guest issues - as moving a real tab would,
+         * the guest having no way to be told in advance. */
+        if (ImGui::BeginMenu("Write-protect")) {
+            for (unsigned u = 0; u < P2500_FDC_MAX_DRIVES; u++) {
+                char label[32];
+                SDL_snprintf(label, sizeof label, "Disk %c", 'A' + (int)u);
+                bool on = (app->write_protect & (1u << u)) != 0;
+                if (ImGui::MenuItem(label, NULL, on, app->disk[u] != NULL)) {
+                    on = !on;
+                    app->write_protect = on ? (app->write_protect | (1u << u))
+                                            : (app->write_protect & ~(1u << u));
+                    const size_t n = app->m.fdc.disk_size[u];
+                    if (on) p2500_fdc_attach(&app->m.fdc, u, app->disk[u], n);
+                    else p2500_fdc_attach_writable(&app->m.fdc, u, app->disk[u], n);
+                    set_status(app, "%c: %s", 'A' + (int)u,
+                               on ? "write-protected" : "writable");
+                }
+            }
+            ImGui::EndMenu();
+        }
+        ImGui::Separator();
         if (ImGui::MenuItem("Reset", "Ctrl+R")) {
             p2500_reset(&app->m);
             p2500_history_clear(app->hist);
@@ -1114,6 +1222,14 @@ static void draw_menu_bar(App *app)
                             "system disk does not use them all.",
                             mapped, mapped == 1 ? "" : "s",
                             'A' + mapped - 1, 'A' + (int)u);
+                    if (app->write_protect & (1u << u))
+                        TIP("\n\nWrite-protected: the guest sees WP in SENSE "
+                            "DRIVE STATUS and a write terminates with NW.");
+                    else if (app->m.fdc.sectors_written[u])
+                        TIP("\n\nModified: %lu sector(s) written, in memory "
+                            "only.\nFile > Save Disk As... keeps them; an "
+                            "eject or a new disk throws them away.",
+                            app->m.fdc.sectors_written[u]);
                     TIP("\n\nClick to change, right-click to eject.\n"
                         "A swapped-in disk is readable at once; CP/M marks"
                         " the drive read-only until a warm boot (Ctrl-C).");
@@ -1373,6 +1489,7 @@ static void usage(FILE *out)
                  "                 [--disks A[,B[,C[,D]]]]\n"
                  "                 [--disk path] [--disk-b path] [--disk-c path]\n"
                  "                 [--disk-d path]\n"
+                 "                 [--write-protect LETTERS]\n"
                  "                 [--window WxH]\n"
                  "                 [--frames N] [--screenshot out.ppm] [--shot-window out.ppm]\n"
                  "                 [--push-at MS:STRING ...] [--no-caps-lock]\n"
@@ -1383,6 +1500,9 @@ static void usage(FILE *out)
                  "                 [--break ADDR ...] [--watch ADDR ...]\n"
                  "                 [--watch-break ADDR ...]\n"
                  "                 [--symbols FILE ...] [--help]\n"
+                 "\nA mounted disk is writable in memory and never written back to\n"
+                 "the file it came from: File > Save Disk As... keeps the changes,\n"
+                 "and --write-protect ab mounts those drives read-only.\n"
                  "\nWith no --symbols, the shipped symbols/*.sym are matched against\n"
                  "the running build by fingerprint and the one that fits is loaded.\n"
                  "\nAddresses are hex. Symbol files are one `ADDR NAME` per line;\n"
@@ -1401,6 +1521,7 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[])
     const char *shot_path = NULL;
     const char *win_shot_path = NULL;
     bool caps_lock = true; /* as the disks ship */
+    unsigned write_protect = 0;
     bool force_pacing = false;
     float speed = 1.0f;
     unsigned long push_at[MAX_PUSHES] = {0};
@@ -1432,6 +1553,18 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[])
         else if (!strcmp(argv[i], "--disk-b") && i + 1 < argc) disks[1] = argv[++i];
         else if (!strcmp(argv[i], "--disk-c") && i + 1 < argc) disks[2] = argv[++i];
         else if (!strcmp(argv[i], "--disk-d") && i + 1 < argc) disks[3] = argv[++i];
+        else if (!strcmp(argv[i], "--write-protect") && i + 1 < argc) {
+            for (const char *p = argv[++i]; *p; p++) {
+                int d = (*p >= 'a' && *p <= 'z') ? *p - 'a'
+                      : (*p >= 'A' && *p <= 'Z') ? *p - 'A' : -1;
+                if (d < 0 || d >= P2500_FDC_MAX_DRIVES) {
+                    SDL_Log("--write-protect: '%c' is not a drive letter (a-%c)",
+                            *p, 'a' + P2500_FDC_MAX_DRIVES - 1);
+                    return SDL_APP_FAILURE;
+                }
+                write_protect |= 1u << d;
+            }
+        }
         /* See the CLI's note: four is the hardware's number of select
          * lines, not a claim about what the guest BIOS maps (three on
          * P25K_B, two on P25K_G). */
@@ -1542,6 +1675,7 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[])
     app->shot_path = shot_path;
     app->win_shot_path = win_shot_path;
     app->caps_lock = caps_lock;
+    app->write_protect = write_protect;
     app->force_pacing = force_pacing;
     app->speed = speed;
     app->start_ns = SDL_GetTicksNS();
@@ -1573,7 +1707,10 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[])
             SDL_Log("failed to load disk image %s", disks[u]);
             return SDL_APP_FAILURE;
         }
-        p2500_fdc_attach(&app->m.fdc, u, app->disk[u], n);
+        if (write_protect & (1u << u))
+            p2500_fdc_attach(&app->m.fdc, u, app->disk[u], n);
+        else
+            p2500_fdc_attach_writable(&app->m.fdc, u, app->disk[u], n);
         const char *base = SDL_strrchr(disks[u], '/');
         SDL_strlcpy(app->disk_name[u], base ? base + 1 : disks[u], sizeof app->disk_name[u]);
         identify_disk(app, u, app->disk[u], n);
@@ -1728,6 +1865,11 @@ SDL_AppResult SDL_AppIterate(void *appstate)
     if (SDL_GetAtomicInt(&app->disk_pending)) {
         SDL_SetAtomicInt(&app->disk_pending, 0);
         mount_disk(app, app->pending_unit, app->disk_path);
+    }
+
+    if (SDL_GetAtomicInt(&app->save_pending)) {
+        SDL_SetAtomicInt(&app->save_pending, 0);
+        save_disk(app, app->saving_unit, app->save_path);
     }
 
     if (SDL_GetAtomicInt(&app->cart_pending)) {

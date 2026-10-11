@@ -12,3 +12,4 @@ publish/
 *.exe
 *.dll
 tests/fdc_eot
+tests/fdc_write

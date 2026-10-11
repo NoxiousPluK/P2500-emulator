@@ -333,12 +333,21 @@ int p2500_sysinfo(const P2500Machine *m, const P2500Debug *d,
         if (symbol_dir)
             p2500_debug_identify_disk(m->fdc.disk[u], m->fdc.disk_size[u],
                                       symbol_dir, id, sizeof id, NULL, 0);
+        /* Write state belongs here for the same reason the cartridge's
+         * read/write counts do: it is the only visible trace of a write,
+         * which goes into the front end's buffer and never to a file. */
+        char wr[64] = "";
+        if (!m->fdc.disk_rw[u])
+            snprintf(wr, sizeof wr, "   write-protected");
+        else if (m->fdc.sectors_written[u])
+            snprintf(wr, sizeof wr, "   %lu sector(s) written, unsaved",
+                     m->fdc.sectors_written[u]);
         if (id[0])
-            ROW(label, "%lu KB   %s",
-                (unsigned long)(m->fdc.disk_size[u] / 1024), id);
+            ROW(label, "%lu KB   %s%s",
+                (unsigned long)(m->fdc.disk_size[u] / 1024), id, wr);
         else
-            ROW(label, "%lu KB   image not recognised by any shipped rule",
-                (unsigned long)(m->fdc.disk_size[u] / 1024));
+            ROW(label, "%lu KB   image not recognised by any shipped rule%s",
+                (unsigned long)(m->fdc.disk_size[u] / 1024), wr);
     }
 
     /* -------------------------------------------------------- Cartridge

@@ -86,11 +86,12 @@ CLI_OBJ = $(CLI_SRC:.c=.o)
 GUI_OBJ = $(GUI_SRC:.cpp=.o)
 DEPS = $(CORE_OBJ:.o=.d) $(CLI_OBJ:.o=.d) $(GUI_OBJ:.o=.d) $(IMGUI_OBJ:.o=.d)
 
-# A core-level test binary: tests/fdc_eot.c links libp2500.a directly,
-# because the behaviour it checks (a read bounded by EOT) cannot be
-# reached through any guest program this project has. Built on demand by
-# tests/run_tests.sh, not part of `all`.
-TEST_BIN = tests/fdc_eot$(EXE_SUFFIX)
+# Core-level test binaries: these link libp2500.a directly, because what
+# they check cannot be reached through any guest program this project has -
+# a read bounded by EOT, and the write paths no surviving software takes
+# (FORMAT TRACK, the write-protect tab, a DMA programmed the wrong way).
+# Built by `make test`, not part of `all`.
+TEST_BIN = tests/fdc_eot$(EXE_SUFFIX) tests/fdc_write$(EXE_SUFFIX)
 
 .PHONY: all clean run test gui demos
 
@@ -145,11 +146,11 @@ $(DEMO_DISK): $(DEMO_COM) tools/cpm_build.py
 	@test -f "$(BOOT_DONOR)" || { echo "need a bootable P2500 image: BOOT_DONOR=path make demos"; exit 1; }
 	python3 tools/cpm_build.py $@ $(DEMO_COM) --boot-from "$(BOOT_DONOR)"
 
-$(TEST_BIN): tests/fdc_eot.c $(LIB)
+tests/%$(EXE_SUFFIX): tests/%.c $(LIB)
 	$(CC) $(CFLAGS) $(BIN_LDFLAGS) -o $@ $< $(LIB)
 
 clean:
-	rm -f $(TEST_BIN) tests/fdc_eot.d
+	rm -f $(TEST_BIN) $(TEST_BIN:$(EXE_SUFFIX)=.d)
 	rm -f $(BIN) $(GUI) $(LIB) $(CORE_OBJ) $(CLI_OBJ) $(GUI_OBJ) $(IMGUI_OBJ) $(DEPS)
 	rm -f src/win/*.res.o
 	rm -f $(DEMO_COM) $(DEMO_DISK)

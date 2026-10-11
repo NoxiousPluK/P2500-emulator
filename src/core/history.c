@@ -114,12 +114,22 @@ static void restore(P2500History *h, P2500Machine *m, int idx) {
 }
 
 /* Replay to `target` with the log detached, and never through
- * p2500_debug_before_step(): a rewind must have no side effects. */
+ * p2500_debug_before_step(): a rewind must have no side effects.
+ *
+ * Writable media is the one side effect the machine struct cannot hold -
+ * it is the front end's buffer - so a replay would commit every WRITE
+ * DATA it passes a second time. The FDC is told to stage the bytes and
+ * drop them instead (fdc.h's suppress_writes), which leaves the disk
+ * exactly as the first pass left it. Saved and put back rather than
+ * cleared, so a nested replay cannot un-suppress its caller's. */
 static void replay_to(P2500Machine *m, unsigned long target) {
     P2500Log log = m->log;
+    const bool was_suppressing = m->fdc.suppress_writes;
     m->log.fn = NULL;
     m->log.userdata = NULL;
+    m->fdc.suppress_writes = true;
     while (m->total_instructions < target) p2500_step(m);
+    m->fdc.suppress_writes = was_suppressing;
     m->log = log;
 }
 
@@ -179,6 +189,7 @@ static long scan_back(P2500History *h, P2500Machine *m, const P2500Debug *d,
     /* restore() keeps the live attachments, the log sink included, so this
      * only has to silence the scan itself. */
     const P2500Log log = m->log;
+    const bool was_suppressing = m->fdc.suppress_writes;
     long found = -1;
 
     /* Newest window first, then back one snapshot at a time, stopping at
@@ -192,6 +203,9 @@ static long scan_back(P2500History *h, P2500Machine *m, const P2500Debug *d,
         restore(h, m, idx);
         m->log.fn = NULL;
         m->log.userdata = NULL;
+        /* Set inside the loop: restore() brings the snapshot's own copy of
+         * this flag with it, so it has to be re-asserted after each one. */
+        m->fdc.suppress_writes = true;
         while (m->total_instructions < end) {
             if (mode == SCAN_PC) {
                 if (m->cpu.pc == addr) found = (long)m->total_instructions;
@@ -207,6 +221,7 @@ static long scan_back(P2500History *h, P2500Machine *m, const P2500Debug *d,
         end = h->at[idx];   /* the next window older than this one */
     }
     m->log = log;
+    m->fdc.suppress_writes = was_suppressing;
 
     if (found >= 0) {
         /* Land on it. A snapshot at or before it was just restored, so this

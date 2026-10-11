@@ -174,6 +174,8 @@ static void usage(FILE *out, const char *argv0) {
                  "  [--charrom path] [--cartridge path]\n"
                  "  [--dump-vram path] [--dump-vram-attr path] [--dump-screen file.ppm]\n"
                  "  [--dump-ram path]\n"
+                 "  [--save-disk path] [--save-disk-b path] [--save-disk-c path]\n"
+                 "  [--save-disk-d path] [--write-protect LETTERS]\n"
                  "  [--max-steps N] [--verbose-io] [--speed X|unlimited]\n"
                  "  [--peek ADDR:LEN ...] [--poke ADDR:HEXBYTES ...]\n"
                  "  [--watch ADDR[:LEN] ...] [--watch-break ADDR[:LEN] ...]\n"
@@ -186,6 +188,11 @@ static void usage(FILE *out, const char *argv0) {
                  "  [--history] [--step-back N] [--seek N]\n"
                  "  [--back-to-break] [--back-to ADDR] [--verify-rewind N]\n"
                  "  [--no-stuck-detect] [--help]\n"
+                 "\nA mounted disk is writable in memory and never written back to\n"
+                 "the file it came from: --save-disk PATH writes the drive's image out\n"
+                 "at exit, and --write-protect ab mounts those drives read-only, which\n"
+                 "the guest sees as the write-protect tab (SENSE DRIVE STATUS reports\n"
+                 "WP, a write terminates with NW).\n"
                  "\nAddresses are hex. Symbol files are one `ADDR NAME` per line;\n"
                  "symbols/ shipped files name the IPL, CP/M's CBIOS and P25K_G's.\n"
                  "`--symbols auto` picks the one whose fingerprint matches the\n"
@@ -254,6 +261,13 @@ int main(int argc, char **argv) {
     struct { uint16_t addr; unsigned count; } disasms[MAX_DISASM];
     int num_disasms = 0;
     const char *ram_dump_path = NULL;
+    /* Where each drive's image should be written at exit, and which drives
+     * are mounted with the write-protect tab in place. Writes land in the
+     * in-memory buffer either way; nothing here ever writes back over the
+     * file a disk was loaded from, because several of this project's images
+     * are the only copies in existence. */
+    const char *save_disk_paths[P2500_FDC_MAX_DRIVES] = {0};
+    unsigned write_protect = 0;
     /* --step-over ADDR - run to ADDR, then run the CALL there to completion
      * and stop on the instruction after it. The headless half of the GUI's
      * Step over button, and the reason that button's SP guard has a test:
@@ -399,6 +413,24 @@ int main(int argc, char **argv) {
             num_peeks++;
         }
         else if (!strcmp(argv[i], "--dump-ram") && i + 1 < argc) ram_dump_path = argv[++i];
+        else if (!strcmp(argv[i], "--save-disk") && i + 1 < argc) save_disk_paths[0] = argv[++i];
+        else if (!strcmp(argv[i], "--save-disk-b") && i + 1 < argc) save_disk_paths[1] = argv[++i];
+        else if (!strcmp(argv[i], "--save-disk-c") && i + 1 < argc) save_disk_paths[2] = argv[++i];
+        else if (!strcmp(argv[i], "--save-disk-d") && i + 1 < argc) save_disk_paths[3] = argv[++i];
+        else if (!strcmp(argv[i], "--write-protect") && i + 1 < argc) {
+            /* Drive letters, in any order and any case: `--write-protect a`,
+             * `--write-protect ab`. An unknown letter is an error rather
+             * than a drive that quietly stays writable. */
+            for (const char *p = argv[++i]; *p; p++) {
+                int d = (*p >= 'a' && *p <= 'z') ? *p - 'a' : (*p >= 'A' && *p <= 'Z') ? *p - 'A' : -1;
+                if (d < 0 || d >= P2500_FDC_MAX_DRIVES) {
+                    fprintf(stderr, "--write-protect: '%c' is not a drive letter (a-%c)\n",
+                            *p, 'a' + P2500_FDC_MAX_DRIVES - 1);
+                    return 1;
+                }
+                write_protect |= 1u << d;
+            }
+        }
         else if (!strcmp(argv[i], "--sysinfo")) dump_sysinfo = true;
         else if (!strcmp(argv[i], "--swap-at") && i + 1 < argc) {
             if (num_swaps >= MAX_SWAPS) { fprintf(stderr, "too many --swap-at args\n"); return 1; }
@@ -558,8 +590,12 @@ int main(int argc, char **argv) {
             fprintf(stderr, "failed to load disk image %s\n", disk_paths[u]);
             return 1;
         }
-        p2500_fdc_attach(&m.fdc, u, disk_buf[u], n);
-        printf("Loaded %c: from %s (%zu bytes)\n", 'A' + (int)u, disk_paths[u], n);
+        if (write_protect & (1u << u))
+            p2500_fdc_attach(&m.fdc, u, disk_buf[u], n);
+        else
+            p2500_fdc_attach_writable(&m.fdc, u, disk_buf[u], n);
+        printf("Loaded %c: from %s (%zu bytes%s)\n", 'A' + (int)u, disk_paths[u], n,
+               (write_protect & (1u << u)) ? ", write-protected" : "");
         char label[96], from[256];
         if (p2500_debug_identify_disk(disk_buf[u], n, "symbols",
                                       label, sizeof label, from, sizeof from) == 1)
@@ -735,7 +771,13 @@ int main(int argc, char **argv) {
         for (int sw = 0; sw < num_swaps; sw++) {
             if (swaps[sw].done) continue;
             if (m.cpu.cyc < swaps[sw].at_ms * (P2500_CPU_HZ / 1000u)) continue;
-            p2500_fdc_attach(&m.fdc, swaps[sw].unit, swaps[sw].buf, swaps[sw].size);
+            /* A swapped-in disk gets the same treatment as one mounted at
+             * startup, write-protect tab included - otherwise a swap would
+             * silently change whether the guest can write. */
+            if (write_protect & (1u << swaps[sw].unit))
+                p2500_fdc_attach(&m.fdc, swaps[sw].unit, swaps[sw].buf, swaps[sw].size);
+            else
+                p2500_fdc_attach_writable(&m.fdc, swaps[sw].unit, swaps[sw].buf, swaps[sw].size);
             swaps[sw].done = true;
             fprintf(stderr, "[step %lu] disk swapped: now %s (%zu bytes). Reads see it "
                             "immediately; CP/M marks the drive read-only until a warm "
@@ -1081,6 +1123,30 @@ int main(int argc, char **argv) {
             printf("Wrote the full 64K RAM image to %s\n", ram_dump_path);
         } else {
             fprintf(stderr, "failed to write RAM dump to %s\n", ram_dump_path);
+        }
+    }
+
+    /* --save-disk: the in-memory image, whether or not the guest wrote to
+     * it, to the path asked for and never over the source file. Reported
+     * either way - a save of an untouched image is a legitimate thing to
+     * ask for (it is how a test establishes a baseline), but silence about
+     * it would leave "did my write land?" unanswerable. */
+    for (unsigned u = 0; u < P2500_FDC_MAX_DRIVES; u++) {
+        if (!save_disk_paths[u]) continue;
+        if (!disk_buf[u]) {
+            fprintf(stderr, "--save-disk: nothing is mounted in %c:\n", 'A' + (int)u);
+            exit_status = 1;
+            continue;
+        }
+        FILE *f = fopen(save_disk_paths[u], "wb");
+        size_t wrote = f ? fwrite(disk_buf[u], 1, m.fdc.disk_size[u], f) : 0;
+        if (f) fclose(f);
+        if (wrote == m.fdc.disk_size[u]) {
+            printf("Wrote %c: (%zu bytes, %lu sector(s) written by the guest) to %s\n",
+                   'A' + (int)u, wrote, m.fdc.sectors_written[u], save_disk_paths[u]);
+        } else {
+            fprintf(stderr, "failed to write %c: image to %s\n", 'A' + (int)u, save_disk_paths[u]);
+            exit_status = 1;
         }
     }
 

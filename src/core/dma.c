@@ -107,8 +107,9 @@ static void execute_command(P2500Dma *dma, uint8_t value) {
     case 0xBB: /* Read Mask Follows */
         /* Recognized (per the Z80 Family CPU Peripherals User Manual's
          * WR6 command table) but not modeled - nothing this project has
-         * traced ever sends these, and none of them affect the fields
-         * this emulator's READ DATA path actually needs. */
+         * traced ever sends these, and none of them affect the fields the
+         * transfer paths actually read (direction, block length, Port B
+         * address, vector). */
         if (dma->verbose) p2500_logf(dma->log, P2500_LOG_WARN, "dma", "WR6 command $%02X (recognized, not modeled)", value);
         break;
     default:
@@ -239,10 +240,20 @@ void p2500_dma_write(P2500Dma *dma, uint8_t value) {
     handle_follow_byte(dma, role, value);
 }
 
-size_t p2500_dma_requested_bytes(const P2500Dma *dma) {
-    if (!dma->dma_enabled || dma->direction != P2500_DMA_DIR_IO_TO_MEMORY) return 0;
+/* Both directions clamp the same way, so the two public accessors differ
+ * only in which direction they will admit to being programmed for. */
+static size_t movable_bytes(const P2500Dma *dma, P2500DmaDirection want) {
+    if (!dma->dma_enabled || dma->direction != want) return 0;
     size_t room = (size_t)(0x10000 - dma->port_b_addr);
     return dma->block_length < room ? dma->block_length : room;
+}
+
+size_t p2500_dma_requested_bytes(const P2500Dma *dma) {
+    return movable_bytes(dma, P2500_DMA_DIR_IO_TO_MEMORY);
+}
+
+size_t p2500_dma_offered_bytes(const P2500Dma *dma) {
+    return movable_bytes(dma, P2500_DMA_DIR_MEMORY_TO_IO);
 }
 
 size_t p2500_dma_deliver(P2500Dma *dma, uint8_t *ram, const uint8_t *src, size_t len) {
@@ -258,6 +269,25 @@ size_t p2500_dma_deliver(P2500Dma *dma, uint8_t *ram, const uint8_t *src, size_t
     memcpy(&ram[dma->port_b_addr], src, len);
     if (dma->verbose)
         p2500_logf(dma->log, P2500_LOG_TRACE, "dma", "delivered %zu bytes to RAM $%04X", len, dma->port_b_addr);
+
+    if (dma->interrupts_enabled && dma->on_interrupt)
+        dma->on_interrupt(dma->interrupt_userdata, dma->vector);
+    return len;
+}
+
+size_t p2500_dma_fetch(P2500Dma *dma, const uint8_t *ram, uint8_t *dst, size_t len) {
+    if (!dma->dma_enabled || dma->direction != P2500_DMA_DIR_MEMORY_TO_IO) {
+        if (dma->verbose)
+            p2500_logf(dma->log, P2500_LOG_WARN, "dma", "fetch requested but DMA not enabled for WRITE - dropped");
+        return 0;
+    }
+    if (len > dma->block_length) len = dma->block_length;
+    size_t room = (size_t)(0x10000 - dma->port_b_addr);
+    if (len > room) len = room;
+
+    memcpy(dst, &ram[dma->port_b_addr], len);
+    if (dma->verbose)
+        p2500_logf(dma->log, P2500_LOG_TRACE, "dma", "fetched %zu bytes from RAM $%04X", len, dma->port_b_addr);
 
     if (dma->interrupts_enabled && dma->on_interrupt)
         dma->on_interrupt(dma->interrupt_userdata, dma->vector);

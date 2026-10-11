@@ -1117,15 +1117,26 @@ static void line_fdc(const P2500Machine *m, int line,
                 f->real_operation_started ? ", a real command has been issued" : "");
             break;
     case 6: {
-        char t[128] = "";
+        /* Per drive: size, whether the media accepts writes, and how many
+         * sectors the guest has written into the front end's buffer. The
+         * count is the only evidence a write leaves - nothing is written
+         * back to a file - so the panel is where "did that land?" gets
+         * answered. */
+        char t[160] = "";
         size_t at = 0;
         for (unsigned u = 0; u < P2500_FDC_MAX_DRIVES; u++) {
             int w;
-            if (f->disk[u])
+            if (!f->disk[u])
+                w = snprintf(t + at, sizeof t - at, "%s%c: -", at ? "  " : "", 'A' + (int)u);
+            else if (!f->disk_rw[u])
+                w = snprintf(t + at, sizeof t - at, "%s%c: %zu KB WP", at ? "  " : "",
+                             'A' + (int)u, f->disk_size[u] / 1024);
+            else if (f->sectors_written[u])
+                w = snprintf(t + at, sizeof t - at, "%s%c: %zu KB +%lu", at ? "  " : "",
+                             'A' + (int)u, f->disk_size[u] / 1024, f->sectors_written[u]);
+            else
                 w = snprintf(t + at, sizeof t - at, "%s%c: %zu KB", at ? "  " : "",
                              'A' + (int)u, f->disk_size[u] / 1024);
-            else
-                w = snprintf(t + at, sizeof t - at, "%s%c: -", at ? "  " : "", 'A' + (int)u);
             if (w > 0) at += (size_t)w;
             if (at >= sizeof t) break;
         }
