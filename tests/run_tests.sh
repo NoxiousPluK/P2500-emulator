@@ -1871,7 +1871,7 @@ printf '\000\022\064' >"$TMP/key.bin"
 $EMU --cartridge "$TMP/key.bin" --max-steps 300000 --sysinfo \
      >"$TMP/cart_key.log" 2>&1
 if grep -q 'byte 0 .*\$00   the IPL will boot from this cartridge' "$TMP/cart_key.log" &&
-   grep -q 'first three bytes .*\$00 \$12 \$34   the shape of a SESAM key' "$TMP/cart_key.log"; then
+   grep -q 'first three bytes .*\$00 \$12 \$34   likely a SESAM key' "$TMP/cart_key.log"; then
     pass "a three-byte stream is reported as a bootable SESAM-shaped key"
 else fail "the cartridge stream was not decoded"; fi
 # A non-$00 first byte must send the IPL to the floppy instead, and the
