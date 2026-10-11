@@ -92,6 +92,7 @@ right-click for the list).
 | Ctrl+letter | `^A`–`^Z` (Ctrl-C warm-boots CP/M) |
 | Ctrl+O / Ctrl+R / Ctrl+Q | load disk / reset / quit |
 | F1 / F2 / F3 / F4 | device state / memory / disassembly / log panel |
+| F5 | system information panel |
 | F10 / F11 / F12 | screenshot (BMP) / unlimited speed (toggle) / pause (toggle) |
 
 The machine boots with **capitals lock engaged**, matching how these disks
@@ -150,6 +151,15 @@ Everything the panels show comes from `core/debug.c`, the same code
 `p2500-emu` prints from — a panel cannot show something the headless
 harness can't also report.
 
+- **System information** (F5) — current device configuration:
+  the boot EPROM's CRC32 and whether it is the dump this project's
+  findings come from, the bank latch's decode, the CRTC geometry, what
+  is in each drive and whether the image is one the shipped rules recognise,
+  which symbol file fingerprints the running build, and (once CP/M is up);
+  the memory map, drive A's DPB decoded, and the device table the BIOS
+  publishes. That last one is the answers how many drive letters are
+  supported by the loaded disks CBIOS/PBIOS. it is read out of the BIOS's
+  own DPH chain. `--sysinfo` prints the same lines.
 - **Device state** (F1) — every device at once: the interrupt daisy chain,
   the four CTC channels, PIO mode and masks, DMA registers, FDC phase and
   command/result bytes, CRTC registers, the video attribute latch.
@@ -264,6 +274,7 @@ the running build from its own bytes. Each file carries a fingerprint:
 ```
 # match 0000:0400:1C8DB59E      a CRC32 over memory, as the CPU sees it
 # match-rom 0000:1000:4CB66255  the same over the boot EPROM image
+# match-disk 2000:0800:22A34ED5 P25K_B — ...   over an attached image
 ```
 
 A file is loaded only if one of its rules holds, so a wrong name cannot
@@ -278,6 +289,22 @@ IPL during the boot and then the CBIOS that replaces it:
 symbols: 47 name(s) from symbols/ipl.sym
 symbols: 96 name(s) from symbols/cpm.sym
 ```
+
+`match-disk` answers *what is this image*, which can be answered before
+the machine has executed anything. Its offset is into the file rather than
+into memory, and the free text after the triple is the name to show — so
+one file can identify several disks, each with its own label, and both
+front-ends recognise them at attach time:
+
+```
+Loaded A: from disks/P25K_B.raw (327680 bytes)
+  A: is P25K_B - P2500 CP/M 2.2 system disk (recognised by symbols/cpm.sym)
+```
+
+The shipped rules fingerprint the CP/M directory.
+
+A comment line that starts with `match`, `match-rom` or `match-disk` and
+then fails to parse is rejected with its line number.
 
 ### Writing one
 
@@ -312,6 +339,7 @@ scripted runs, probing, and disk-image inspection.
 | `--watch ADDR[:LEN]` / `--count ADDR` / `--break ADDR` | trace writes, count executions, stop |
 | `--watch-break ADDR[:LEN]` | a watchpoint — stop the run when that byte changes |
 | `--state` | print every device's live state |
+| `--sysinfo` | print the system-information report |
 | `--disasm ADDR[:COUNT]` | disassemble, bank-aware, with symbol names |
 | `--symbol ADDR:NAME` | name an address yourself; yours wins over a derived name |
 | `--symbols FILE` | load names from a symbol file (repeatable) — see [Symbol files](#symbol-files) |
@@ -397,7 +425,8 @@ src/gui/    SDL3 + Dear ImGui front-end (p2500-gui) — the only C++ in the tree
 src/win/    the Windows .exe icon resource, built by windres under MINGW=1
 tools/      disk-image and asset build tools (Python)
 assets/     build assets like the application icon
-tests/      the regression suite and its fixtures
+tests/      the regression suite, its fixtures, and the vendored
+            research tools it runs (derive_syms.py, disasm_crosscheck.py)
 demos/      three graphics demos + a benchmark, in Z80 assembly
 disks/      CP/M disk images that boot on the emulator
 roms/       the boot EPROM and character ROM dumps
@@ -409,8 +438,8 @@ docs/       user-facing documentation (porting CP/M software, etc.)
 chain, video, and each device (`ctc`, `pio`, `dma`, `fdc`, `keyboard`,
 `cartridge`) — and nothing in it may depend on either front-end. `src/cli/`
 and `src/gui/` are both thin front-ends over the same core, so
-`p2500-emu --state`/`--disasm` and the GUI's panels can never disagree
-about what the machine is doing.
+`p2500-emu --state`/`--disasm`/`--sysinfo` and the GUI's panels can never
+disagree about what the machine is doing.
 
 ## Acknowledgements
 

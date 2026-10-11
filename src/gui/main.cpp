@@ -72,6 +72,10 @@ struct App {
     uint32_t *fb;
     uint8_t *disk[P2500_FDC_MAX_DRIVES];
     char disk_name[P2500_FDC_MAX_DRIVES][64]; /* basename, for the drive lamps */
+    /* What the image IS rather than what it is called - the label of the
+     * `# match-disk` rule that recognised it, empty when no shipped rule
+     * does. Answered at attach time, before the guest has read a sector. */
+    char disk_id[P2500_FDC_MAX_DRIVES][96];
     unsigned long frames;
     unsigned long frame_limit;   /* 0 = run until the user quits */
     const char *shot_path;       /* emulated screen only, for the CLI comparison */
@@ -291,6 +295,16 @@ static void save_screenshot(App *app)
     SDL_DestroySurface(s);
 }
 
+/* Fingerprint an image against the symbol files' `# match-disk` rules, so
+ * a lamp can say what is in the drive and not just which file was opened.
+ * Silence is a real answer here: most images nobody ships a rule for. */
+static void identify_disk(App *app, unsigned unit, const uint8_t *buf, size_t n)
+{
+    app->disk_id[unit][0] = '\0';
+    p2500_debug_identify_disk(buf, n, "symbols", app->disk_id[unit],
+                              sizeof app->disk_id[unit], NULL, 0);
+}
+
 /* SDL may run this on another thread, so it only parks the path and raises a
  * flag; the actual load happens in SDL_AppIterate. */
 static void SDLCALL disk_chosen(void *userdata, const char *const *filelist, int)
@@ -315,6 +329,7 @@ static void mount_disk(App *app, unsigned unit, const char *path)
     p2500_history_clear(app->hist);
     const char *base = SDL_strrchr(path, '/');
     SDL_strlcpy(app->disk_name[unit], base ? base + 1 : path, sizeof app->disk_name[unit]);
+    identify_disk(app, unit, buf, n);
     /* A new disk in A: may be a different BIOS generation, and the names
      * for the old one would then be wrong. Nothing is cleared here - the
      * running machine still holds the old CBIOS until it warm-boots - but
@@ -331,6 +346,7 @@ static void eject_disk(App *app, unsigned unit)
     free(app->disk[unit]);
     app->disk[unit] = NULL;
     app->disk_name[unit][0] = '\0';
+    app->disk_id[unit][0] = '\0';
     set_status(app, "%c: empty", 'A' + (int)unit);
     SDL_Log("drive %c: ejected", 'A' + (int)unit);
 }
@@ -1029,7 +1045,13 @@ static void draw_menu_bar(App *app)
                 Lamp d = lamp_button(id, cx, letter_w, bar_y, bar_h);
                 if (d.clicked) open_disk_dialog(app, u);
                 if (d.alt_clicked) eject_disk(app, u);
-                if (loaded)
+                if (loaded && app->disk_id[u][0])
+                    ImGui::SetItemTooltip("%c: %s\n%s\n"
+                                          "Click to change, right-click to eject.\n"
+                                          "A swapped-in disk is readable at once; CP/M marks"
+                                          " the drive read-only until a warm boot (Ctrl-C).",
+                                          'A' + (int)u, app->disk_name[u], app->disk_id[u]);
+                else if (loaded)
                     ImGui::SetItemTooltip("%c: %s\nClick to change, right-click to eject.\n"
                                           "A swapped-in disk is readable at once; CP/M marks"
                                           " the drive read-only until a warm boot (Ctrl-C).",
@@ -1291,7 +1313,7 @@ static void usage(FILE *out)
                  "                 [--disk-d path]\n"
                  "                 [--frames N] [--screenshot out.ppm] [--shot-window out.ppm]\n"
                  "                 [--push-at MS:STRING ...] [--no-caps-lock]\n"
-                 "                 [--panels devices,memory,disasm,log] [--verbose-io]\n"
+                 "                 [--panels system,devices,memory,disasm,log] [--verbose-io]\n"
                  "                 [--paced] [--speed X|unlimited]\n"
                  "                 [--mouse [FRAME:]X,Y[,left|right] ...]\n"
                  "                 [--ui-type FRAME:TEXT ...]\n"
@@ -1482,7 +1504,12 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[])
         p2500_fdc_attach(&app->m.fdc, u, app->disk[u], n);
         const char *base = SDL_strrchr(disks[u], '/');
         SDL_strlcpy(app->disk_name[u], base ? base + 1 : disks[u], sizeof app->disk_name[u]);
-        SDL_Log("attached %c: %s (%lu bytes)", 'A' + (int)u, disks[u], (unsigned long)n);
+        identify_disk(app, u, app->disk[u], n);
+        if (app->disk_id[u][0])
+            SDL_Log("attached %c: %s (%lu bytes) - %s", 'A' + (int)u, disks[u],
+                    (unsigned long)n, app->disk_id[u]);
+        else
+            SDL_Log("attached %c: %s (%lu bytes)", 'A' + (int)u, disks[u], (unsigned long)n);
     }
 
     if (!SDL_Init(SDL_INIT_VIDEO)) {
@@ -1533,6 +1560,7 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[])
     load_symbol_files(app);
     p2500_debug_baseline(&app->dbg, &app->m);
     if (panels_arg) {
+        app->panels.show_system = strstr(panels_arg, "system") != NULL;
         app->panels.show_devices = strstr(panels_arg, "devices") != NULL;
         app->panels.show_memory = strstr(panels_arg, "memory") != NULL;
         app->panels.show_disasm = strstr(panels_arg, "disasm") != NULL;
@@ -1595,6 +1623,7 @@ SDL_AppResult SDL_AppEvent(void *appstate, SDL_Event *event)
         if (k == SDLK_F2) { app->panels.show_memory = !app->panels.show_memory; return SDL_APP_CONTINUE; }
         if (k == SDLK_F3) { app->panels.show_disasm = !app->panels.show_disasm; return SDL_APP_CONTINUE; }
         if (k == SDLK_F4) { app->panels.show_log = !app->panels.show_log; return SDL_APP_CONTINUE; }
+        if (k == SDLK_F5) { app->panels.show_system = !app->panels.show_system; return SDL_APP_CONTINUE; }
         if (ui_has_keyboard) return SDL_APP_CONTINUE;
         int b = key_to_byte(k, event->key.mod);
         if (b >= 0) p2500_keyboard_push(&app->m.keyboard, (uint8_t)b);

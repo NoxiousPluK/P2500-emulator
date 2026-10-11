@@ -34,6 +34,7 @@ void p2500_panels_log_sink(void *userdata, P2500LogLevel level,
 
 void p2500_panels_menu(P2500Panels &p)
 {
+    ImGui::MenuItem("System information", "F5", &p.show_system);
     ImGui::MenuItem("Device state", "F1", &p.show_devices);
     ImGui::MenuItem("Memory", "F2", &p.show_memory);
     ImGui::MenuItem("Disassembly", "F3", &p.show_disasm);
@@ -92,6 +93,97 @@ static bool addr_input(const char *label, char *buf, size_t buflen, uint16_t *ou
  *  asked in. "Copy all" exists because retyping a register dump is how
  *  transcription errors get into notes.
  * ------------------------------------------------------------------------ */
+/* ------------------------------------------------------------------------ *
+ *  System information
+ *
+ *  "What this machine is running", which used to be spread across the log,
+ *  the window title and three CLI flags. Every line comes from
+ *  p2500_sysinfo(), the same call `p2500-emu --sysinfo` prints, so a
+ *  headless run can contradict this panel - which is the whole reason the
+ *  report lives in the core and not here.
+ *
+ *  The report is ordered by how well each claim can be proved and stops
+ *  where the proof stops: a machine running something that is not CP/M
+ *  gets a short panel, not a wrong one.
+ * ------------------------------------------------------------------------ */
+static void draw_system(P2500Panels &p, const P2500Machine &m,
+                        const P2500Debug &dbg)
+{
+    ImGui::SetNextWindowPos(ImVec2(40, 76), ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowSize(ImVec2(760, 540), ImGuiCond_FirstUseEver);
+    if (!ImGui::Begin("System information", &p.show_system)) { ImGui::End(); return; }
+
+    static P2500SysLine lines[P2500_SYSINFO_MAX_LINES];
+    const int n = p2500_sysinfo(&m, &dbg, "symbols", lines,
+                                P2500_SYSINFO_MAX_LINES);
+
+    if (ImGui::SmallButton("Copy all")) {
+        /* The same layout --sysinfo prints, so a paste from either is
+         * diffable against the other. */
+        static char dump[8192];
+        size_t at = 0;
+        for (int i = 0; i < n && at + 1 < sizeof dump; i++) {
+            if (lines[i].kind == P2500_SYS_HEADING)
+                at += (size_t)snprintf(dump + at, sizeof dump - at, "\n[%s]\n",
+                                       lines[i].label);
+            else if (lines[i].kind == P2500_SYS_NOTE)
+                at += (size_t)snprintf(dump + at, sizeof dump - at, "  %s\n",
+                                       lines[i].value);
+            else
+                at += (size_t)snprintf(dump + at, sizeof dump - at,
+                                       "  %-26s %s\n", lines[i].label,
+                                       lines[i].value);
+        }
+        ImGui::SetClipboardText(dump);
+    }
+    ImGui::SameLine();
+    ImGui::TextDisabled("same lines as p2500-emu --sysinfo");
+    ImGui::Separator();
+
+    /* One table per section, so a heading can carry its own rows and the
+     * label column lines up within a section rather than across all of
+     * them - the Devices rows are much narrower than the Machine ones. */
+    int i = 0;
+    int table = 0;
+    while (i < n) {
+        if (lines[i].kind == P2500_SYS_HEADING) {
+            if (i) ImGui::Spacing();
+            ImGui::SeparatorText(lines[i].label);
+            i++;
+            continue;
+        }
+        char table_id[32];
+        snprintf(table_id, sizeof table_id, "systbl%d", table++);
+        if (!ImGui::BeginTable(table_id, 2, ImGuiTableFlags_SizingFixedFit |
+                                            ImGuiTableFlags_RowBg)) break;
+        ImGui::TableSetupColumn("", ImGuiTableColumnFlags_WidthFixed,
+                                ImGui::GetFontSize() * 13.0f);
+        ImGui::TableSetupColumn("", ImGuiTableColumnFlags_WidthStretch);
+        while (i < n && lines[i].kind != P2500_SYS_HEADING) {
+            ImGui::TableNextRow();
+            if (lines[i].kind == P2500_SYS_NOTE) {
+                /* A note is prose about what could NOT be proved, so it
+                 * spans both columns and is not dressed as a value. */
+                ImGui::TableNextColumn();
+                ImGui::TableNextColumn();
+                ImGui::PushTextWrapPos(0.0f);
+                ImGui::TextDisabled("%s", lines[i].value);
+                ImGui::PopTextWrapPos();
+            } else {
+                ImGui::TableNextColumn();
+                ImGui::TextDisabled("%s", lines[i].label);
+                ImGui::TableNextColumn();
+                ImGui::PushTextWrapPos(0.0f);
+                ImGui::TextUnformatted(lines[i].value);
+                ImGui::PopTextWrapPos();
+            }
+            i++;
+        }
+        ImGui::EndTable();
+    }
+    ImGui::End();
+}
+
 static void draw_devices(P2500Panels &p, const P2500Machine &m)
 {
     ImGui::SetNextWindowPos(ImVec2(24, 60), ImGuiCond_FirstUseEver);
@@ -484,6 +576,7 @@ P2500PanelActions p2500_panels_draw(P2500Panels &p, P2500Machine &m,
                                     bool *toggle_pause)
 {
     P2500PanelActions act;
+    if (p.show_system) draw_system(p, m, dbg);
     if (p.show_devices) draw_devices(p, m);
     if (p.show_memory) draw_memory(p, m, dbg);
     if (p.show_disasm) draw_disasm(p, m, dbg, paused, toggle_pause, act);

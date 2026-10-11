@@ -32,6 +32,18 @@
 #   14.EOT    - a multi-sector read must stop at the last sector of the
 #               track. Unreachable from any guest program this project
 #               has, so it runs against the core directly.
+#   18.Derived- the hand-curated symbols/*.sym must not contradict an
+#               independent, shape-only derivation of the same machine
+#               (tests/derive_syms.py --check), and that derivation must
+#               find enough to make the comparison mean something.
+#   19.Images - a `# match-disk` rule must name an attached image before
+#               anything has booted, say nothing about an image nobody
+#               shipped a rule for, and never be mistaken for a vote on
+#               whether that build's symbols are resident.
+#   20.Sysinfo- --sysinfo must report what it can prove in order of
+#               certainty and STOP where the proof stops: the full map on
+#               a CP/M machine, the Machine section alone on one that is
+#               not running CP/M. The GUI panel is the same core call.
 #
 # usage: tests/run_tests.sh   (or: make test)
 set -u
@@ -1483,6 +1495,248 @@ else
     if grep -q 'broken.sym:2:' "$TMP/sym_bad.log"; then
         pass "a malformed symbol file names the offending line"
     else fail "the symbol-file error did not name line 2"; fi
+fi
+
+
+echo "== 18. The shipped symbol files against an independent derivation"
+# The symbols/*.sym files are hand-curated. tests/derive_syms.py finds the
+# same machine's structures from scratch - page zero, the CBIOS jump table,
+# the IM2 trampolines, the device table and the DPH/DPB chain, all by shape
+# - and where the two overlap they must not contradict each other. That
+# agreement is the closest thing to a proof either set is right, and until
+# now nobody was running it.
+#
+# A curated *semantic* name over this tool's purely structural one
+# (SCREEN.WRITE for SCREEN.F05) is an elaboration, not a disagreement, and
+# is reported as such; two different semantic names at one address, or one
+# name sitting at two addresses, fails. Both arms were negative-tested by
+# mutating a symbol file, which is why this is a check and not decoration.
+if ! command -v python3 >/dev/null 2>&1; then
+    echo "  SKIP  python3 not installed"
+else
+    # The three IM2 vectors come out of the machine rather than being baked
+    # in here: given them, derive_syms reads the interrupt table instead of
+    # searching for it, and the device behind each trampoline is certain.
+    vectors() {
+        sed -n 's/.*CTC ch2 *vec \$\([0-9A-F]*\).*/\1/p;
+                s/.*PIO port A *vec \$\([0-9A-F]*\).*/\1/p;
+                s/.*DMA *vec \$\([0-9A-F]*\).*/\1/p' "$1" |
+        tr '\n' ':' | sed 's/:$//'
+    }
+    for pair in "P25K_B:symbols/cpm.sym" "P25K_G:symbols/p25k_g.sym"; do
+        img="disks/$(echo "$pair" | cut -d: -f1).raw"
+        sym=$(echo "$pair" | cut -d: -f2)
+        name=$(basename "$img" .raw)
+        if [ ! -f "$img" ]; then
+            echo "  SKIP  $img not present"
+            continue
+        fi
+        $EMU --disk "$img" --max-steps 3000000 --state \
+             --dump-ram "$TMP/$name.ram" >"$TMP/$name.state" 2>&1
+        vec=$(vectors "$TMP/$name.state")
+        # No vectors means the boot did not get as far as installing them,
+        # which would make everything below vacuous.
+        case "$vec" in
+            ??:??:??) ;;
+            *) fail "$name: no IM2 vectors in --state, nothing to derive from"
+               continue ;;
+        esac
+        if python3 tests/derive_syms.py "$TMP/$name.ram" --vectors "$vec" \
+                   --quiet --check "$sym" >"$TMP/$name.derive" 2>&1; then
+            pass "$sym agrees with an independent derivation of $name"
+        else
+            sed 's/^/        /' "$TMP/$name.derive"
+            fail "$sym contradicts what $name says about itself"
+        fi
+        # The derivation must actually have found something: a tool that
+        # derives nothing agrees with every symbol file ever written.
+        if grep -q 'CBIOS jump table at \$E200' "$TMP/$name.derive" &&
+           grep -q 'IM2 trampolines: 6 found' "$TMP/$name.derive" &&
+           grep -qE '[0-9]+ address\(es\) in both' "$TMP/$name.derive" &&
+           [ "$(sed -n 's/.*, \([0-9]*\) address(es) in both/\1/p' \
+                "$TMP/$name.derive")" -ge 40 ]; then
+            pass "the derivation of $name has something to compare (40+ addresses)"
+        else fail "$name: the derivation found too little to be a real check"; fi
+    done
+    # The device table is where "how many drive letters does this BIOS map"
+    # stops being a front-end guess: B's CBIOS publishes three DPHs and
+    # G's two, which is exactly the Select error section 17 asserts.
+    if [ -f "$TMP/P25K_B.derive" ] && [ -f "$TMP/P25K_G.derive" ]; then
+        if grep -q 'disk structures: 3 DPH' "$TMP/P25K_B.derive" &&
+           grep -q 'disk structures: 2 DPH' "$TMP/P25K_G.derive"; then
+            pass "the DPH chains confirm three drive letters on B, two on G"
+        else fail "the derived DPH counts no longer match the mapped drives"; fi
+    fi
+    # Negative control: the check must fail when a symbol file lies. Pick
+    # an address both sides name and rename it; if that still passes, the
+    # whole section is decoration.
+    if [ -f "$TMP/P25K_B.ram" ]; then
+        vec=$(vectors "$TMP/P25K_B.state")
+        sed 's/^E84D .*/E84D SOMETHING.ELSE/' symbols/cpm.sym >"$TMP/lying.sym"
+        if python3 tests/derive_syms.py "$TMP/P25K_B.ram" --vectors "$vec" \
+                   --quiet --check "$TMP/lying.sym" >"$TMP/lying.log" 2>&1; then
+            fail "the derivation check passed a symbol file that renames \$E84D"
+        else
+            pass "the check fails when a symbol file disputes a derived address"
+        fi
+    fi
+fi
+
+
+echo "== 19. Identifying a disk image before it boots (# match-disk)"
+# `# match` can only recognise a build once it is RESIDENT, which is
+# useless for "what is this image?" before booting it. A `# match-disk`
+# rule is a window of the file, so it answers at attach time - which is
+# what a drive lamp's tooltip wants and what an unknown third-party image
+# needs. The window has to be the CP/M directory: all four 320K images
+# carry a byte-identical boot track, P25K_G's included.
+$EMU --disks "$DISK,disks/P2500GAM.raw,disks/P25K_G.raw" --max-steps 100 \
+     >"$TMP/ident.log" 2>&1
+if grep -q 'A: is P25K_B .* (recognised by symbols/cpm.sym)' "$TMP/ident.log"; then
+    pass "A: is identified from the image, before anything has executed"
+else fail "the image in A: was not identified at attach time"; fi
+# Two BIOS generations told apart by their disks rather than by their RAM,
+# and from two different symbol files.
+if grep -q 'C: is P25K_G .* (recognised by symbols/p25k_g.sym)' "$TMP/ident.log"; then
+    pass "match-disk tells the two generations apart before either boots"
+else fail "P25K_G was not identified from its own image"; fi
+# Silence is the honest answer for an image nobody ships a rule for, and
+# P2500GAM is that image - so the unrecognised path has a real test and
+# not just an argument.
+if grep -q 'Loaded B: from disks/P2500GAM.raw' "$TMP/ident.log" &&
+   ! grep -q 'B: is ' "$TMP/ident.log"; then
+    pass "an image with no rule is attached and claims nothing"
+else fail "P2500GAM was either refused or given a name nobody shipped"; fi
+# The GUI must agree with the CLI - same core call, and the suite should
+# notice if one front-end grows its own idea of what is in the drive.
+if [ -x ./p2500-gui ]; then
+    SDL_VIDEODRIVER=dummy ./p2500-gui --disks "$DISK,disks/P25K_G.raw" --frames 20 \
+        >"$TMP/ident_gui.log" 2>&1
+    if grep -q 'attached A: .* - P25K_B' "$TMP/ident_gui.log" &&
+       grep -q 'attached B: .* - P25K_G' "$TMP/ident_gui.log"; then
+        pass "the GUI names both disks the same way the CLI does"
+    else fail "the GUI did not identify the attached images"; fi
+fi
+# A disk rule must NOT be a vote on whether a file's symbols apply: a disk
+# can sit in a drive for an hour without its BIOS ever being resident. So
+# with P25K_G in the drive and nothing booted, --symbols auto must still
+# decline to load p25k_g.sym's names.
+$EMU --disk disks/P25K_G.raw --symbols auto --max-steps 2000 \
+     >"$TMP/ident_vote.log" 2>&1
+if grep -q 'from symbols/p25k_g.sym' "$TMP/ident_vote.log"; then
+    fail "a match-disk rule loaded symbols for a BIOS that is not resident"
+else pass "a recognised disk does not by itself load that build's symbols"; fi
+# And the rules themselves must be rejected when malformed rather than
+# passed over as comments - a fingerprint that silently never matches is
+# the quiet refusal this project keeps paying for.
+printf '# fine\n# match-disk 2000:ZZZZ\nE200 X\n' >"$TMP/badrule.sym"
+if $EMU --symbols "$TMP/badrule.sym" --max-steps 1 >"$TMP/badrule.log" 2>&1; then
+    fail "a malformed match-disk rule was silently ignored"
+else
+    if grep -q 'badrule.sym:2:' "$TMP/badrule.log"; then
+        pass "a malformed match-disk rule names the offending line"
+    else fail "the malformed rule error did not name line 2"; fi
+fi
+# ...while a comment that merely starts with those letters stays a comment.
+printf '# matchless, and not a rule\nE200 X\n' >"$TMP/okcomment.sym"
+if $EMU --symbols "$TMP/okcomment.sym" --max-steps 1 >/dev/null 2>&1; then
+    pass "a comment beginning \"match\" is still a comment"
+else fail "an ordinary comment was mistaken for a malformed rule"; fi
+
+
+echo "== 20. The system-information report (--sysinfo, and the GUI panel)"
+# "What is this machine running" used to be spread across the log, the
+# window title and three CLI flags. The report is built in core/sysinfo.c
+# so both front-ends print the same lines - and so a headless run can
+# contradict the panel, which is why the panel is allowed to exist.
+#
+# The rule it must obey: say what can be proved, in order of certainty,
+# and stop where the proof stops. Each claim below is checked against
+# something established elsewhere in this suite or in the research notes.
+$EMU --disk "$DISK" --max-steps 3000000 --sysinfo >"$TMP/sys_b.log" 2>&1
+# Always-provable: the EPROM is the dump every address in symbols/ipl.sym
+# belongs to. The constant in sysinfo.c is falsifiable precisely here.
+if grep -q 'boot EPROM .* CRC32 \$4CB66255 .* the dump this project' "$TMP/sys_b.log"; then
+    pass "the boot EPROM is recognised as the dump the findings come from"
+else fail "the EPROM CRC32 or its verdict changed"; fi
+# The CRTC's own arithmetic, which is what T29 turns into a frame rate
+# once the dot clock is known: 311 scanlines of 98 character times.
+if grep -q 'CRTC frame .* 311 scanlines of 98 character times' "$TMP/sys_b.log"; then
+    pass "the CRTC frame geometry is reported from the registers"
+else fail "the CRTC frame geometry is not 311x98"; fi
+# CP/M's map, against the addresses section 16 checks by disassembly.
+if grep -q 'CCP base .*\$CC00' "$TMP/sys_b.log" &&
+   grep -q 'BDOS .*base \$D400, entry \$D406' "$TMP/sys_b.log" &&
+   grep -q 'CBIOS jump table .*\$E200   17 slots, all JP' "$TMP/sys_b.log"; then
+    pass "the CP/M memory map agrees with the symbol files"
+else fail "the reported CP/M memory map moved"; fi
+# The largest loadable .COM was MEASURED by bisection at 405 records
+# (406 gives BAD LOAD). The report must not quietly print the TPA size
+# instead, which is one record larger.
+if grep -q 'TPA .*51968 bytes (406 records)' "$TMP/sys_b.log" &&
+   grep -q 'largest .COM .*405 records' "$TMP/sys_b.log"; then
+    pass "the TPA and the largest loadable .COM are reported as different"
+else fail "the TPA/load-limit distinction was lost"; fi
+# Drive A's DPB, decoded. These are the numbers DSKPRAM.COM dumps on real
+# hardware and that SuperCopy's shipped format table independently agrees
+# with - three sources, so a change here is a real regression.
+if grep -q 'drive A: DPB .*SPT 32, BSH 4, BLM 15, EXM 1, DSM 149, DRM 63, CKS 16, OFF 2' \
+        "$TMP/sys_b.log" &&
+   grep -q 'decoded .*2048-byte blocks, 64 directory entries, 2 reserved tracks, 300 KB' \
+        "$TMP/sys_b.log"; then
+    pass "drive A's DPB decodes to the geometry three sources agree on"
+else fail "the decoded DPB no longer matches the known disk format"; fi
+# And the headline claim: how many drive letters the RUNNING BIOS maps,
+# read out of its own DPH chain rather than guessed from the hardware's
+# four select lines. Section 17 asserts the consequence (D: gets Select);
+# this asserts the machine says so about itself.
+if grep -q 'DPH table .*3 drive letters (A:-C:)' "$TMP/sys_b.log"; then
+    pass "P25K_B's BIOS reports the three drive letters it maps"
+else fail "the DPH chain no longer reports three drive letters on B"; fi
+if grep -q 'device table .*8 devices' "$TMP/sys_b.log" &&
+   grep -q 'id \$30 .*keyboard' "$TMP/sys_b.log" &&
+   grep -q 'id \$31 .*screen' "$TMP/sys_b.log"; then
+    pass "the device table is found by shape and its known ids named"
+else fail "the device table scan did not find B's eight devices"; fi
+
+# The other BIOS generation must come out different in both numbers,
+# which is what makes these reads and not constants.
+if [ -f disks/P25K_G.raw ]; then
+    $EMU --disk disks/P25K_G.raw --max-steps 3000000 --sysinfo \
+         >"$TMP/sys_g.log" 2>&1
+    if grep -q 'DPH table .*2 drive letters (A:-B:)' "$TMP/sys_g.log" &&
+       grep -q 'device table .*6 devices' "$TMP/sys_g.log"; then
+        pass "P25K_G reports two drive letters and six devices, not B's numbers"
+    else fail "P25K_G's report did not differ from P25K_B's"; fi
+fi
+
+# The honest-silence rule, and the one that matters most: a machine that
+# is NOT running CP/M must produce a SHORT report, not a wrong one. With
+# no disk the IPL owns the machine and page zero is the ROM's vectors.
+$EMU --max-steps 2000 --sysinfo >"$TMP/sys_ipl.log" 2>&1
+if grep -q 'boot EPROM' "$TMP/sys_ipl.log" &&
+   grep -q 'No CP/M page zero here' "$TMP/sys_ipl.log" &&
+   ! grep -q 'CCP base' "$TMP/sys_ipl.log" &&
+   ! grep -q 'DPH table' "$TMP/sys_ipl.log" &&
+   ! grep -q 'device table' "$TMP/sys_ipl.log"; then
+    pass "a non-CP/M machine gets the Machine section and nothing it cannot prove"
+else fail "the report claimed CP/M structures on a machine with no CP/M"; fi
+# ...and it must still have said the provable things, or "sparse" would
+# just mean "broken".
+if grep -q 'fingerprint .*symbols/ipl.sym' "$TMP/sys_ipl.log" &&
+   grep -q 'bank latch (port \$05) .*\$0000-\$0FFF EPROM' "$TMP/sys_ipl.log"; then
+    pass "the sparse report still proves what it can (ROM banked in, IPL named)"
+else fail "the sparse report dropped the facts it does have"; fi
+
+# The panel and the flag must be the same call. The GUI draws the report
+# from p2500_sysinfo() exactly as --sysinfo prints it, so the suite checks
+# the panel opens and renders rather than pinning pixels.
+if [ -x ./p2500-gui ]; then
+    SDL_VIDEODRIVER=dummy ./p2500-gui --disk "$DISK" --panels system \
+        --frames 400 >"$TMP/sys_gui.log" 2>&1
+    if [ $? -eq 0 ]; then
+        pass "the GUI opens the System information panel headlessly"
+    else fail "p2500-gui failed with the system panel open"; fi
 fi
 
 

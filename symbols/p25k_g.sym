@@ -40,6 +40,11 @@
 # the same window over P25K_G's own, different, CBIOS build.
 # match E200:0400:E2D1C08D
 #
+# And the disk itself, recognisable before anything has booted - the CP/M
+# directory at $2000. See symbols/cpm.sym for why it has to be the
+# directory rather than the boot track.
+# match-disk 2000:0800:ECEBB62C P25K_G - PHILIPS P2000B games disk
+#
 # Format: ADDR NAME, hex, one per line. $ or 0x prefix optional, : or =
 # accepted in place of the space, # and ; start a comment.
 
@@ -107,7 +112,7 @@ EEAB SCREEN.FNTAB   ; f00 $EEB9, f01 $EEDE, f03 $EEF7, f05 $EF1D
 EF1D SCREEN.WRITE   ; function $05
 F1FB ESC.TAB        ; {code, pointer} records, same shape as B's
 F224 ESC.TAB2       ; the alternate set
-F4B6 SCREEN.REQ.P  
+F4B6 SCREEN.REQ.PTR
 F4B8 SCREEN.FLAGS   ; bit 2 drives the generated-code queue below
 F4BE ATTR.CUR       ; current attribute; its low nibble reaches port $0A
 F4D7 ATTR.TMPL      ; 3E 00 D3 0A - the OUT ($0A) template

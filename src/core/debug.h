@@ -184,8 +184,9 @@ int p2500_debug_load_symbols(P2500Debug *d, const char *path,
  * says which build is running - but the build's own bytes do. So a file
  * may carry fingerprint lines, which this checks before trusting it:
  *
- *   # match     ADDR:LEN:CRC32   CRC32 of LEN bytes of memory from ADDR
- *   # match-rom ADDR:LEN:CRC32   the same over the boot EPROM image
+ *   # match      ADDR:LEN:CRC32          CRC32 of LEN bytes of memory from ADDR
+ *   # match-rom  ADDR:LEN:CRC32          the same over the boot EPROM image
+ *   # match-disk OFF:LEN:CRC32 [LABEL]   the same over an attached image
  *
  * Several lines mean "any of these", so one file can cover several disks
  * that ship the same BIOS. A file with no fingerprint is never
@@ -203,7 +204,28 @@ int p2500_debug_load_symbols(P2500Debug *d, const char *path,
  * identifies a ROM build rather than a machine state. It is always true
  * once that ROM is loaded - which is exactly what you want for naming the
  * ROM itself, and exactly what you do not want for naming anything the
- * ROM only builds temporarily. */
+ * ROM only builds temporarily.
+ *
+ * `match-disk` is a window of an attached disk image, and answers a
+ * different question from the other two: not "which build is running"
+ * but "what is this image", which can be answered before the machine has
+ * executed anything. Its offset is into the file, so it is 32-bit and not
+ * an address. It takes free text after the triple, which is the name to
+ * show for that image - so one file can identify several disks, each with
+ * its own label, the way `match` already covers several disks with one
+ * set of names.
+ *
+ * A disk rule is NOT a vote on whether a file's symbols apply: a disk can
+ * sit in a drive for an hour without its BIOS ever being resident, so
+ * `p2500_debug_symbols_match` ignores disk rules and a file carrying only
+ * disk rules is never auto-loaded. The two matchers read the same files
+ * and believe different lines in them.
+ *
+ * A comment line that starts with `match`, `match-rom` or `match-disk`
+ * and then fails to parse is rejected by p2500_debug_load_symbols with
+ * its line number, rather than being passed over as a comment: a
+ * fingerprint nobody notices has stopped matching is the silent refusal
+ * this project keeps paying for. */
 
 /* 1 = a rule matched, 0 = rules present, none matched, -1 = no rules or
  * the file cannot be read. */
@@ -217,6 +239,22 @@ int p2500_debug_symbols_match(const char *path, const P2500Machine *m);
  * answer at that point. */
 int p2500_debug_auto_symbols(P2500Debug *d, const P2500Machine *m,
                              const char *dir, char *chosen, size_t chosenlen);
+
+/* Identify a disk image by its `# match-disk` rules. `p2500_debug_disk_match`
+ * tests one symbol file: 1 = a rule matched and `label` holds its text,
+ * 0 = disk rules present, none matched, -1 = no disk rules or the file
+ * cannot be read. `p2500_debug_identify_disk` tries every .sym file in
+ * `dir` in name order and stops at the first match, reporting which file
+ * it came from in `from`; 1 = identified, 0 = nothing recognised it (the
+ * right answer for a third-party image), -1 = the directory cannot be
+ * read. Neither touches the symbol table or the machine: this is a
+ * question about a file on disk, askable before the emulator runs a
+ * single instruction. */
+int p2500_debug_disk_match(const char *path, const uint8_t *img, size_t n,
+                           char *label, size_t labellen);
+int p2500_debug_identify_disk(const uint8_t *img, size_t n, const char *dir,
+                              char *label, size_t labellen,
+                              char *from, size_t fromlen);
 
 /* Run until `addr` is reached, once. Replaces any armed one-shot. */
 void p2500_debug_run_to(P2500Debug *d, uint16_t addr);

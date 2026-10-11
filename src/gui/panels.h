@@ -14,9 +14,11 @@
 
 #include "core/machine.h"
 #include "core/debug.h"
+#include "core/sysinfo.h"
 #include "core/log.h"
 
 struct P2500Panels {
+    bool show_system = false;
     bool show_devices = false;
     bool show_memory = false;
     bool show_disasm = false;

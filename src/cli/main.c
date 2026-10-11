@@ -4,6 +4,7 @@
 
 #include "core/machine.h"
 #include "core/debug.h"
+#include "core/sysinfo.h"
 #include "core/history.h"
 #include "core/video.h"
 #include "core/version.h"
@@ -103,6 +104,23 @@ static void cli_watch(void *userdata, uint16_t addr, uint8_t was, uint8_t now,
  * GUI's device panel draws. Having it here is not duplication
  * for its own sake - it is how a panel's claims get checked without a
  * display, and how tests/run_tests.sh can assert on device state at all. */
+/* --sysinfo: the same report the GUI's System panel draws, from the same
+ * core call, so a panel cannot quietly start lying about what is running. */
+static void print_sysinfo(const P2500Machine *m, const P2500Debug *d) {
+    static P2500SysLine lines[P2500_SYSINFO_MAX_LINES];
+    const int n = p2500_sysinfo(m, d, "symbols", lines, P2500_SYSINFO_MAX_LINES);
+    printf("\nSystem information\n");
+    for (int i = 0; i < n; i++) {
+        switch (lines[i].kind) {
+        case P2500_SYS_HEADING: printf("\n[%s]\n", lines[i].label); break;
+        case P2500_SYS_NOTE:    printf("  %s\n", lines[i].value); break;
+        case P2500_SYS_ROW:
+        default:                printf("  %-26s %s\n", lines[i].label,
+                                       lines[i].value); break;
+        }
+    }
+}
+
 static void print_state(const P2500Machine *m) {
     printf("\nDevice state\n");
     for (int t = 0; t < P2500_DBG_TOPICS; t++) {
@@ -163,7 +181,7 @@ static void usage(FILE *out, const char *argv0) {
                  "  [--type-at MS:STRING ...]\n"
                  "  [--break ADDR ...] [--step-over ADDR]\n"
                  "  [--swap-at MS:PATH ...] [--push-at MS:STRING ...]\n"
-                 "  [--state] [--disasm ADDR[:COUNT] ...]\n"
+                 "  [--state] [--sysinfo] [--disasm ADDR[:COUNT] ...]\n"
                  "  [--symbol ADDR:NAME ...] [--symbols FILE|auto ...]\n"
                  "  [--history] [--step-back N] [--seek N]\n"
                  "  [--back-to-break] [--back-to ADDR] [--verify-rewind N]\n"
@@ -229,6 +247,9 @@ int main(int argc, char **argv) {
     /* --state - dump every device's live state at exit. --disasm ADDR:N -
      * disassemble N instructions from ADDR, bank-aware, at exit. */
     bool dump_state = false;
+    /* --sysinfo - the system-information report (core/sysinfo.h). Separate
+     * from --state: that is device registers, this is what the machine IS. */
+    bool dump_sysinfo = false;
     #define MAX_DISASM 4
     struct { uint16_t addr; unsigned count; } disasms[MAX_DISASM];
     int num_disasms = 0;
@@ -378,6 +399,7 @@ int main(int argc, char **argv) {
             num_peeks++;
         }
         else if (!strcmp(argv[i], "--dump-ram") && i + 1 < argc) ram_dump_path = argv[++i];
+        else if (!strcmp(argv[i], "--sysinfo")) dump_sysinfo = true;
         else if (!strcmp(argv[i], "--swap-at") && i + 1 < argc) {
             if (num_swaps >= MAX_SWAPS) { fprintf(stderr, "too many --swap-at args\n"); return 1; }
             char *arg = argv[++i];
@@ -538,6 +560,10 @@ int main(int argc, char **argv) {
         }
         p2500_fdc_attach(&m.fdc, u, disk_buf[u], n);
         printf("Loaded %c: from %s (%zu bytes)\n", 'A' + (int)u, disk_paths[u], n);
+        char label[96], from[256];
+        if (p2500_debug_identify_disk(disk_buf[u], n, "symbols",
+                                      label, sizeof label, from, sizeof from) == 1)
+            printf("  %c: is %s (recognised by %s)\n", 'A' + (int)u, label, from);
     }
     if (type_len > 0) {
         p2500_keyboard_init(&m.keyboard, type_buf, type_len);
@@ -1044,6 +1070,7 @@ int main(int argc, char **argv) {
         }
     }
 
+    if (dump_sysinfo) print_sysinfo(&m, &dbg);
     if (dump_state) print_state(&m);
 
     if (ram_dump_path) {

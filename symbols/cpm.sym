@@ -32,6 +32,18 @@
 # cannot match too early.
 # match E200:0400:22B19A76
 #
+# And the disks themselves, recognisable before anything has booted
+# ($2000 is the CP/M directory - two reserved tracks of 32 128-byte
+# sectors). It has to be the directory: all four 320K images carry a
+# byte-identical boot track, P25K_G's included, because the loader is
+# shared and the BIOS that differs lives in SYS*.PHI out in the data
+# area. So this names an image, not a BIOS generation - and like the
+# `match` rule above it stops being true if the image is written to,
+# which is right: a modified disk is no longer the one recognised here.
+# match-disk 2000:0800:22A34ED5 P25K_B - P2500 CP/M 2.2 system disk
+# match-disk 2000:0800:BB4CD594 P25K_S - SuperCalc2 (PHILIPS P2000B OEM build)
+# match-disk 2000:0800:D121FA3B P25TEST - CP/M dev/test disk
+#
 # Format: ADDR NAME, hex, one per line. $ or 0x prefix optional, : or =
 # accepted in place of the space, # and ; start a comment.
 
@@ -106,7 +118,7 @@ EB8B DRV.DISPATCH   ; every driver's `ld hl,fntab / call here`
 ECAB KBD.DRV        ; device $30
 ECC7 KBD.FNTAB
 ED89 KBD.REQ.PTR
-F430 SCREEN.REQ.P  
+F430 SCREEN.REQ.PTR
 F432 SCREEN.FLAGS   ; bit 2 drives the generated-code queue
 F4B9 SER.DRV        ; device $40 - serial/printer; its data sits with
                     ; TX.FLAGS and the baud table

@@ -323,6 +323,25 @@ int p2500_debug_scan_symbols(P2500Debug *d, const P2500Machine *m)
 /* One `ADDR NAME` line of a symbol file. Returns 0 on a blank/comment
  * line, 1 when `addr` and `name` are filled, -1 on syntax. `name` points into
  * `line`, which is modified in place. */
+/* The three rule kinds, plus "this line is not a rule at all". A kind is
+ * returned separately from the parse result so a line that MEANT to be a
+ * rule and failed to parse can be told from an ordinary comment: a
+ * fingerprint that silently never matches is the quiet failure this
+ * project has been bitten by, so the loader rejects it. */
+typedef enum {
+    MATCH_NONE = 0, /* an ordinary comment, or not a comment */
+    MATCH_MEM,      /* # match      - memory as the CPU sees it */
+    MATCH_ROM,      /* # match-rom  - the boot EPROM image */
+    MATCH_DISK      /* # match-disk - an attached disk image */
+} MatchKind;
+
+/* Defined with the rest of the fingerprint machinery below; declared here
+ * because the symbol loader validates rule lines as it passes them. */
+static MatchKind parse_match_line(const char *line, uint32_t *addr,
+                                  uint32_t *len, uint32_t *crc,
+                                  char *label, size_t labellen,
+                                  bool *malformed);
+
 static int parse_sym_line(char *line, uint16_t *addr, char **name)
 {
     char *hash = strpbrk(line, "#;");
@@ -374,6 +393,22 @@ int p2500_debug_load_symbols(P2500Debug *d, const char *path,
     int lineno = 0;
     while (fgets(line, sizeof line, f)) {
         lineno++;
+        /* A fingerprint line is a comment to parse_sym_line, so a typo in
+         * one would otherwise be a rule that silently never matches.
+         * Caught here because this is where the line number is. */
+        {
+            uint32_t ma = 0, ml = 0, mc = 0;
+            bool malformed = false;
+            if (parse_match_line(line, &ma, &ml, &mc, NULL, 0, &malformed) !=
+                    MATCH_NONE && malformed) {
+                if (err) snprintf(err, errlen,
+                                  "%s:%d: want match[-rom|-disk] ADDR:LEN:CRC32",
+                                  path, lineno);
+                fclose(f);
+                d->syms = before;
+                return -1;
+            }
+        }
         uint16_t addr = 0;
         char *name = NULL;
         int got = parse_sym_line(line, &addr, &name);
@@ -406,6 +441,9 @@ int p2500_debug_load_symbols(P2500Debug *d, const char *path,
  *  believed when that checks out. See debug.h for the line format.
  * ======================================================================== */
 
+enum { SYM_MAX_FILES = 32, SYM_NAME_LEN = 64 };
+static int sym_files_in(const char *dir, char names[SYM_MAX_FILES][SYM_NAME_LEN]);
+
 /* Bitwise CRC-32 (reflected, 0xEDB88320) - the usual one, no table: this
  * runs over a kilobyte a handful of times, not over a disk image. */
 static uint32_t crc32_bytes(const uint8_t *p, size_t n)
@@ -430,26 +468,64 @@ static uint32_t crc32_memory(const P2500Machine *m, uint32_t addr, uint32_t len)
     return ~c;
 }
 
-/* `# match ADDR:LEN:CRC` / `# match-rom ADDR:LEN:CRC`, else 0. */
-static int parse_match_line(const char *line, bool *rom, uint32_t *addr,
-                            uint32_t *len, uint32_t *crc)
+/* Which rule a comment line is trying to be, MATCH_NONE if it is not
+ * trying to be one. `match-disk` is tested before `match` because the
+ * latter is a prefix of it. */
+static MatchKind match_kind(const char *line, const char **rest)
 {
     const char *p = line;
     while (*p == ' ' || *p == '\t') p++;
-    if (*p != '#' && *p != ';') return 0;
+    if (*p != '#' && *p != ';') return MATCH_NONE;
     p++;
     while (*p == ' ' || *p == '\t') p++;
-    if (!strncmp(p, "match-rom", 9)) { *rom = true; p += 9; }
-    else if (!strncmp(p, "match", 5)) { *rom = false; p += 5; }
-    else return 0;
+    MatchKind kind;
+    if (!strncmp(p, "match-disk", 10)) { kind = MATCH_DISK; p += 10; }
+    else if (!strncmp(p, "match-rom", 9)) { kind = MATCH_ROM; p += 9; }
+    else if (!strncmp(p, "match", 5)) { kind = MATCH_MEM; p += 5; }
+    else return MATCH_NONE;
+    /* `# matchless` is a comment, not a malformed rule. */
+    if (*p && *p != ' ' && *p != '\t' && *p != ':' && *p != '=')
+        return MATCH_NONE;
+    *rest = p;
+    return kind;
+}
+
+/* `# match[-rom|-disk] ADDR:LEN:CRC32 [LABEL]`. Returns the kind on a
+ * clean parse, MATCH_NONE when the line is not a rule, and sets
+ * *malformed when it is one and does not parse. `label` (optional)
+ * receives the free text after the triple, which is what names a disk. */
+static MatchKind parse_match_line(const char *line, uint32_t *addr,
+                                  uint32_t *len, uint32_t *crc,
+                                  char *label, size_t labellen,
+                                  bool *malformed)
+{
+    if (malformed) *malformed = false;
+    if (label && labellen) label[0] = '\0';
+    const char *p = NULL;
+    MatchKind kind = match_kind(line, &p);
+    if (kind == MATCH_NONE) return MATCH_NONE;
     while (*p == ' ' || *p == '\t' || *p == ':' || *p == '=') p++;
     char *end = NULL;
     *addr = (uint32_t)strtoul(p, &end, 16);
-    if (!end || *end != ':') return 0;
+    if (!end || end == p || *end != ':') goto bad;
     *len = (uint32_t)strtoul(end + 1, &end, 16);
-    if (!end || *end != ':' || *len == 0) return 0;
-    *crc = (uint32_t)strtoul(end + 1, &end, 16);
-    return 1;
+    if (!end || *end != ':' || *len == 0) goto bad;
+    const char *crcp = end + 1;
+    *crc = (uint32_t)strtoul(crcp, &end, 16);
+    if (!end || end == crcp) goto bad;
+    if (label && labellen) {
+        while (*end == ' ' || *end == '\t') end++;
+        size_t n = strlen(end);
+        while (n && (end[n - 1] == '\n' || end[n - 1] == '\r' ||
+                     end[n - 1] == ' ' || end[n - 1] == '\t')) n--;
+        if (n >= labellen) n = labellen - 1;
+        memcpy(label, end, n);
+        label[n] = '\0';
+    }
+    return kind;
+bad:
+    if (malformed) *malformed = true;
+    return kind;
 }
 
 int p2500_debug_symbols_match(const char *path, const P2500Machine *m)
@@ -459,12 +535,19 @@ int p2500_debug_symbols_match(const char *path, const P2500Machine *m)
     char line[256];
     int rules = 0, hit = 0;
     while (fgets(line, sizeof line, f)) {
-        bool rom = false;
         uint32_t addr = 0, len = 0, crc = 0;
-        if (!parse_match_line(line, &rom, &addr, &len, &crc)) continue;
+        bool malformed = false;
+        MatchKind kind = parse_match_line(line, &addr, &len, &crc,
+                                          NULL, 0, &malformed);
+        /* A disk rule describes an image, not a machine state, and says
+         * nothing about whether these names are true right now - a disk
+         * can sit in a drive all day without its BIOS being resident. So
+         * it is not a vote here, and a file carrying only disk rules is
+         * never auto-loaded for symbols. */
+        if (kind == MATCH_NONE || kind == MATCH_DISK || malformed) continue;
         rules++;
         uint32_t got;
-        if (rom) {
+        if (kind == MATCH_ROM) {
             if (addr + len > P2500_EPROM_SIZE) continue;
             got = crc32_bytes(m->eprom + addr, len);
         } else {
@@ -476,31 +559,104 @@ int p2500_debug_symbols_match(const char *path, const P2500Machine *m)
     return rules == 0 ? -1 : hit;
 }
 
-int p2500_debug_auto_symbols(P2500Debug *d, const P2500Machine *m,
-                             const char *dir, char *chosen, size_t chosenlen)
+/* ------------------------------------------------- identifying an image
+ *
+ * The same idea one step earlier: `# match` can only recognise a build
+ * once it is resident, which is useless for answering "what is this
+ * image?" before booting it. A `# match-disk` rule is a window of the
+ * image itself, so it answers at attach time.
+ *
+ * What the shipped rules fingerprint is the CP/M directory, because on
+ * these disks it is the only thing that differs: all four 320K images
+ * carry a byte-identical boot track, P25K_G included, since the loader is
+ * shared and the BIOS that differs lives in SYS*.PHI out in the data
+ * area. That makes the rule a claim about one image rather than about a
+ * BIOS generation - and it stops being true if the image is written to,
+ * which is correct for the same reason `match` expiring is correct: a
+ * modified disk is no longer the image that was recognised. */
+int p2500_debug_disk_match(const char *path, const uint8_t *img, size_t n,
+                           char *label, size_t labellen)
+{
+    if (label && labellen) label[0] = '\0';
+    if (!img || n == 0) return -1;
+    FILE *f = fopen(path, "r");
+    if (!f) return -1;
+    char line[256];
+    int rules = 0, hit = 0;
+    while (fgets(line, sizeof line, f)) {
+        uint32_t off = 0, len = 0, crc = 0;
+        bool malformed = false;
+        char lbl[96];
+        MatchKind kind = parse_match_line(line, &off, &len, &crc,
+                                          lbl, sizeof lbl, &malformed);
+        if (kind != MATCH_DISK || malformed) continue;
+        rules++;
+        if ((size_t)off + len > n) continue;
+        if (crc32_bytes(img + off, len) != crc) continue;
+        if (label && labellen) snprintf(label, labellen, "%s", lbl);
+        hit = 1;
+        break;
+    }
+    fclose(f);
+    return rules == 0 ? -1 : hit;
+}
+
+int p2500_debug_identify_disk(const uint8_t *img, size_t n, const char *dir,
+                              char *label, size_t labellen,
+                              char *from, size_t fromlen)
+{
+    if (label && labellen) label[0] = '\0';
+    if (from && fromlen) from[0] = '\0';
+    if (!dir || !img || n == 0) return -1;
+    char names[SYM_MAX_FILES][SYM_NAME_LEN];
+    int count = sym_files_in(dir, names);
+    if (count < 0) return -1;
+    for (int i = 0; i < count; i++) {
+        char path[512];
+        if (snprintf(path, sizeof path, "%s/%s", dir, names[i]) >= (int)sizeof path)
+            continue;
+        if (p2500_debug_disk_match(path, img, n, label, labellen) != 1) continue;
+        if (from && fromlen) snprintf(from, fromlen, "%s", path);
+        return 1;
+    }
+    return 0;
+}
+
+/* The .sym files in `dir`, in NAME order rather than readdir order: which
+ * file is tried first must not depend on the filesystem. Returns how many
+ * were found, or -1 if the directory cannot be read. Shared by the symbol
+ * matcher and the disk matcher, which scan the same directory for the same
+ * files and differ only in which rules they believe. */
+static int sym_files_in(const char *dir, char names[SYM_MAX_FILES][SYM_NAME_LEN])
 {
     if (!dir || strlen(dir) > 400) return -1;
     DIR *dp = opendir(dir);
     if (!dp) return -1;
-    /* Name order, not readdir order: which file is tried first must not
-     * depend on the filesystem. */
-    enum { MAX_FILES = 32, NAME_LEN = 64 };
-    char names[MAX_FILES][NAME_LEN];
     int n = 0;
     struct dirent *e;
-    while ((e = readdir(dp)) && n < MAX_FILES) {
+    while ((e = readdir(dp)) && n < SYM_MAX_FILES) {
         size_t l = strlen(e->d_name);
-        if (l < 5 || l >= NAME_LEN || strcmp(e->d_name + l - 4, ".sym")) continue;
-        snprintf(names[n++], NAME_LEN, "%s", e->d_name);
+        if (l < 5 || l >= SYM_NAME_LEN || strcmp(e->d_name + l - 4, ".sym"))
+            continue;
+        snprintf(names[n++], SYM_NAME_LEN, "%s", e->d_name);
     }
     closedir(dp);
     for (int i = 1; i < n; i++)
         for (int j = i; j > 0 && strcmp(names[j - 1], names[j]) > 0; j--) {
-            char t[NAME_LEN];
-            memcpy(t, names[j - 1], NAME_LEN);
-            memcpy(names[j - 1], names[j], NAME_LEN);
-            memcpy(names[j], t, NAME_LEN);
+            char t[SYM_NAME_LEN];
+            memcpy(t, names[j - 1], SYM_NAME_LEN);
+            memcpy(names[j - 1], names[j], SYM_NAME_LEN);
+            memcpy(names[j], t, SYM_NAME_LEN);
         }
+    return n;
+}
+
+int p2500_debug_auto_symbols(P2500Debug *d, const P2500Machine *m,
+                             const char *dir, char *chosen, size_t chosenlen)
+{
+    char names[SYM_MAX_FILES][SYM_NAME_LEN];
+    int n = sym_files_in(dir, names);
+    if (n < 0) return -1;
     /* Every match, not the first: two files can describe one machine
      * truthfully at once - a user's own names beside a shipped set - and
      * a rule that does not fit simply does not fire. Earlier files win on
