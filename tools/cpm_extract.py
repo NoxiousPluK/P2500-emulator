@@ -254,6 +254,7 @@ def extract(img: Image, outdir: Path, keep_padding: bool, quiet: bool) -> int:
         blob = bytearray()
         blocks_used = []
         missing = [0]  # bytes that fell on tracks this dump never captured
+        hole_ranges = []  # (start, end) of those bytes, as blob offsets
         for full_ext, e in parts:
             base_rec = (full_ext & ~exm) * 128
             records = (e[12] & exm) * 128 + e[15]
@@ -287,26 +288,38 @@ def extract(img: Image, outdir: Path, keep_padding: bool, quiet: bool) -> int:
                     chunk += part
                 take = min(need, recs_per_block) * RECORD_SIZE
                 # Only count a hole if it lies inside the part of the block
-                # this file actually uses.
+                # this file actually uses. Record WHERE it is as well as how
+                # much: the padding trim below has to tell a zero that was
+                # never captured from a zero that was.
+                at = len(blob)
                 for off in holes:
                     if off < take:
-                        missing[0] += min(SECTOR_SIZE, take - off)
+                        n = min(SECTOR_SIZE, take - off)
+                        missing[0] += n
+                        hole_ranges.append((at + off, at + off + n))
                 blob.extend(chunk[:take])
                 need -= min(need, recs_per_block)
 
         # CP/M records no exact byte length: a text file ends at the first
         # ^Z and the rest of its last block is whatever was there before.
         dropped = 0
-        # Trailing holes are not content; drop them before trimming padding.
-        while blob and missing[0] and blob[-1] == 0 and len(blob) > 1:
-            break
+        # But a trailing hole is not padding. The trim below drops trailing
+        # zero bytes, and on a damaged dump a never-captured tail is zero
+        # too - trimming that makes the file's extent lie about itself, and
+        # deletes the file outright when its captured part was blank as well
+        # (which is how a 1408-byte CFTABLES.PHI became 0 bytes). So the trim
+        # stops at the last byte this dump never captured: no hole, no floor,
+        # and a healthy image trims exactly as before.
+        hole_end = max((b for _, b in hole_ranges), default=0)
         if not keep_padding:
             if ext.upper() in TEXT_EXTS:
+                # A ^Z is real content, so it can never sit in a hole; cutting
+                # at one is right even when a hole follows it.
                 cut = blob.find(b"\x1a", max(0, len(blob) - bls))
                 if cut != -1:
                     dropped = len(blob) - cut
                     blob = blob[:cut]
-            while blob and blob[-1] in (0x1A, 0x00):
+            while len(blob) > hole_end and blob[-1] in (0x1A, 0x00):
                 blob.pop()
                 dropped += 1
 
