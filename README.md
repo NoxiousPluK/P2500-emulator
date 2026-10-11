@@ -137,6 +137,7 @@ against a real key, or load an arbitrary cartridge ROM file.
 | `--disk PATH` / `--disk-b` / `--disk-c` / `--disk-d` | the same, one drive at a time |
 | `--rom PATH` / `--charrom PATH` | boot EPROM, character generator |
 | `--scale N` | initial window zoom (the window is resizable and letterboxes with integer scaling) |
+| `--window WxH` | an explicit initial window size instead, for a window the screen does not divide evenly |
 | `--speed X` \| `unlimited` | initial emulation speed |
 | `--no-caps-lock` | boot with capitals lock off |
 | `--panels LIST` | open specific debugger panels at startup |

@@ -418,13 +418,67 @@ check(any(spx[((y // 2) * sw + x // 2) * 3 + 1] > 0x60 for x in PROBE_X for y in
       "cannot fail, move it over the banner")
 sys.exit(0 if ok else 1)
 PY
-    # The offset itself comes from the front-end's own layout report: a
-    # screenshot cannot distinguish an offset screen from one drawn at y=0,
-    # because the screen background and the window clear colour are the same
-    # and the top rows of a character cell are blank.
+    # The offset itself comes from the front-end's own layout report. In the
+    # default window the capture cannot second-guess it: the viewport fills
+    # the window exactly, so there is no letterbox anywhere to measure.
     if grep -qE 'layout: menu [0-9]+ px, screen at y=[1-9]' "$TMP/gui.log"; then
         pass "screen is offset below the menu bar"
     else fail "screen not offset below the menu bar"; fi
+
+    # ...which is what --window is for: a window the 640x288 screen does not
+    # divide evenly letterboxes on all four sides, and because the letterbox
+    # is a *different* black from the screen's own background (T66.3), the
+    # viewport rectangle can be measured straight out of the capture and held
+    # against the line the front-end logged. Before that colour split the two
+    # blacks were identical and this check was impossible to write.
+    SDL_VIDEODRIVER=dummy ./p2500-gui --disk "$DISK" --frames 60 \
+        --window 1000x700 --shot-window "$TMP/boxed.ppm" \
+        >"$TMP/boxed.log" 2>&1
+    python3 - "$TMP/boxed.ppm" "$TMP/boxed.log" <<'VIEWPORT' && pass "viewport rectangle in the capture matches the logged layout" || fail "viewport rectangle does not match the logged layout"
+import re, sys
+d = open(sys.argv[1], 'rb').read()
+hdr = d.split(b'\n', 3)
+w, h = (int(v) for v in hdr[1].split())
+px = d[len(b'\n'.join(hdr[:3])) + 1:]
+log = open(sys.argv[2]).read()
+m = re.search(r'layout: menu (\d+) px, screen at y=(\d+) x=(\d+), (\d+)x(\d+)', log)
+if not m:
+    print("    no layout line in the GUI log"); sys.exit(1)
+menu, ly, lx, lw, lh = (int(g) for g in m.groups())
+
+LETTERBOX, SCREEN_BG = (4, 4, 4), (8, 12, 8)
+def at(x, y):
+    o = (y * w + x) * 3
+    return (px[o], px[o + 1], px[o + 2])
+
+ok = True
+def check(cond, why):
+    global ok
+    if not cond:
+        print("    viewport check failed: " + why); ok = False
+
+# Discriminating power first: both blacks have to be present and distinct, or
+# the measurement below is measuring nothing. This is the check that fails
+# the day someone sets the clear colour back to PALETTE.bg.
+have = {at(x, y) for y in range(menu + 1, h, 7) for x in range(0, w, 7)}
+check(LETTERBOX != SCREEN_BG, "the letterbox and the screen share a colour")
+check(LETTERBOX in have, "no letterbox pixels below the menu bar - nothing to measure")
+check(SCREEN_BG in have, "no screen-background pixels - the screen did not draw")
+
+# The viewport is then everything below the menu band that is not letterbox:
+# scan one row through its middle and one column through it.
+xs = [x for x in range(w) if at(x, ly + lh // 2) != LETTERBOX]
+ys = [y for y in range(menu + 1, h) if at(lx + lw // 2, y) != LETTERBOX]
+if not xs or not ys:
+    print("    found no viewport at all below the menu bar"); sys.exit(1)
+# One pixel of slack: the layout centres on a half pixel and the log rounds.
+check(abs(xs[0] - lx) <= 1 and abs(xs[-1] - (lx + lw - 1)) <= 1,
+      "horizontal extent %d..%d, logged x=%d w=%d" % (xs[0], xs[-1], lx, lw))
+check(abs(ys[0] - ly) <= 1 and abs(ys[-1] - (ly + lh - 1)) <= 1,
+      "vertical extent %d..%d, logged y=%d h=%d" % (ys[0], ys[-1], ly, lh))
+check(ys[0] > menu, "viewport starts inside the menu band")
+sys.exit(0 if ok else 1)
+VIEWPORT
 
     # --- the debugger panels -------------------------------------------
     # Drawn under the dummy driver like the menu bar, so what the panels put

@@ -187,6 +187,9 @@ static const P2500Palette PALETTE = {
     0xFF288C00u,     /* fg_dim */
 };
 
+/* What the window is cleared to around the emulated screen. */
+static const uint8_t LETTERBOX[3] = { 4, 4, 4 };
+
 static void set_status(App *app, const char *fmt, ...)
 {
     va_list ap;
@@ -1370,6 +1373,7 @@ static void usage(FILE *out)
                  "                 [--disks A[,B[,C[,D]]]]\n"
                  "                 [--disk path] [--disk-b path] [--disk-c path]\n"
                  "                 [--disk-d path]\n"
+                 "                 [--window WxH]\n"
                  "                 [--frames N] [--screenshot out.ppm] [--shot-window out.ppm]\n"
                  "                 [--push-at MS:STRING ...] [--no-caps-lock]\n"
                  "                 [--panels system,devices,memory,disasm,log] [--verbose-io]\n"
@@ -1391,6 +1395,8 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[])
     const char *charrom = "roms/charrom.bin";
     const char *disks[P2500_FDC_MAX_DRIVES] = {0};
     int scale = SCALE_DEFAULT;
+    /* An explicit window size, overriding the one --scale implies. */
+    int win_w_arg = 0, win_h_arg = 0;
     unsigned long frame_limit = 0;
     const char *shot_path = NULL;
     const char *win_shot_path = NULL;
@@ -1447,6 +1453,13 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[])
             }
         }
         else if (!strcmp(argv[i], "--scale") && i + 1 < argc) scale = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--window") && i + 1 < argc) {
+            if (SDL_sscanf(argv[++i], "%dx%d", &win_w_arg, &win_h_arg) != 2 ||
+                win_w_arg < 64 || win_h_arg < 64) {
+                SDL_Log("--window: expected WxH, both at least 64");
+                return SDL_APP_FAILURE;
+            }
+        }
         else if (!strcmp(argv[i], "--frames") && i + 1 < argc) frame_limit = strtoul(argv[++i], NULL, 0);
         else if (!strcmp(argv[i], "--screenshot") && i + 1 < argc) shot_path = argv[++i];
         else if (!strcmp(argv[i], "--shot-window") && i + 1 < argc) win_shot_path = argv[++i];
@@ -1578,8 +1591,9 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[])
     p2500_video_info(&app->m, &app->info);
     char window_title[64];
     SDL_snprintf(window_title, sizeof window_title, "Philips P2500 v%s", P2500_VERSION_STR);
-    if (!SDL_CreateWindowAndRenderer(window_title, app->info.width * scale,
-                                     app->info.height * scale + 24,
+    const int win_w = win_w_arg ? win_w_arg : app->info.width * scale;
+    const int win_h = win_h_arg ? win_h_arg : app->info.height * scale + 24;
+    if (!SDL_CreateWindowAndRenderer(window_title, win_w, win_h,
                                      SDL_WINDOW_RESIZABLE,
                                      &app->window, &app->renderer)) {
         SDL_Log("SDL_CreateWindowAndRenderer: %s", SDL_GetError());
@@ -1891,14 +1905,15 @@ SDL_AppResult SDL_AppIterate(void *appstate)
     dst.y = (float)top + ((float)avail_h - dst.h) * 0.5f;
     if (dst.y < (float)top) dst.y = (float)top;
 
-    /* Reported so a headless run can assert the layout directly. Inferring
-     * the offset from the captured pixels does not work: the screen's own
-     * background and the window's clear colour are the same, and the top
-     * text rows of a character cell are blank, so a screen drawn at y=0
-     * looks identical to a correctly offset one in a screenshot. */
+    /* Reported so a headless run can assert the layout directly - and, now
+     * that the letterbox is a different black from the screen's own
+     * background, so a capture can be held against this line rather than
+     * having to be trusted on its own. The capture alone still cannot carry
+     * the check: the viewport fills the default window exactly, so there is
+     * nothing to measure until the window is an awkward size (--window). */
     if (app->win_shot_path && app->frames == 2) {
-        SDL_Log("layout: menu %d px, screen at y=%.0f, %.0fx%.0f",
-                top, dst.y, dst.w, dst.h);
+        SDL_Log("layout: menu %d px, screen at y=%.0f x=%.0f, %.0fx%.0f",
+                top, dst.y, dst.x, dst.w, dst.h);
         if (app->panels.goto_geom.field_x >= 0.0f)
             SDL_Log("memory panel: goto field %.0f,%.0f button %.0f,%.0f;"
                     " watch field %.0f,%.0f button %.0f,%.0f",
@@ -1913,7 +1928,8 @@ SDL_AppResult SDL_AppIterate(void *appstate)
                     app->panels.rewind_geom.field_x, app->panels.rewind_geom.field_y);
     }
 
-    SDL_SetRenderDrawColor(app->renderer, 8, 12, 8, 255);
+    SDL_SetRenderDrawColor(app->renderer, LETTERBOX[0], LETTERBOX[1],
+                           LETTERBOX[2], 255);
     SDL_RenderClear(app->renderer);
     SDL_RenderTexture(app->renderer, app->screen, NULL, &dst);
     if (app->has_ui)
