@@ -416,6 +416,20 @@ panels, the disassembler (`tests/disasm_crosscheck.py`, cross-checked
 against `z80dasm` over ~34,000 instructions), the speed control, and
 rewind. Exit code 1 on any failure.
 
+The suite takes a few minutes, most of it GUI runs of hundreds of emulated
+fields, so it also runs in parts:
+
+```sh
+tests/run_tests.sh --list        # the sections, by id and short name
+tests/run_tests.sh 7 21          # just those two
+tests/run_tests.sh gui lamps     # the same two, by name
+make test T="gui lamps"          # likewise, through make
+```
+
+No section depends on a file an earlier one wrote, so any subset is a valid
+run. It prints how many checks it ran, an unknown section name exits 2, and
+a run that ends up with no checks at all exits 1.
+
 Most checks drive `p2500-emu`, but `tests/fdc_eot.c` links `libp2500.a`
 directly: it checks that a multi-sector read stops at the track's last
 sector, which needs a DMA transfer longer than any real program here

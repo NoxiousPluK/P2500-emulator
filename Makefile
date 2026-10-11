@@ -159,5 +159,8 @@ clean:
 run: $(BIN)
 	./$(BIN) --rom roms/ipl.bin
 
+# T= selects sections by id or short name (tests/run_tests.sh --list);
+# empty, which is what `make test` means, runs all of them.
+T =
 test: $(BIN) $(GUI_IF_AVAILABLE) $(TEST_BIN)
-	@tests/run_tests.sh
+	@tests/run_tests.sh $(T)

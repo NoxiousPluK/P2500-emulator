@@ -49,9 +49,18 @@
 #               brightnesses.
 #   22.Cart   - the cartridge slot's stream and traffic in the report.
 #
-# usage: tests/run_tests.sh   (or: make test)
+# usage: tests/run_tests.sh [SECTION...]   (or: make test, make test T="7 21")
+#
+# With no argument every section runs. A SECTION is one of the ids above or
+# its short name - tests/run_tests.sh --list prints both. An unknown name
+# exits 2, and a run that ends up with no checks at all exits 1: a filtered
+# run that quietly proves nothing must not read as a pass.
 set -u
-cd "$(dirname "$0")/.."
+# This script reads itself - --list takes section titles from the sections'
+# own echo lines - so pin its path before the cd moves the ground under a
+# relative $0.
+SELF=$(cd "$(dirname "$0")" && pwd)/$(basename "$0")
+cd "$(dirname "$SELF")/.."
 
 EMU=./p2500-emu
 DISK="disks/P25K_B.raw"
@@ -59,15 +68,119 @@ REF="tests/fixtures/vram_after_banner.bin"
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
 fails=0
+checks=0
 
-pass() { printf '  PASS  %s\n' "$1"; }
-fail() { printf '  FAIL  %s\n' "$1"; fails=$((fails + 1)); }
+pass() { checks=$((checks + 1)); printf '  PASS  %s\n' "$1"; }
+fail() { checks=$((checks + 1)); fails=$((fails + 1)); printf '  FAIL  %s\n' "$1"; }
+
+# The front-end's own `lamps:` and `layout:` report, which several sections
+# drive the mouse by rather than pinning a pixel column. Produced on demand
+# and cached, so a section selected on its own does not depend on an earlier
+# section's capture having been taken. It is --shot-window that makes the
+# front-end log its layout, which is why this takes one.
+gui_report() {
+    [ -s "$TMP/gui_report.log" ] && return 0
+    [ -x ./p2500-gui ] && [ -f "$DISK" ] || return 1
+    SDL_VIDEODRIVER=dummy ./p2500-gui --disk "$DISK" --frames 20 \
+        --shot-window "$TMP/gui_report.ppm" >"$TMP/gui_report.log" 2>&1
+}
+
+# --- Sections, and selecting them ------------------------------------------
+#
+# Each section is a sec_<id> function below, and this table is the run order.
+# The ID IS THE NAME: ids are quoted in TODO.md, they are never reused, and
+# they are deliberately not positions - the suite's own header comment lists
+# them in a different order from the one they run in. The second field is a
+# short alias for typing. Both work as selectors:
+#
+#   tests/run_tests.sh            every section (what `make test` does)
+#   tests/run_tests.sh 7 21       the SDL3 front-end and the drive lamps
+#   tests/run_tests.sh gui lamps  the same two, by name
+#   tests/run_tests.sh --list     what the names are
+#
+# No section reads a file another section wrote: where one used to (the speed
+# cell's column, a plain CLI run), the consumer now produces it itself, via
+# gui_report() or its own run. So any subset is a valid run.
+SECTIONS='1:sesam 1b:banner 2:ipl 3:cpm 4:dir 4a:driveb 4b:swap 4c:game
+5:banktrip 6:render 7:gui 8:debug 9:log 10:cpmbuild 11:graphics 12:demos
+13:speed 14:eot 15:rewind 16:symbols 17:drives 18:derived 19:images
+20:sysinfo 21:lamps 22:cart'
+
+usage() {
+    cat <<USAGE
+usage: tests/run_tests.sh [SECTION...]
+
+With no argument the whole suite runs, which is what \`make test\` does.
+A SECTION is a section id (1b, 4c, 20) or its short name (banner, game,
+sysinfo); --list names them all. An unknown name is an error rather than
+an empty pass.
+USAGE
+}
+
+# Titles come out of the sections' own echo lines, so this listing cannot
+# drift from what actually runs.
+list_sections() {
+    printf '  %-4s %-9s %s\n' id name title
+    for e in $SECTIONS; do
+        printf '  %-4s %-9s %s\n' "${e%%:*}" "${e#*:}" \
+            "$(sed -n "s/^echo \"== ${e%%:*}\\. //p" "$SELF" | head -1 |
+               sed -e 's/"$//' -e 's/\\//g')"
+    done
+}
+
+known() {
+    for e in $SECTIONS; do
+        if [ "$1" = "${e%%:*}" ] || [ "$1" = "${e#*:}" ]; then return 0; fi
+    done
+    return 1
+}
+
+SELECTED=
+for a in "$@"; do
+    case $a in
+        --list) list_sections; exit 0 ;;
+        -h|--help) usage; exit 0 ;;
+        -*) echo "run_tests.sh: unknown option: $a" >&2; usage >&2; exit 2 ;;
+    esac
+    if known "$a"; then SELECTED="$SELECTED $a"
+    else
+        echo "run_tests.sh: no such section: $a" >&2
+        echo "run_tests.sh: try --list" >&2
+        exit 2
+    fi
+done
+
+want() {
+    [ -z "$SELECTED" ] && return 0
+    for s in $SELECTED; do
+        if [ "$s" = "$1" ] || [ "$s" = "$2" ]; then return 0; fi
+    done
+    return 1
+}
+
+# A section present in the file but missing from the table would never run,
+# and a table entry with no section would never match. Both are the same
+# failure as a selector that matches nothing, so this is checked on every
+# run rather than only on a filtered one.
+for e in $SECTIONS; do echo "${e%%:*}"; done | sort >"$TMP/sec-table"
+sed -n 's/^sec_\([0-9][0-9a-z]*\)() {$/\1/p' "$SELF" | sort >"$TMP/sec-file"
+if ! cmp -s "$TMP/sec-table" "$TMP/sec-file"; then
+    echo "run_tests.sh: the section table disagrees with the sections in this file" >&2
+    echo "  table: $(tr '\n' ' ' <"$TMP/sec-table")" >&2
+    echo "  file:  $(tr '\n' ' ' <"$TMP/sec-file")" >&2
+    exit 2
+fi
+
+# Section bodies below are NOT indented inside their functions, on purpose:
+# they are full of heredocs whose terminators must sit at column 0 and whose
+# bodies are Python, where indentation is meaning.
 
 # Render the 80x24 text screen out of a VRAM dump.
 screen() { od -An -v -tu1 -w1 "$1" | awk 'NR<=1920{c=$1;
     printf "%s", (c>=32 && c<127) ? sprintf("%c",c) : " ";
     if (NR%80==0) printf "\n"}'; }
 
+sec_1() {
 echo "== 1. SESAM bootable-cartridge banner (byte-exact VRAM)"
 if [ ! -f "$REF" ]; then
     fail "reference dump missing: $REF"
@@ -77,7 +190,9 @@ else
     if cmp -s "$TMP/sesam.bin" "$REF"; then pass "VRAM identical to $REF"
     else fail "VRAM differs from $REF"; fi
 fi
+}
 
+sec_1b() {
 echo "== 1b. No disk, no cartridge: the IPL banner and the halt at \$014D"
 # What a real P2500 does when it finds nothing to boot from, confirmed
 # against real hardware. The FDD card is present in this configuration,
@@ -136,7 +251,9 @@ if cell00(sys.argv[2]):
     print("    after the banner: cell (0,0) is lit - the $9F did not cancel it"); ok = False
 sys.exit(0 if ok else 1)
 PY
+}
 
+sec_2() {
 echo "== 2. IPL disk boot reaches Phase 1's landmarks"
 if [ ! -f "$DISK" ]; then
     fail "disk image missing: $DISK"
@@ -146,8 +263,14 @@ else
         if grep -q "landmark \$$lm .* hit #1" "$TMP/ipl.log"; then pass "landmark \$$lm hit"
         else fail "landmark \$$lm never hit"; fi
     done
+fi
+}
 
-    echo "== 3. CP/M 2.2 is up"
+sec_3() {
+echo "== 3. CP/M 2.2 is up"
+if [ ! -f "$DISK" ]; then
+    fail "disk image missing: $DISK"
+else
     $EMU --disk "$DISK" --max-steps 3000000 \
          --peek 0000:8 --peek E200:16 --dump-vram "$TMP/cpm.bin" >"$TMP/cpm.log" 2>&1
     # page zero: JP $E203 (CBIOS warm boot) at $0000, JP $D406 (BDOS) at $0005
@@ -163,8 +286,14 @@ else
     else fail "CP/M banner not on screen"; fi
     if grep -q '^A>' "$TMP/cpm.screen"; then pass "A> prompt present"
     else fail "no A> prompt"; fi
+fi
+}
 
-    echo "== 4. Typing DIR at the prompt lists the disk's real contents"
+sec_4() {
+echo "== 4. Typing DIR at the prompt lists the disk's real contents"
+if [ ! -f "$DISK" ]; then
+    fail "disk image missing: $DISK"
+else
     $EMU --disk "$DISK" --max-steps 20000000 --type 'dir\r' \
          --dump-vram "$TMP/dir.bin" >"$TMP/dir.log" 2>&1
     screen "$TMP/dir.bin" >"$TMP/dir.screen"
@@ -175,7 +304,9 @@ else
         else fail "DIR does not list $f"; fi
     done
 fi
+}
 
+sec_4a() {
 echo "== 4a. Drive B:"
 GAMES="disks/P2500GAM.raw"
 if [ ! -f "$GAMES" ]; then
@@ -193,7 +324,9 @@ else
         fail "drive B's listing leaked drive A's files"
     else pass "drive B's listing is not drive A's"; fi
 fi
+}
 
+sec_4b() {
 echo "== 4b. Swapping a disk mid-run"
 # What a swap does and does not cost, both asserted.
 #
@@ -226,7 +359,9 @@ else
         pass "Ctrl-C clears the read-only flag"
     else fail "Ctrl-C did not clear the read-only flag"; fi
 fi
+}
 
+sec_4c() {
 echo "== 4c. A scripted session drives an interactive game (P25K_G, PAC.COM)"
 # The widest thing --type-at has to answer for: a program that polls BDOS
 # function 6 with E=$FF - direct console I/O, non-blocking - in a tight
@@ -269,7 +404,9 @@ else
         pass "the game is playing (PLAYER 1 has scored)"
     else fail "the maze is up but nothing is moving"; fi
 fi
+}
 
+sec_5() {
 echo "== 5. The undecoded-video-bank tripwire still fires"
 # tests/fixtures/sesam_bank_probe.bin is a SESAM cartridge whose payload is
 # LD A,$01 / OUT ($05),A / HALT - i.e. it selects one of port $05's six
@@ -284,7 +421,9 @@ else fail "unknown bank select was NOT logged - the tripwire is dead"; fi
 if grep -q 'selected an undecoded \$8000-\$BFFF window' "$TMP/bank.log"; then
     pass "unknown bank select is counted in the exit report"
 else fail "unknown bank select missing from the exit report"; fi
+}
 
+sec_6() {
 echo "== 6. The core renderer and the live keyboard ring"
 if [ ! -f "$DISK" ]; then
     fail "disk image missing: $DISK"
@@ -331,9 +470,13 @@ PY
         fail "attributes appeared during a plain CP/M boot"
     else pass "attribute latch silent on a plain boot"; fi
 fi
+}
 
-if [ -x ./p2500-gui ]; then
-    echo "== 7. The SDL3 front-end boots headless"
+sec_7() {
+echo "== 7. The SDL3 front-end boots headless"
+if [ ! -x ./p2500-gui ]; then
+    echo "  (skipped: run 'make gui' to build it)"
+else
     # A stale p2500-gui once passed this whole section while the library
     # under it had moved on by hours, so check the binary is actually newer
     # than what it links against. `make test` now depends on the GUI too, but
@@ -696,10 +839,10 @@ PY
             else pass "typing alone adds nothing - the click is what commits"; fi
         fi
     fi
-else
-    echo "== 7. SDL3 front-end - skipped (run 'make gui' to build it)"
 fi
+}
 
+sec_8() {
 echo "== 8. The shared debug core"
 # --disasm and --state are the headless half of the GUI's panels: they print
 # the same lines core/debug.c hands ImGui, so a panel's claims can be checked
@@ -824,7 +967,9 @@ if grep -q -- '--step-over: not a CALL' "$TMP/over2.log" &&
    grep -qE 'Final: PC=\$1003' "$TMP/over2.log"; then
     pass "--step-over single-steps anything that is not a CALL"
 else fail "--step-over mishandled a non-CALL"; fi
+}
 
+sec_9() {
 echo "== 9. Core diagnostics go through the log callback"
 # The core never touches stderr directly; the CLI installs a sink that adds
 # the "[cat] " prefix. Check every device category still reaches it.
@@ -863,7 +1008,9 @@ if b <= a * 1.2:
 sys.exit(0)
 PY
 fi
+}
 
+sec_10() {
 echo "== 10. Building a disk image (tools/cpm_build.py)"
 # Build a bootable disk from scratch, boot it, and run a program off it -
 # which exercises the sector skew, the directory encoding, the block map
@@ -919,7 +1066,9 @@ if any(a != 0x00 for a in after):
 sys.exit(0)
 PY
 fi
+}
 
+sec_11() {
 echo "== 11. High-resolution graphics mode"
 # Driven through CBIOS's own set-point call, so what is being checked is the
 # whole path: ESC 3 reprograms the CRTC, the firmware computes an address and
@@ -967,7 +1116,9 @@ for (x, y), want in [((4, 0), True), ((18, 0), True), ((0, 4), True), ((0, 14), 
         print("    (%d,%d) is %s, wanted %s" % (x, y, lit(x, y), want)); ok = False
 sys.exit(0 if ok else 1)
 PY
+}
 
+sec_12() {
 echo "== 12. The graphics demos (demos/)"
 # The whole chain: assemble with tools/z80asm.py, which verifies its own
 # encodings against the disassembler; package onto a bootable image with
@@ -1117,7 +1268,9 @@ if len(tops) < 2:
 sys.exit(0)
 PY
 fi
+}
 
+sec_13() {
 echo "== 13. The speed control"
 # Every claim here is about the RATIO of emulated time to wall time, taken
 # from the front-end's own report - which reads the CPU's T-state counter, so
@@ -1165,7 +1318,9 @@ if [ -x ./p2500-gui ] && [ -f "$DISK" ]; then
     # The status-bar cell is a control: click toggles, right-click opens the
     # list. The list's rows come out of the front-end's own report, so adding
     # a speed to it cannot silently stop this from testing anything.
-    L_SPEED=$(sed -n 's/.*lamps: .*speed \([0-9]*\).*/\1/p' "$TMP/gui.log" | head -1)
+    gui_report
+    L_SPEED=$(sed -n 's/.*lamps: .*speed \([0-9]*\).*/\1/p' \
+              "$TMP/gui_report.log" | head -1)
     if [ -z "$L_SPEED" ]; then
         fail "the front-end did not report the speed cell's column"
     else
@@ -1210,24 +1365,40 @@ if [ -f "$DISK" ]; then
         pass "p2500-emu runs flat out by default (${R}x real time here)"
     else fail "the default CLI run is throttled (${R:-no}x)"; fi
 fi
+}
 
+sec_14() {
 echo "== 14. A multi-sector read is bounded by EOT, not by the end of the image"
 # tests/fdc_eot.c links libp2500.a directly and programs the DMA for more
 # than a track holds, which no guest program in this project's corpus does -
 # every traced READ DATA asks for exactly one track or exactly one sector,
 # so the bound is unreachable from here and this check has to reach past
-# the harness to see it. Its own output is already one line per claim.
+# the harness to see it.
+#
+# Its output is already one line per claim, so those lines are replayed
+# through pass/fail rather than forwarded verbatim: they then count towards
+# this script's total instead of merely appearing in it. Read from files
+# rather than a pipe, because a `while read` on the end of a pipe runs in a
+# subshell and the count would not survive it.
 if [ -x ./tests/fdc_eot ]; then
-    if ./tests/fdc_eot >"$TMP/fdc-eot.log" 2>&1; then
-        sed -n 's/^  PASS  /  PASS  /p' "$TMP/fdc-eot.log"
-    else
-        sed -n 's/^  \(PASS\|FAIL\)  /  \1  /p' "$TMP/fdc-eot.log"
-        fail "tests/fdc_eot reported failures (see above)"
+    ./tests/fdc_eot >"$TMP/fdc-eot.log" 2>&1
+    eot=$?
+    sed -n 's/^  PASS  //p' "$TMP/fdc-eot.log" >"$TMP/fdc-eot.pass"
+    sed -n 's/^  FAIL  //p' "$TMP/fdc-eot.log" >"$TMP/fdc-eot.fail"
+    while IFS= read -r c; do pass "$c"; done <"$TMP/fdc-eot.pass"
+    while IFS= read -r c; do fail "$c"; done <"$TMP/fdc-eot.fail"
+    # Neither silence nor an unexplained exit code may read as success.
+    if [ ! -s "$TMP/fdc-eot.pass" ] && [ ! -s "$TMP/fdc-eot.fail" ]; then
+        fail "tests/fdc_eot named no checks at all"
+    elif [ "$eot" -ne 0 ] && [ ! -s "$TMP/fdc-eot.fail" ]; then
+        fail "tests/fdc_eot exited $eot without naming a failed check"
     fi
 else
     fail "tests/fdc_eot is not built (make tests/fdc_eot)"
 fi
+}
 
+sec_15() {
 echo "== 15. Rewind: seek to an instruction that has already run"
 # The claim the whole feature rests on is that a replay from a snapshot is
 # bit-identical, so that is checked first and directly - go back, come
@@ -1329,8 +1500,9 @@ if [ -f "$DISK" ]; then
 
     # Snapshots are opt-in: nothing records history unless asked, so a
     # plain run must not mention it at all.
+    $EMU --disk "$DISK" --max-steps 400000 >"$TMP/rw-plain.log" 2>&1
     if grep -q 'rewind:' "$TMP/rw9-ctl.err" ||
-       grep -q 'rewind:' "$TMP/cli-flat.log"; then
+       grep -q 'rewind:' "$TMP/rw-plain.log"; then
         fail "history was recorded without being asked for"
     else pass "history is opt-in - a plain run says nothing about rewind"; fi
 fi
@@ -1368,8 +1540,9 @@ if [ -x ./p2500-gui ] && [ -f "$DISK" ]; then
         else fail "Back to brk failed silently"; fi
     fi
 fi
+}
 
-
+sec_16() {
 echo "== 16. Symbol files, and --help"
 # Two claims. The small one: both front-ends answer --help on stdout with
 # status 0, and an unknown argument is still an error - a usage text that
@@ -1518,7 +1691,9 @@ if [ -x ./p2500-gui ] && [ -f "$DISK" ]; then
         pass "the GUI re-identifies the build as the machine boots"
     else fail "the GUI did not follow the build change during boot"; fi
 fi
+}
 
+sec_17() {
 echo "== 17. Four drives, and --disks"
 # Four is the hardware's number: PIO port A bits 4-7 are one select line
 # per drive (T14). How many a guest BIOS maps is its own business.
@@ -1560,8 +1735,9 @@ else
         pass "a malformed symbol file names the offending line"
     else fail "the symbol-file error did not name line 2"; fi
 fi
+}
 
-
+sec_18() {
 echo "== 18. The shipped symbol files against an independent derivation"
 # The symbols/*.sym files are hand-curated. tests/derive_syms.py finds the
 # same machine's structures from scratch - page zero, the CBIOS jump table,
@@ -1645,8 +1821,9 @@ else
         fi
     fi
 fi
+}
 
-
+sec_19() {
 echo "== 19. Identifying a disk image before it boots (# match-disk)"
 # `# match` can only recognise a build once it is RESIDENT, which is
 # useless for "what is this image?" before booting it. A `# match-disk`
@@ -1706,8 +1883,9 @@ printf '# matchless, and not a rule\nE200 X\n' >"$TMP/okcomment.sym"
 if $EMU --symbols "$TMP/okcomment.sym" --max-steps 1 >/dev/null 2>&1; then
     pass "a comment beginning \"match\" is still a comment"
 else fail "an ordinary comment was mistaken for a malformed rule"; fi
+}
 
-
+sec_20() {
 echo "== 20. The system-information report (--sysinfo, and the GUI panel)"
 # "What is this machine running" used to be spread across the log, the
 # window title and three CLI flags. The report is built in core/sysinfo.c
@@ -1802,8 +1980,9 @@ if [ -x ./p2500-gui ]; then
         pass "the GUI opens the System information panel headlessly"
     else fail "p2500-gui failed with the system panel open"; fi
 fi
+}
 
-
+sec_21() {
 echo "== 21. Four drive lamps, and the one the running BIOS will not address"
 # The hardware has four drive-select lines (PIO port A bits 4-7, T14), so
 # there are four lamps. How many a guest BIOS maps is a different number:
@@ -1854,7 +2033,9 @@ sys.exit(0)
 LAMPPROBE
     fi
 fi
+}
 
+sec_22() {
 echo "== 22. The cartridge slot in the system-information report"
 # The slot is generic - SESAM dongle, the "Maint" diagnostic plug - so the
 # report describes the stream rather than naming a product. Byte 0 is the
@@ -1901,9 +2082,26 @@ base, key = reads(sys.argv[1]), reads(sys.argv[2])
 print("    baseline %d reads, bootable cartridge %d" % (base, key))
 sys.exit(0 if base == 32 and key > base * 10 else 1)
 CARTTRAFFIC
+}
 
+ran=0
+for e in $SECTIONS; do
+    if want "${e%%:*}" "${e#*:}"; then
+        "sec_${e%%:*}"
+        ran=$((ran + 1))
+    fi
+done
 
 echo
+# The count is printed because a filtered run should be visibly short - and
+# because zero checks is the one outcome that must never read as success,
+# whether it came from a selector, or from every selected section skipping
+# itself for want of a disk image or a GUI build.
+echo "$checks check(s) in $ran section(s)."
+if [ "$checks" -eq 0 ]; then
+    echo "No checks ran, so nothing was proved. That is a failure, not a pass."
+    exit 1
+fi
 if [ "$fails" -eq 0 ]; then echo "All checks passed."; exit 0; fi
 echo "$fails check(s) failed."
 exit 1
