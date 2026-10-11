@@ -102,17 +102,25 @@ are configured — unshifted keys produce capitals.
 
 **File**: Load Disk A/B/C, Reset, Pause, Screenshot, Quit.
 **Machine**: capitals lock, Cartridge..., speed.
-**Debug**: the four debugger panels.
+**Debug**: the five debugger panels.
 
 At the right of the bar, a row of status lamps doubles as controls:
 
 | Lamp | Shows | Click |
 |---|---|---|
-| `A B C` | a disk is attached in that drive | load a disk; right-click ejects |
+| `A B C D` | a disk is attached in that drive — three brightnesses, see below | load a disk; right-click ejects |
 | `Cartridge: ...` | the port $0F cartridge slot's contents (SESAM key ID / loaded ROM) | opens the Cartridge window; right-click toggles insert/eject |
 | ▶ / ⏸ | running / paused | toggle pause |
 | ⊓⊔ | capitals lock | toggle |
 | `1x` | current speed (lit when not 1×) | toggle unlimited; right-click for the speed list |
+
+**The drive lamps have three readings.** There are four of them
+because the hardware has four drive-select lines (PIO port A bits 4–7),
+but how many drive letters a guest BIOS maps is its own business:
+`P25K_B`'s CBIOS maps three, `P25K_G`'s two. So a lamp is dim for an empty
+slot, mid-bright for a disk the running BIOS will not address, and
+bright for one it will. A mid-bright lamp means the guest will answer
+`Bdos Err On D: Select`.
 
 The **Cartridge** window (Machine menu, or click its lamp) covers port
 $0F; a generic plug-in slot whose best-documented use is the SESAM
@@ -147,19 +155,19 @@ The last five make the GUI fully scriptable with no display, which is how
 
 ## The debugger
 
-Everything the panels show comes from `core/debug.c`, the same code
-`p2500-emu` prints from — a panel cannot show something the headless
-harness can't also report.
+Everything the panels show comes from `core/debug.c` and
+`core/sysinfo.c`, the same code `p2500-emu` prints from.
 
 - **System information** (F5) — current device configuration:
   the boot EPROM's CRC32 and whether it is the dump this project's
   findings come from, the bank latch's decode, the CRTC geometry, what
   is in each drive and whether the image is one the shipped rules recognise,
-  which symbol file fingerprints the running build, and (once CP/M is up);
+  what the port $0F cartridge slot holds and how much traffic it has seen,
+  which symbol file fingerprints the running build, and (once CP/M is up)
   the memory map, drive A's DPB decoded, and the device table the BIOS
-  publishes. That last one is the answers how many drive letters are
-  supported by the loaded disks CBIOS/PBIOS. it is read out of the BIOS's
-  own DPH chain. `--sysinfo` prints the same lines.
+  publishes. That last one answers how many drive letters are supported by
+  the loaded disk's CBIOS/PBIOS: it is read out of the BIOS's own DPH
+  chain. `--sysinfo` prints the same lines.
 - **Device state** (F1) — every device at once: the interrupt daisy chain,
   the four CTC channels, PIO mode and masks, DMA registers, FDC phase and
   command/result bytes, CRTC registers, the video attribute latch.

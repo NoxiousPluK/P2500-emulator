@@ -5,6 +5,7 @@
 #include <string.h>
 
 #include "video.h"
+#include "cartridge.h"
 
 /* ======================================================================== *
  *  The structural probes
@@ -339,6 +340,39 @@ int p2500_sysinfo(const P2500Machine *m, const P2500Debug *d,
             ROW(label, "%lu KB   image not recognised by any shipped rule",
                 (unsigned long)(m->fdc.disk_size[u] / 1024));
     }
+
+    /* -------------------------------------------------------- Cartridge
+     *
+     * The slot is generic (the SESAM dongle is its best-documented use,
+     * the P2500's own "Maint" diagnostic plug is another), so the report
+     * describes the STREAM rather than naming a product - what is
+     * plugged in is the front-end's business, what the machine can see is
+     * this. The read and write counts are here because they are the only
+     * evidence a protection check leaves */
+    HEAD("Cartridge slot (port $0F)");
+    const P2500Cartridge *cart = &m->cartridge;
+    if (!cart->stream || cart->stream_len == 0) {
+        ROW("slot", "empty - every read returns $FF");
+    } else {
+        /* Byte 0 is the ROM's own presence check: $00 means "a bootable
+         * cartridge" and anything else sends the IPL on to the floppy. */
+        const uint8_t b0 = cart->stream[0];
+        ROW("slot", "%lu byte stream", (unsigned long)cart->stream_len);
+        ROW("byte 0", "$%02X   %s", b0, b0 == 0x00
+            ? "the IPL will boot from this cartridge"
+            : "not a bootable cartridge; the IPL skips it");
+        if (cart->stream_len >= 3)
+            ROW("first three bytes", "$%02X $%02X $%02X%s",
+                cart->stream[0], cart->stream[1], cart->stream[2],
+                cart->stream_len == 3
+                    ? "   likely a SESAM key" : "");
+        ROW("read position", "%lu of %lu", (unsigned long)cart->pos,
+            (unsigned long)cart->stream_len);
+    }
+    
+    ROW("traffic", "%lu read%s, %lu write%s",
+        cart->reads, cart->reads == 1 ? "" : "s",
+        cart->writes, cart->writes == 1 ? "" : "s");
 
     /* ---------------------------------------------------------- Symbols */
     HEAD("Symbols");

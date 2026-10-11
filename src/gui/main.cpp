@@ -50,6 +50,7 @@
 
 #include "core/machine.h"
 #include "core/debug.h"
+#include "core/sysinfo.h"
 #include "core/history.h"
 #include "core/video.h"
 #include "core/version.h"
@@ -124,6 +125,13 @@ struct App {
      * whose fingerprint one of the shipped files claims, and say so once.
      * Re-armed by a reset or a change of media, because the answer can
      * change - loading P25K_G after P25K_B is a different BIOS. */
+    /* How many drive letters the RUNNING BIOS maps, read out of its own DPH
+     * chain (core/sysinfo.h). -1 = not knowable yet: before CP/M is up, or
+     * on a guest that is not CP/M at all, there is no chain to read and the
+     * drive lamps must not pretend otherwise. Refreshed on the same cadence
+     * as the symbol re-check rather than per frame, because the scan is a
+     * sweep of BIOS space and the answer changes only at a warm boot. */
+    int bios_drive_letters = -1;
     bool symbols_auto = true;
     char symbols_auto_from[256] = {0};
     /* Execution history, so the debugger can step BACKWARDS - a ring of
@@ -731,13 +739,24 @@ static void draw_run_glyph(ImDrawList *dl, ImVec2 centre, float h, bool paused, 
     }
 }
 
-/* The dim half of every indicator: drawn, not hidden, so nothing in the bar
- * ever moves and each position always means the same thing. */
-static ImU32 indicator_colour(bool lit)
+/* Indicators have three brightnesses, not two, because a drive lamp has
+ * three states to say and only one of them is "off":
+ *
+ *   LAMP_OFF       nothing attached.
+ *   LAMP_INERT     attached, but the running BIOS does not map that drive
+ *                  letter - the guest will answer `Bdos Err On D: Select`.
+ *                  Mid-bright: the medium is real, the drive is not.
+ *   LAMP_ON        attached and mapped.
+ *
+ * Every one is DRAWN rather than hidden, so nothing in the bar ever moves
+ * and each position always means the same thing. */
+typedef enum { LAMP_OFF = 0, LAMP_INERT, LAMP_ON } LampLevel;
+
+static ImU32 indicator_colour(LampLevel level)
 {
-    if (lit) return ImGui::GetColorU32(ImGuiCol_Text);
+    if (level == LAMP_ON) return ImGui::GetColorU32(ImGuiCol_Text);
     ImVec4 off = ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled);
-    off.w = 0.45f;
+    off.w = (level == LAMP_INERT) ? 1.0f : 0.45f;
     return ImGui::GetColorU32(off);
 }
 
@@ -781,10 +800,11 @@ static Lamp lamp_button(const char *id, float centre_x, float w,
 /* Paints the inverted ground and returns the colour the glyph must be drawn
  * in: the bar's own background when inverted, the lamp's normal ink when
  * not. */
-static ImU32 lamp_paint(ImDrawList *dl, const Lamp &l, bool lit)
+static ImU32 lamp_paint(ImDrawList *dl, const Lamp &l, LampLevel level)
 {
-    if (!l.hovered) return indicator_colour(lit);
-    ImVec4 ground = ImGui::GetStyleColorVec4(lit ? ImGuiCol_Text : ImGuiCol_TextDisabled);
+    if (!l.hovered) return indicator_colour(level);
+    ImVec4 ground = ImGui::GetStyleColorVec4(level == LAMP_ON ? ImGuiCol_Text
+                                                              : ImGuiCol_TextDisabled);
     dl->AddRectFilled(l.min, l.max, ImGui::GetColorU32(ground));
     return ImGui::GetColorU32(ImGuiCol_MenuBarBg);
 }
@@ -919,7 +939,7 @@ static void draw_menu_bar(App *app)
     /* Right-aligned, laid out from the right edge inwards and in a fixed
      * order, so no indicator ever moves as the status text changes:
      *
-     *   status text | speed | A B C | run/pause | capitals lock
+     *   status text | speed | cartridge | A B C D | run/pause | capitals lock
      *
      * Each indicator is always drawn - bright when it applies, faint when it
      * does not - because a lamp that disappears is a lamp you cannot read
@@ -945,7 +965,8 @@ static void draw_menu_bar(App *app)
          * are adjacent enough to mis-hit. */
         const float pad = 12.0f, gap = 9.0f, letter_gap = 9.0f;
         const float drive_cell = letter_w + letter_gap;
-        const float drives_w = letter_w * 3.0f + letter_gap * 2.0f;
+        const float drives_w = letter_w * (float)P2500_FDC_MAX_DRIVES +
+                               letter_gap * (float)(P2500_FDC_MAX_DRIVES - 1);
 
         float x = bar_x + width - pad;
 
@@ -1005,12 +1026,13 @@ static void draw_menu_bar(App *app)
              * that hardcodes these pixel columns silently stops testing the
              * lamps the moment a menu is added or the font changes. */
             if (app->win_shot_path && app->frames == 2)
-                SDL_Log("lamps: caps %.0f run %.0f drives %.0f %.0f %.0f rows %.0f-%.0f"
-                        " cartridge %.0f speed %.0f",
+                SDL_Log("lamps: caps %.0f run %.0f drives %.0f %.0f %.0f %.0f"
+                        " rows %.0f-%.0f cartridge %.0f speed %.0f",
                         caps_centre, run_centre,
                         drives_left + letter_w * 0.5f,
                         drives_left + drive_cell + letter_w * 0.5f,
                         drives_left + 2 * drive_cell + letter_w * 0.5f,
+                        drives_left + 3 * drive_cell + letter_w * 0.5f,
                         bar_y + 2.0f, bar_y + bar_h - 2.0f, cart_centre, speed_centre);
 
             Lamp caps = lamp_button("##caps", caps_centre, caps_w, bar_y, bar_h);
@@ -1024,41 +1046,78 @@ static void draw_menu_bar(App *app)
                                   " so unshifted keys give capitals.",
                                   app->caps_lock ? "on" : "off");
             draw_caps_glyph(dl, ImVec2(caps_centre, mid_y), gh,
-                            lamp_paint(dl, caps, app->caps_lock));
+                            lamp_paint(dl, caps, app->caps_lock ? LAMP_ON : LAMP_OFF));
 
             Lamp run = lamp_button("##run", run_centre, run_w, bar_y, bar_h);
             if (run.clicked || run.alt_clicked) toggle_pause(app);
             ImGui::SetItemTooltip("%s  (F12)", app->paused ? "Paused - click to run"
                                                            : "Running - click to pause");
             draw_run_glyph(dl, ImVec2(run_centre, mid_y), gh * 0.86f, app->paused,
-                           lamp_paint(dl, run, app->paused));
+                           lamp_paint(dl, run, app->paused ? LAMP_ON : LAMP_OFF));
 
-            /* A:, B: and C: - the three drives CBIOS actually supports.
-             * Lit means media is attached, which is not the
-             * same as the guest having logged the drive in, which is why the
-             * tooltip says so. Left click loads, right click ejects. */
-            for (unsigned u = 0; u < 3; u++) {
+            /* A: to D: - one lamp per drive-select line the hardware has
+             * (PIO port A bits 4-7, T14), which is four. How many of them a
+             * guest BIOS maps is a different number and its own business:
+             * P25K_B's CBIOS maps three drive letters, P25K_G's two, so a
+             * disk in D: is attached to a drive the running CP/M refuses
+             * with `Bdos Err On D: Select` - exactly what a real machine
+             * does with the same system disk.
+             *
+             * So the lamp has three readings. Dim is an empty slot.
+             * Mid-bright is media the running BIOS will not address.
+             * Bright is attached and mapped.
+             *
+             * While bios_drive_letters is -1 - before CP/M is up, or on a
+             * guest that is not CP/M - nothing is dimmed on mapping
+             * grounds, because there is no DPH chain to read and a guess
+             * would be worse than silence. */
+            for (unsigned u = 0; u < P2500_FDC_MAX_DRIVES; u++) {
                 const bool loaded = app->m.fdc.disk[u] != NULL;
+                const int mapped = app->bios_drive_letters;
+                const bool unmapped = loaded && mapped >= 0 && (int)u >= mapped;
+                const LampLevel level = !loaded ? LAMP_OFF
+                                      : unmapped ? LAMP_INERT : LAMP_ON;
                 const float cx = drives_left + u * drive_cell + letter_w * 0.5f;
                 char id[8];
                 snprintf(id, sizeof id, "##dr%u", u);
                 Lamp d = lamp_button(id, cx, letter_w, bar_y, bar_h);
                 if (d.clicked) open_disk_dialog(app, u);
                 if (d.alt_clicked) eject_disk(app, u);
-                if (loaded && app->disk_id[u][0])
-                    ImGui::SetItemTooltip("%c: %s\n%s\n"
-                                          "Click to change, right-click to eject.\n"
-                                          "A swapped-in disk is readable at once; CP/M marks"
-                                          " the drive read-only until a warm boot (Ctrl-C).",
-                                          'A' + (int)u, app->disk_name[u], app->disk_id[u]);
-                else if (loaded)
-                    ImGui::SetItemTooltip("%c: %s\nClick to change, right-click to eject.\n"
-                                          "A swapped-in disk is readable at once; CP/M marks"
-                                          " the drive read-only until a warm boot (Ctrl-C).",
-                                          'A' + (int)u, app->disk_name[u]);
-                else
-                    ImGui::SetItemTooltip("%c: empty\nClick to load a disk.", 'A' + (int)u);
-                const ImU32 ink = lamp_paint(dl, d, loaded);
+                if (!loaded) {
+                    ImGui::SetItemTooltip("%c: empty\nClick to load a disk.",
+                                          'A' + (int)u);
+                } else {
+                    /* Built in pieces, so `at` must be clamped at every
+                     * step: snprintf returns the length it WANTED, so a
+                     * truncation would otherwise push `at` past the buffer
+                     * and turn `sizeof tip - at` into a huge size_t. */
+                    char tip[640];
+                    size_t at = 0;
+                    #define TIP(...) do { \
+                        if (at < sizeof tip) { \
+                            int w = snprintf(tip + at, sizeof tip - at, __VA_ARGS__); \
+                            at = (w < 0) ? sizeof tip \
+                               : (at + (size_t)w > sizeof tip ? sizeof tip \
+                                                              : at + (size_t)w); \
+                        } \
+                    } while (0)
+                    TIP("%c: %s", 'A' + (int)u, app->disk_name[u]);
+                    if (app->disk_id[u][0]) TIP("\n%s", app->disk_id[u]);
+                    if (unmapped)
+                        TIP("\n\nThe running BIOS maps %d drive letter%s "
+                            "(A:-%c:), so the guest will answer "
+                            "`Bdos Err On %c: Select` for this one.\nThe "
+                            "hardware has four drive-select lines; this "
+                            "system disk does not use them all.",
+                            mapped, mapped == 1 ? "" : "s",
+                            'A' + mapped - 1, 'A' + (int)u);
+                    TIP("\n\nClick to change, right-click to eject.\n"
+                        "A swapped-in disk is readable at once; CP/M marks"
+                        " the drive read-only until a warm boot (Ctrl-C).");
+                    #undef TIP
+                    ImGui::SetItemTooltip("%s", tip);
+                }
+                const ImU32 ink = lamp_paint(dl, d, level);
                 const char letter[2] = { (char)('A' + u), '\0' };
                 dl->AddText(ImVec2(cx - letter_w * 0.5f, mid_y - font_h * 0.5f), ink, letter);
             }
@@ -1076,7 +1135,7 @@ static void draw_menu_bar(App *app)
             ImGui::SetItemTooltip("%s\nClick to open the Cartridge window,"
                                   " right-click to %s.", cart_label,
                                   app->cart_inserted ? "eject" : "re-insert");
-            const ImU32 cart_ink = lamp_paint(dl, cart, app->cart_inserted);
+            const ImU32 cart_ink = lamp_paint(dl, cart, app->cart_inserted ? LAMP_ON : LAMP_OFF);
             const float cart_tw = ImGui::CalcTextSize(cart_label).x;
             dl->AddText(ImVec2(cart_centre - cart_tw * 0.5f, mid_y - font_h * 0.5f),
                         cart_ink, cart_label);
@@ -1100,7 +1159,7 @@ static void draw_menu_bar(App *app)
                                       "Click for unlimited, right-click for the list."
                                       "  (F11)",
                                       (double)app->speed, (double)app->speed_measured);
-            const ImU32 sink = lamp_paint(dl, sp, app->speed != 1.0f);
+            const ImU32 sink = lamp_paint(dl, sp, app->speed != 1.0f ? LAMP_ON : LAMP_OFF);
             const float tw = ImGui::CalcTextSize(reading).x;
             dl->AddText(ImVec2(speed_centre - tw * 0.5f, mid_y - font_h * 0.5f),
                         sink, reading);
@@ -1704,7 +1763,12 @@ SDL_AppResult SDL_AppIterate(void *appstate)
     }
     measure_speed(app);
     app->frames++;
-    if ((app->frames % 15) == 0) try_auto_symbols(app);
+    if ((app->frames % 15) == 0) {
+        try_auto_symbols(app);
+        P2500DiskMap dm;
+        app->bios_drive_letters = p2500_sysinfo_disk_map(&app->m, &dm)
+                                  ? dm.count : -1;
+    }
 
     /* The CRTC can be reprogrammed by the guest - the manual's graphics mode
      * reinitialises it - so re-check the geometry rather than trusting the

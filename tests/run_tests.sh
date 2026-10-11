@@ -44,6 +44,10 @@
 #               certainty and STOP where the proof stops: the full map on
 #               a CP/M machine, the Machine section alone on one that is
 #               not running CP/M. The GUI panel is the same core call.
+#   21.Lamps  - four drive lamps (the hardware's select lines), reading
+#               mapped / attached-but-unmapped / empty as three distinct
+#               brightnesses.
+#   22.Cart   - the cartridge slot's stream and traffic in the report.
 #
 # usage: tests/run_tests.sh   (or: make test)
 set -u
@@ -526,7 +530,13 @@ PY
     # The lamp columns come out of the front-end's own report rather than
     # being hardcoded: a test that pins these pixel columns stops testing
     # anything the moment a menu is added or the font changes.
-    LAMPROW=$(sed -n 's/.*lamps: caps \([0-9]*\) run \([0-9]*\) drives \([0-9]*\) [0-9]* [0-9]* rows \([0-9]*\)-\([0-9]*\).*/\1 \2 \3 \4 \5/p' "$TMP/gui.log" | head -1)
+    LAMPROW=$(sed -n 's/.*lamps: caps \([0-9]*\) run \([0-9]*\) drives \([0-9]*\) [0-9]* [0-9]* [0-9]* rows \([0-9]*\)-\([0-9]*\).*/\1 \2 \3 \4 \5/p' "$TMP/gui.log" | head -1)
+    if [ -z "$LAMPROW" ]; then
+        # Not a skip: this line is how the suite finds the lamps at all, so
+        # a layout change that stops it parsing must fail rather than
+        # quietly retire the three checks below.
+        fail "could not parse the lamp layout line - the bar's report changed shape"
+    fi
     if [ -n "$LAMPROW" ]; then
         # shellcheck disable=SC2086
         set -- $LAMPROW
@@ -1738,6 +1748,105 @@ if [ -x ./p2500-gui ]; then
         pass "the GUI opens the System information panel headlessly"
     else fail "p2500-gui failed with the system panel open"; fi
 fi
+
+
+echo "== 21. Four drive lamps, and the one the running BIOS will not address"
+# The hardware has four drive-select lines (PIO port A bits 4-7, T14), so
+# there are four lamps. How many a guest BIOS maps is a different number:
+# P25K_B's CBIOS maps three drive letters, so a disk in D: is attached to a
+# drive the running CP/M refuses (section 17 asserts the Select error).
+# The lamp says so by being mid-bright - attached, but inert.
+#
+# Three distinct brightnesses, probed at the columns the front-end reports
+# rather than at hardcoded pixels. The probe asserts its own discriminating
+# power: the inequality is strict, so it cannot pass by finding every lamp
+# the same colour.
+if [ ! -x ./p2500-gui ]; then
+    echo "  SKIP  p2500-gui not built"
+else
+    # A: mapped+loaded, B: mapped+loaded, C: empty, D: loaded but unmapped.
+    SDL_VIDEODRIVER=dummy ./p2500-gui \
+        --disks "$DISK,disks/P2500GAM.raw,,disks/P25K_G.raw" \
+        --frames 2500 --shot-window "$TMP/lamps.ppm" >"$TMP/lamps.log" 2>&1
+    LAMPS=$(sed -n 's/.*lamps: .*drives \([0-9]*\) \([0-9]*\) \([0-9]*\) \([0-9]*\) rows \([0-9]*\)-\([0-9]*\).*/\1 \2 \3 \4 \5 \6/p' \
+            "$TMP/lamps.log" | head -1)
+    if [ -z "$LAMPS" ]; then
+        fail "the bar did not report four drive-lamp columns"
+    else
+        pass "the menu bar reports four drive-lamp columns"
+        # shellcheck disable=SC2086
+        set -- $LAMPS
+        python3 - "$TMP/lamps.ppm" "$1" "$2" "$3" "$4" "$5" "$6" <<'LAMPPROBE' && pass "the four drive lamps read mapped / unmapped / empty" || fail "the drive lamps did not separate the three states"
+import sys
+def load(p):
+    d = open(p, 'rb').read()
+    hdr = d.split(b'\n', 3)
+    w, h = (int(v) for v in hdr[1].split())
+    return w, h, d[len(b'\n'.join(hdr[:3])) + 1:]
+w, h, px = load(sys.argv[1])
+cols = [int(v) for v in sys.argv[2:6]]
+y0, y1 = (int(v) for v in sys.argv[6:8])
+def peak(cx):
+    return max(px[((y * w) + x) * 3 + 1]
+               for y in range(y0, y1) for x in range(cx - 5, cx + 5))
+a, b, c, d = (peak(x) for x in cols)
+print("    A=%d B=%d C=%d D=%d" % (a, b, c, d))
+# A and B hold media this BIOS maps; D holds media it will not address; C
+# is empty. Strict in both places, so "all the same" fails.
+if not (a == b and a > d > c):
+    print("    expected A == B > D > C (mapped > unmapped > empty)")
+    sys.exit(1)
+sys.exit(0)
+LAMPPROBE
+    fi
+fi
+
+echo "== 22. The cartridge slot in the system-information report"
+# The slot is generic - SESAM dongle, the "Maint" diagnostic plug - so the
+# report describes the stream rather than naming a product. Byte 0 is the
+# ROM's own presence check, and the read/write counts are the only evidence
+# a protection check leaves (T51).
+$EMU --max-steps 2000 --sysinfo >"$TMP/cart_empty.log" 2>&1
+if grep -q 'slot .*empty - every read returns \$FF' "$TMP/cart_empty.log"; then
+    pass "an empty slot is reported as empty"
+else fail "the empty cartridge slot was not reported"; fi
+# A three-byte stream starting $00 is the bootable-cartridge shape, and the
+# IPL must actually take that branch - which is what makes byte 0's verdict
+# a claim rather than a label.
+printf '\000\022\064' >"$TMP/key.bin"
+$EMU --cartridge "$TMP/key.bin" --max-steps 300000 --sysinfo \
+     >"$TMP/cart_key.log" 2>&1
+if grep -q 'byte 0 .*\$00   the IPL will boot from this cartridge' "$TMP/cart_key.log" &&
+   grep -q 'first three bytes .*\$00 \$12 \$34   the shape of a SESAM key' "$TMP/cart_key.log"; then
+    pass "a three-byte stream is reported as a bootable SESAM-shaped key"
+else fail "the cartridge stream was not decoded"; fi
+# A non-$00 first byte must send the IPL to the floppy instead, and the
+# report must say so rather than printing one line whatever the byte is.
+printf '\377\022\064' >"$TMP/notboot.bin"
+$EMU --cartridge "$TMP/notboot.bin" --max-steps 2000 --sysinfo \
+     >"$TMP/cart_nb.log" 2>&1
+if grep -q 'byte 0 .*\$FF   not a bootable cartridge' "$TMP/cart_nb.log"; then
+    pass "a non-\$00 first byte is reported as not bootable"
+else fail "byte 0's verdict is the same whatever the byte is"; fi
+# The traffic counters must move, or they are decoration - and the IPL's
+# own figure is a documented constant rather than a shrug: left alone with
+# an empty slot it does exactly 32 reads and 6 writes, which is the
+# baseline the report quotes and the number any excess is measured
+# against. Asserted exactly, so a change in the IPL's probing shows up
+# here rather than silently shifting what the report means.
+$EMU --max-steps 3000000 --sysinfo >"$TMP/cart_base.log" 2>&1
+if grep -q 'traffic .*32 reads, 6 writes' "$TMP/cart_base.log"; then
+    pass "an untouched slot sees exactly the IPL's 32 reads and 6 writes"
+else fail "the IPL's cartridge baseline is no longer 32 reads / 6 writes"; fi
+python3 - "$TMP/cart_base.log" "$TMP/cart_key.log" <<'CARTTRAFFIC' && pass "a cartridge the IPL boots from is read far past the baseline" || fail "the cartridge traffic counters did not move"
+import re, sys
+def reads(p):
+    m = re.search(r'traffic\s+(\d+) reads', open(p).read())
+    return int(m.group(1)) if m else -1
+base, key = reads(sys.argv[1]), reads(sys.argv[2])
+print("    baseline %d reads, bootable cartridge %d" % (base, key))
+sys.exit(0 if base == 32 and key > base * 10 else 1)
+CARTTRAFFIC
 
 
 echo
