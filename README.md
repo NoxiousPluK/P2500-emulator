@@ -126,6 +126,48 @@ P2500's "Maint" diagnostic plug is a, first-party example). It lets you
 type in a SESAM key serial to unblock a disk image that is already SESAM-initialized
 against a real key, or load an arbitrary cartridge ROM file.
 
+### Settings that are remembered
+
+The View and Machine menus' choices survive a restart. They are written to a
+small `settings.ini` the moment you change one and read back at startup:
+
+| | |
+|---|---|
+| Linux | `$XDG_CONFIG_HOME/p2500/settings.ini`, else `~/.config/p2500/settings.ini` |
+| Windows | `%APPDATA%\p2500\settings.ini` (`AppData\Roaming`) |
+| macOS | `~/Library/Application Support/p2500/settings.ini` |
+
+The Windows and macOS paths come from `SDL_GetPrefPath`, with no vendor
+subdirectory between `Roaming` and `p2500`. The emulator creates the folder
+itself the first time it writes.
+
+It is plain INI, written as a valid TOML subset, meant to be hand-editable
+
+```ini
+[display]
+aspect = "4:3"        # or "square"
+snap = false
+phosphor = "green"    # or "white"
+theme = "dark"        # or "paper"
+
+[machine]
+speed = 1.0           # a multiplier, or "unlimited"
+caps_lock = true
+
+[panels]
+system = false
+devices = false
+memory = false
+disasm = false
+log = false
+```
+
+**Precedence, lowest to highest:** built-in defaults, this file,
+`P2500_DISPLAY`, then the command-line flags.
+
+`P2500_CONFIG=none` ignores the file entirely — no read, no write, which is
+what `make test` uses. `P2500_CONFIG=PATH` uses a file of your choosing.
+
 ### GUI command-line options
 
 | Flag | |
@@ -472,8 +514,8 @@ make test
 
 runs `tests/run_tests.sh`: checks covering the cartridge-slot (SESAM)
 boot path, the IPL and CP/M boot sequence, disk I/O, the video renderer
-the debugger panels, the disassembler, the speed control, and rewind.
-Exit code 1 on any failure.
+the debugger panels, the disassembler, the speed control, rewind, and the
+settings file. Exit code 1 on any failure.
 
 The suite takes a few minutes, most of it GUI runs of hundreds of emulated
 fields, so it also runs in parts:
@@ -489,10 +531,17 @@ No section depends on a file an earlier one wrote, so any subset is a valid
 run. It prints how many checks it ran, an unknown section name exits 2, and
 a run that ends up with no checks at all exits 1.
 
-Most checks drive `p2500-emu`, but `tests/fdc_eot.c` links `libp2500.a`
-directly: it checks that a multi-sector read stops at the track's last
-sector, which needs a DMA transfer longer than any real program here
-requests.
+Most checks drive `p2500-emu`, but three link `libp2500.a` directly,
+because what they check is not reachable from any command line:
+`tests/fdc_eot.c` (a multi-sector read stops at the track's last sector,
+which needs a DMA transfer longer than any real program here requests),
+`tests/fdc_write.c` (the write paths no surviving software takes), and
+`tests/ini.c` (the settings syntax, whose load-bearing claim is about bytes
+in a file).
+
+The suite runs with `P2500_CONFIG=none` and a pinned `P2500_DISPLAY`, so a
+developer's saved settings can never reach a check and a check can never
+write to their file.
 
 `tests/render_vram.py` renders a `--dump-vram` capture to a PNG (`--attr`
 for the attribute plane, `--graphics` for the 512×256 mode) — useful for
@@ -507,8 +556,9 @@ src/gui/    SDL3 + Dear ImGui front-end (p2500-gui) — the only C++ in the tree
 src/win/    the Windows .exe icon resource, built by windres under MINGW=1
 tools/      disk-image and asset build tools (Python)
 assets/     build assets like the application icon
-tests/      the regression suite, its fixtures, and the vendored
-            research tools it runs (derive_syms.py, disasm_crosscheck.py)
+tests/      the regression suite, its fixtures, the core-level checks
+            (fdc_eot.c, fdc_write.c, ini.c) and the vendored research
+            tools it runs (derive_syms.py, disasm_crosscheck.py)
 demos/      three graphics demos + a benchmark, in Z80 assembly
 disks/      CP/M disk images that boot on the emulator
 roms/       the boot EPROM and character ROM dumps

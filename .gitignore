@@ -13,3 +13,4 @@ publish/
 *.dll
 tests/fdc_eot
 tests/fdc_write
+tests/ini

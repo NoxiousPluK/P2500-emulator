@@ -57,6 +57,7 @@
 #include "core/version.h"
 
 #include "icon.h"
+#include "prefs.h"
 #include "panels.h"
 
 #define SCALE_DEFAULT 2
@@ -76,7 +77,7 @@
  * active - 82% of the raster width and 93% of its height - so the true dot
  * aspect is 1.89. Deliberately not modelled: filling the raster would put a
  * permanent border inside the render area, and usability on a modern display
- * was chosen over that.
+ * was chosen over that. */
 #define DISPLAY_ASPECT_W 4
 #define DISPLAY_ASPECT_H 3
 
@@ -94,9 +95,12 @@
  * unreasonable intermediate texture. 8 covers 640x288 -> 5120x2304. */
 #define PRESCALE_MAX 8
 
-/* Pixel aspect. 4:3 is the default: it is what the machine looked like, and
- * what anyone who used one remembers. */
-enum { ASPECT_43 = 0, ASPECT_SQUARE = 1 };
+/* Pixel aspect (ASPECT_43 | ASPECT_SQUARE) and the interface theme
+ * (THEME_DARK | THEME_PAPER) are declared in prefs.h, along with every
+ * accepted spelling of them: the settings file, P2500_DISPLAY and the flags
+ * all have to agree, and only one of the three is in this file. 4:3 is the
+ * default - it is what the machine looked like, and what anyone who used
+ * one remembers. */
 
 /* Named rather than an anonymous typedef: it holds C++ members with
  * default initialisers now, which an anonymous struct cannot carry across a
@@ -219,6 +223,14 @@ struct App {
     char save_path[1024];
     unsigned saving_unit;
     char status[160];            /* last action, shown at the right of the bar */
+
+    /* The preferences file (prefs.h). Resolved once at startup; prefs_on is
+     * false under P2500_CONFIG=none, which is how the test suite keeps a
+     * developer's saved settings out of a check. prefs_on_disk is what was
+     * last written, so a frame in which nothing changed writes nothing. */
+    char prefs_path[1024] = {0};
+    bool prefs_on = false;
+    P2500Prefs prefs_on_disk;
 
     /* Cartridge slot (port $0F) - SESAM keys are its best-documented use,
      * but the slot is generic, so this also accepts an arbitrary cartridge
@@ -777,8 +789,8 @@ static void save_disk(App *app, unsigned unit, const char *path)
  *
  * PAPER exists for the same reason the white phosphor does: dark-on-light is
  * what some people can actually read. It is deliberately a *separate* setting
- * from the screen's phosphor, so either can be changed without the other. */
-enum { THEME_DARK = 0, THEME_PAPER = 1 };
+ * from the screen's phosphor, so either can be changed without the other.
+ * The enum itself is in prefs.h - see the note by ASPECT_43. */
 
 struct ThemeColour { ImGuiCol_ idx; ImVec4 c; };
 
@@ -893,18 +905,6 @@ static void letterbox_rgb(int theme, uint8_t out[3])
 {
     (void)theme;
     out[0] = 4; out[1] = 4; out[2] = 4;
-}
-
-static bool parse_theme(const char *v, int *out)
-{
-    if (!SDL_strcasecmp(v, "dark"))  { *out = THEME_DARK;  return true; }
-    if (!SDL_strcasecmp(v, "paper") || !SDL_strcasecmp(v, "light")) { *out = THEME_PAPER; return true; }
-    return false;
-}
-
-static const char *theme_name(int theme)
-{
-    return theme == THEME_PAPER ? "paper" : "dark";
 }
 
 /* Square corners and roomy padding in both themes: the metrics are not what
@@ -1845,41 +1845,44 @@ static bool make_screen_texture(App *app)
     return app->fb != NULL;
 }
 
-/* Display settings come from two places: P2500_DISPLAY in the environment,
- * and --aspect / --snap on the command line, with the flags winning.
+/* Which tier-one setting is which, for the provenance array. The order is
+ * the order the `settings:` line reports them in, and that line is what
+ * makes the precedence rule testable rather than merely documented. */
+enum { SRC_ASPECT, SRC_SNAP, SRC_PHOSPHOR, SRC_THEME, SRC_SPEED, SRC_CAPS,
+       SRC_PANELS, SRC_COUNT };
+
+static const char *source_name(P2500PrefSource s)
+{
+    switch (s) {
+    case P2500_PREF_FILE: return "file";
+    case P2500_PREF_ENV:  return "env";
+    case P2500_PREF_FLAG: return "flag";
+    default: return "default";
+    }
+}
+
+/* Display settings come from FOUR places now, lowest precedence first: the
+ * built-in defaults, the preferences file (prefs.h), P2500_DISPLAY in the
+ * environment, and --aspect / --snap on the command line.
  *
  * The env var exists for the test suite. It has 54 p2500-gui invocations,
  * and threading two new flags through all of them is a bug factory;
  * run_tests.sh exports P2500_DISPLAY=aspect=square,snap=on once at the top
  * instead, which pins the whole suite to the pre-2026-10 geometry so no
- * existing capture moves. It is also the override a config file would need,
- * if one is ever added, to keep a developer's saved settings out of the
- * suite. Both are parsed into sentinels first so "not given" stays
- * distinguishable from "given the default".
+ * existing capture moves. It sits ABOVE the preferences file precisely so a
+ * developer's saved settings cannot reach the suite - and the suite also
+ * sets P2500_CONFIG=none, which switches the file off entirely, because an
+ * override only covers the settings it names. All of them are parsed into
+ * sentinels first so "not given" stays distinguishable from "given the
+ * default".
  *
  * Returns false on a value it does not recognise: a typo in an environment
  * variable that silently changed how the screen was rendered would be a
  * miserable thing to debug. */
-static bool parse_aspect(const char *v, int *out)
-{
-    if (!SDL_strcasecmp(v, "43") || !SDL_strcasecmp(v, "4:3")) { *out = ASPECT_43; return true; }
-    if (!SDL_strcasecmp(v, "square") || !SDL_strcasecmp(v, "1:1")) { *out = ASPECT_SQUARE; return true; }
-    return false;
-}
-
-static bool parse_onoff(const char *v, int *out)
-{
-    if (!SDL_strcasecmp(v, "on") || !SDL_strcasecmp(v, "1") ||
-        !SDL_strcasecmp(v, "yes") || !SDL_strcasecmp(v, "true")) { *out = 1; return true; }
-    if (!SDL_strcasecmp(v, "off") || !SDL_strcasecmp(v, "0") ||
-        !SDL_strcasecmp(v, "no") || !SDL_strcasecmp(v, "false")) { *out = 0; return true; }
-    return false;
-}
-
 /* P2500_DISPLAY is a comma-separated list of key=value pairs. Unknown keys
  * are rejected rather than ignored, for the same reason as above. */
 static bool parse_display_env(const char *env, int *aspect, int *snap, int *phosphor,
-                              int *theme)
+                              int *theme, P2500PrefSource *src)
 {
     char buf[256];
     SDL_strlcpy(buf, env, sizeof buf);
@@ -1891,14 +1894,17 @@ static bool parse_display_env(const char *env, int *aspect, int *snap, int *phos
         *eq = '\0';
         const char *key = tok, *val = eq + 1;
         if (!SDL_strcasecmp(key, "aspect")) {
-            if (!parse_aspect(val, aspect)) { SDL_Log("P2500_DISPLAY aspect: '%s' is not 4:3 or square", val); ok = false; }
+            if (!p2500_parse_aspect(val, aspect)) { SDL_Log("P2500_DISPLAY aspect: '%s' is not 4:3 or square", val); ok = false; }
+            else src[SRC_ASPECT] = P2500_PREF_ENV;
         } else if (!SDL_strcasecmp(key, "snap")) {
-            if (!parse_onoff(val, snap)) { SDL_Log("P2500_DISPLAY snap: '%s' is not on or off", val); ok = false; }
+            if (!p2500_parse_onoff(val, snap)) { SDL_Log("P2500_DISPLAY snap: '%s' is not on or off", val); ok = false; }
+            else src[SRC_SNAP] = P2500_PREF_ENV;
         } else if (!SDL_strcasecmp(key, "theme")) {
-            if (!parse_theme(val, theme)) { SDL_Log("P2500_DISPLAY theme: '%s' is not dark or paper", val); ok = false; }
+            if (!p2500_parse_theme(val, theme)) { SDL_Log("P2500_DISPLAY theme: '%s' is not dark or paper", val); ok = false; }
+            else src[SRC_THEME] = P2500_PREF_ENV;
         } else if (!SDL_strcasecmp(key, "phosphor")) {
             P2500PhosphorId id;
-            if (p2500_phosphor_by_name(val, &id)) *phosphor = (int)id;
+            if (p2500_phosphor_by_name(val, &id)) { *phosphor = (int)id; src[SRC_PHOSPHOR] = P2500_PREF_ENV; }
             else { SDL_Log("P2500_DISPLAY phosphor: no such screen colour '%s'", val); ok = false; }
         } else {
             SDL_Log("P2500_DISPLAY: unknown setting '%s'", key);
@@ -1938,10 +1944,77 @@ static void usage(FILE *out)
                  "\nA mounted disk is writable in memory and never written back to\n"
                  "the file it came from: File > Save Disk As... keeps the changes,\n"
                  "and --write-protect ab mounts those drives read-only.\n"
+                 "\nThe View and Machine menus' settings are remembered in a\n"
+                 "settings.ini under your config directory, and are overridden by\n"
+                 "P2500_DISPLAY and by the flags above. P2500_CONFIG=none ignores\n"
+                 "that file; P2500_CONFIG=PATH uses one of your choosing. Mounted\n"
+                 "disks and the cartridge key are deliberately NOT remembered.\n"
                  "\nWith no --symbols, the shipped symbols/*.sym are matched against\n"
                  "the running build by fingerprint and the one that fits is loaded.\n"
                  "\nAddresses are hex. Symbol files are one `ADDR NAME` per line;\n"
                  "symbols/ipl.sym and symbols/cpm.sym ship with the emulator.\n");
+}
+
+/* The five debugger panels, in the order prefs.cpp stores them, rendered
+ * for the `settings:` line: "system,log", or "-" for none. */
+static const char *panel_list(const App *app)
+{
+    static char buf[64];
+    static const char *name[5] = { "system", "devices", "memory", "disasm", "log" };
+    const bool on[5] = { app->panels.show_system, app->panels.show_devices,
+                         app->panels.show_memory, app->panels.show_disasm,
+                         app->panels.show_log };
+    buf[0] = '\0';
+    for (int i = 0; i < 5; i++) {
+        if (!on[i]) continue;
+        if (buf[0]) SDL_strlcat(buf, ",", sizeof buf);
+        SDL_strlcat(buf, name[i], sizeof buf);
+    }
+    if (!buf[0]) SDL_strlcpy(buf, "-", sizeof buf);
+    return buf;
+}
+
+/* The tier-one settings as they stand right now. */
+static void prefs_snapshot(const App *app, P2500Prefs *out)
+{
+    out->aspect = app->aspect;
+    out->snap = app->snap ? 1 : 0;
+    out->phosphor = (int)app->phosphor;
+    out->theme = app->theme;
+    out->speed = app->speed;
+    out->caps_lock = app->caps_lock ? 1 : 0;
+    out->panel[0] = app->panels.show_system;
+    out->panel[1] = app->panels.show_devices;
+    out->panel[2] = app->panels.show_memory;
+    out->panel[3] = app->panels.show_disasm;
+    out->panel[4] = app->panels.show_log;
+}
+
+static bool prefs_equal(const P2500Prefs &a, const P2500Prefs &b)
+{
+    if (a.aspect != b.aspect || a.snap != b.snap || a.phosphor != b.phosphor ||
+        a.theme != b.theme || a.speed != b.speed || a.caps_lock != b.caps_lock)
+        return false;
+    for (int i = 0; i < 5; i++) if (a.panel[i] != b.panel[i]) return false;
+    return true;
+}
+
+/* Write the preferences if, and only if, one of them has changed since the
+ * last write. Called once per frame rather than from each of the dozen
+ * places that can change one: a menu item, a keyboard shortcut, a click on
+ * a lamp and a panel's own close button are all the same event here, and a
+ * setting added later is covered without anyone having to remember to.
+ * The cost of the check is seven comparisons. */
+static void prefs_sync(App *app)
+{
+    if (!app->prefs_on) return;
+    P2500Prefs now;
+    prefs_snapshot(app, &now);
+    if (prefs_equal(now, app->prefs_on_disk)) return;
+    /* Recorded before the write rather than after: a file that cannot be
+     * written must be complained about once, not once per frame. */
+    app->prefs_on_disk = now;
+    p2500_prefs_save(app->prefs_path, now);
 }
 
 SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[])
@@ -1952,10 +2025,28 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[])
     int scale = SCALE_DEFAULT;
     /* An explicit window size, overriding the one --scale implies. */
     int win_w_arg = 0, win_h_arg = 0;
-    /* -1 = not given, so P2500_DISPLAY and the flags can be told apart. */
-    int aspect = -1, snap = -1, phosphor = -1, theme = -1;
+    /* Precedence, bottom up: defaults < the preferences file < P2500_DISPLAY
+     * < these flags. -1 means "nothing has said anything about this yet", so
+     * each layer can tell "not given" from "given the default", and the
+     * provenance array records which layer last spoke. */
+    P2500PrefSource src[SRC_COUNT];
+    for (int i = 0; i < SRC_COUNT; i++) src[i] = P2500_PREF_DEFAULT;
+
+    char cfgbuf[sizeof ((App *)0)->prefs_path];
+    const char *cfgpath = p2500_prefs_path(cfgbuf, sizeof cfgbuf);
+    P2500Prefs prefs;
+    size_t prefs_bad = 0;
+    if (cfgpath) p2500_prefs_load(cfgpath, &prefs, &prefs_bad);
+
+    int aspect = prefs.aspect, snap = prefs.snap, phosphor = prefs.phosphor,
+        theme = prefs.theme;
+    if (aspect >= 0) src[SRC_ASPECT] = P2500_PREF_FILE;
+    if (snap >= 0) src[SRC_SNAP] = P2500_PREF_FILE;
+    if (phosphor >= 0) src[SRC_PHOSPHOR] = P2500_PREF_FILE;
+    if (theme >= 0) src[SRC_THEME] = P2500_PREF_FILE;
+
     if (const char *env = SDL_getenv("P2500_DISPLAY")) {
-        if (!parse_display_env(env, &aspect, &snap, &phosphor, &theme)) {
+        if (!parse_display_env(env, &aspect, &snap, &phosphor, &theme, src)) {
             usage(stderr);
             return SDL_APP_FAILURE;
         }
@@ -1963,10 +2054,14 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[])
     unsigned long frame_limit = 0;
     const char *shot_path = NULL;
     const char *win_shot_path = NULL;
-    bool caps_lock = true; /* as the disks ship */
+    /* Capitals lock is engaged as the disks ship; the file may remember it
+     * off, and --no-caps-lock still wins over both. */
+    bool caps_lock = prefs.caps_lock < 0 ? true : prefs.caps_lock > 0;
+    if (prefs.caps_lock >= 0) src[SRC_CAPS] = P2500_PREF_FILE;
     unsigned write_protect = 0;
     bool force_pacing = false;
-    float speed = 1.0f;
+    float speed = prefs.speed < 0.0f ? 1.0f : prefs.speed;
+    if (prefs.speed >= 0.0f) src[SRC_SPEED] = P2500_PREF_FILE;
     unsigned long push_at[MAX_PUSHES] = {0};
     const char *push_text[MAX_PUSHES] = {0};
     int npush = 0;
@@ -2038,18 +2133,20 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[])
         }
         else if (!strcmp(argv[i], "--frames") && i + 1 < argc) frame_limit = strtoul(argv[++i], NULL, 0);
         else if (!strcmp(argv[i], "--aspect") && i + 1 < argc) {
-            if (!parse_aspect(argv[++i], &aspect)) {
+            if (!p2500_parse_aspect(argv[++i], &aspect)) {
                 SDL_Log("--aspect: expected 4:3 or square, got %s", argv[i]);
                 usage(stderr);
                 return SDL_APP_FAILURE;
             }
+            src[SRC_ASPECT] = P2500_PREF_FLAG;
         }
         else if (!strcmp(argv[i], "--snap") && i + 1 < argc) {
-            if (!parse_onoff(argv[++i], &snap)) {
+            if (!p2500_parse_onoff(argv[++i], &snap)) {
                 SDL_Log("--snap: expected on or off, got %s", argv[i]);
                 usage(stderr);
                 return SDL_APP_FAILURE;
             }
+            src[SRC_SNAP] = P2500_PREF_FLAG;
         }
         else if (!strcmp(argv[i], "--phosphor") && i + 1 < argc) {
             P2500PhosphorId id;
@@ -2059,17 +2156,19 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[])
                 return SDL_APP_FAILURE;
             }
             phosphor = (int)id;
+            src[SRC_PHOSPHOR] = P2500_PREF_FLAG;
         }
         else if (!strcmp(argv[i], "--theme") && i + 1 < argc) {
-            if (!parse_theme(argv[++i], &theme)) {
+            if (!p2500_parse_theme(argv[++i], &theme)) {
                 SDL_Log("--theme: expected dark or paper, got %s", argv[i]);
                 usage(stderr);
                 return SDL_APP_FAILURE;
             }
+            src[SRC_THEME] = P2500_PREF_FLAG;
         }
         else if (!strcmp(argv[i], "--screenshot") && i + 1 < argc) shot_path = argv[++i];
         else if (!strcmp(argv[i], "--shot-window") && i + 1 < argc) win_shot_path = argv[++i];
-        else if (!strcmp(argv[i], "--no-caps-lock")) caps_lock = false;
+        else if (!strcmp(argv[i], "--no-caps-lock")) { caps_lock = false; src[SRC_CAPS] = P2500_PREF_FLAG; }
         /* --frames runs flat out so tests do not wait; --paced puts the 50 Hz
          * throttle back, which is how the throttle itself gets tested. */
         else if (!strcmp(argv[i], "--paced")) force_pacing = true;
@@ -2080,11 +2179,12 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[])
             speed = (!strcmp(s, "unlimited") || !strcmp(s, "max")) ? 0.0f
                                                                   : (float)atof(s);
             if (speed < 0.0f) speed = 0.0f;
+            src[SRC_SPEED] = P2500_PREF_FLAG;
         }
         /* The debug flags exist so the panels can be driven - and captured -
          * with no display, the same way --frames/--shot-window already let
          * the screen be checked headlessly. */
-        else if (!strcmp(argv[i], "--panels") && i + 1 < argc) panels_arg = argv[++i];
+        else if (!strcmp(argv[i], "--panels") && i + 1 < argc) { panels_arg = argv[++i]; src[SRC_PANELS] = P2500_PREF_FLAG; }
         else if (!strcmp(argv[i], "--verbose-io")) verbose_devices = true;
         else if (!strcmp(argv[i], "--ui-type") && i + 1 < argc && ui_type_steps < MAX_PUSHES) {
             char *arg = argv[++i], *colon = strchr(arg, ':');
@@ -2283,12 +2383,23 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[])
     app->symbols_auto = (nsymfile == 0);
     load_symbol_files(app);
     p2500_debug_baseline(&app->dbg, &app->m);
+    /* --panels names the whole set, so it replaces whatever the file
+     * remembered rather than merging with it. */
     if (panels_arg) {
         app->panels.show_system = strstr(panels_arg, "system") != NULL;
         app->panels.show_devices = strstr(panels_arg, "devices") != NULL;
         app->panels.show_memory = strstr(panels_arg, "memory") != NULL;
         app->panels.show_disasm = strstr(panels_arg, "disasm") != NULL;
         app->panels.show_log = strstr(panels_arg, "log") != NULL;
+    } else {
+        bool *shown[5] = { &app->panels.show_system, &app->panels.show_devices,
+                           &app->panels.show_memory, &app->panels.show_disasm,
+                           &app->panels.show_log };
+        for (int i = 0; i < 5; i++) {
+            if (prefs.panel[i] < 0) continue;
+            *shown[i] = prefs.panel[i] > 0;
+            src[SRC_PANELS] = P2500_PREF_FILE;
+        }
     }
     app->panels.verbose_devices = verbose_devices;
     app->ui_types = ui_type_steps;
@@ -2303,6 +2414,38 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[])
         app->mouse[i].y = mouse_script[i].y;
         app->mouse[i].button = mouse_script[i].button;
     }
+
+    /* Where the preferences came from and where they will go. Reported
+     * unconditionally rather than only on a change, because "which of the
+     * four layers set this" is exactly the question that is impossible to
+     * answer afterwards from a screenshot - and because it is what makes
+     * the precedence rule a check in the suite rather than a comment. */
+    app->prefs_on = cfgpath != NULL;
+    if (cfgpath) SDL_strlcpy(app->prefs_path, cfgpath, sizeof app->prefs_path);
+    if (!app->prefs_on)
+        SDL_Log("config: off (P2500_CONFIG=none)");
+    else if (prefs_bad)
+        SDL_Log("config: %s (%zu line%s not understood, and kept)", app->prefs_path,
+                prefs_bad, prefs_bad == 1 ? "" : "s");
+    else
+        SDL_Log("config: %s", app->prefs_path);
+
+    char speedlab[16];
+    speed_label(app->speed, speedlab, sizeof speedlab);
+    SDL_Log("settings: aspect %s (%s), snap %s (%s), phosphor %s (%s),"
+            " theme %s (%s), speed %s (%s), caps-lock %s (%s), panels %s (%s)",
+            p2500_aspect_name(app->aspect), source_name(src[SRC_ASPECT]),
+            app->snap ? "on" : "off", source_name(src[SRC_SNAP]),
+            p2500_phosphor_name(app->phosphor), source_name(src[SRC_PHOSPHOR]),
+            p2500_theme_name(app->theme), source_name(src[SRC_THEME]),
+            speedlab, source_name(src[SRC_SPEED]),
+            app->caps_lock ? "on" : "off", source_name(src[SRC_CAPS]),
+            panel_list(app), source_name(src[SRC_PANELS]));
+
+    /* The baseline for the write-on-change check below: whatever the four
+     * layers resolved to is what the user is looking at, so nothing is
+     * written until they change something. */
+    prefs_snapshot(app, &app->prefs_on_disk);
 
     SDL_StartTextInput(app->window);
     set_status(app, disks[0] ? "ready" : "no disk - File > Load Disk A...");
@@ -2576,7 +2719,7 @@ SDL_AppResult SDL_AppIterate(void *appstate)
                 app->snap ? "on" : "off", snapped,
                 lay.direct_linear ? "linear" : lay.two_pass ? "two-pass" : "nearest",
                 lay.pre_mx, lay.pre_my,
-                p2500_phosphor_name(app->phosphor), theme_name(app->theme),
+                p2500_phosphor_name(app->phosphor), p2500_theme_name(app->theme),
                 lb[0], lb[1], lb[2],
                 (bg >> 16) & 0xFF, (bg >> 8) & 0xFF, bg & 0xFF);
         if (app->panels.goto_geom.field_x >= 0.0f)
@@ -2614,6 +2757,10 @@ SDL_AppResult SDL_AppIterate(void *appstate)
     if (app->has_ui)
         ImGui_ImplSDLRenderer3_RenderDrawData(ImGui::GetDrawData(), app->renderer);
     SDL_RenderPresent(app->renderer);
+
+    /* On change, not at exit: a crash must not cost a setting, and the file
+     * is a few hundred bytes. */
+    prefs_sync(app);
 
     pace_field(app);
 

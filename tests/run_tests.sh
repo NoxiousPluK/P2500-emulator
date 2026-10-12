@@ -51,6 +51,13 @@
 #               mapped / attached-but-unmapped / empty as three distinct
 #               brightnesses.
 #   22.Cart   - the cartridge slot's stream and traffic in the report.
+#   25.Ini    - the configuration syntax: what the TOML subset accepts, what
+#               it refuses rather than guesses at, and the preservation the
+#               profiles and media metadata will depend on. Runs against the
+#               core directly.
+#   26.Prefs  - the preferences file: the four-layer precedence, the
+#               poison-file isolation that keeps a developer's settings out
+#               of this suite, writing on change, and surviving a hand-edit.
 #   24.Cartpath- and the whole path end to end: the manufacturer's own
 #               P2490 BASIC probe must print back the exact key fed in
 #               through --cartridge, say NO SESAM for an empty slot, and
@@ -81,6 +88,14 @@ cd "$(dirname "$SELF")/.."
 # covered only by section 7's own aspect checks, which therefore have to be
 # real comparisons rather than smoke tests.
 export P2500_DISPLAY=aspect=square,snap=on
+
+# And switch the preferences file off for the whole suite. P2500_DISPLAY
+# above pins the settings it names; this pins the ones it does not, which is
+# the rest of them - speed, capitals lock, which debugger panels are open.
+# A developer's saved settings must not be able to reach a check, and a
+# check must not be able to write to a developer's file either. Section 26
+# tests the preferences themselves and names its own file every time.
+export P2500_CONFIG=none
 
 EMU=./p2500-emu
 DISK="disks/P25K_B.raw"
@@ -124,7 +139,7 @@ gui_report() {
 SECTIONS='1:sesam 1b:banner 1c:reset 2:ipl 3:cpm 4:dir 4a:driveb 4b:swap 4c:game
 5:banktrip 6:render 7:gui 8:debug 9:log 10:cpmbuild 11:graphics 12:demos
 13:speed 14:eot 15:rewind 16:symbols 17:drives 18:derived 19:images
-20:sysinfo 21:lamps 22:cart 23:write 24:cartpath'
+20:sysinfo 21:lamps 22:cart 23:write 24:cartpath 25:ini 26:prefs'
 
 usage() {
     cat <<USAGE
@@ -2709,6 +2724,207 @@ CARTPATH
         fi
     fi
 fi
+}
+
+sec_25() {
+echo "== 25. The configuration syntax: the subset, and what it preserves (T97)"
+# tests/ini.c links libp2500.a directly, for the same reason tests/fdc_eot.c
+# does: the claim is about bytes in a file, not about anything the machine
+# can be driven to do. It is the parser three things share - the preferences
+# file here, and the named profiles and media metadata still to come - so
+# what it refuses and what it keeps are both worth pinning now rather than
+# after two more consumers depend on them.
+#
+# Its output is one line per claim, replayed through pass/fail so those
+# claims count towards this script's total instead of merely appearing in it.
+if [ -x ./tests/ini ]; then
+    ./tests/ini >"$TMP/ini.log" 2>&1
+    rc=$?
+    sed -n 's/^  PASS  //p' "$TMP/ini.log" >"$TMP/ini.pass"
+    sed -n 's/^  FAIL  //p' "$TMP/ini.log" >"$TMP/ini.fail"
+    while IFS= read -r c; do pass "$c"; done <"$TMP/ini.pass"
+    while IFS= read -r c; do fail "$c"; done <"$TMP/ini.fail"
+    if [ ! -s "$TMP/ini.pass" ] && [ ! -s "$TMP/ini.fail" ]; then
+        fail "tests/ini named no checks at all"
+    elif [ "$rc" -ne 0 ] && [ ! -s "$TMP/ini.fail" ]; then
+        fail "tests/ini exited $rc without naming a failed check"
+    fi
+else
+    fail "tests/ini is not built (make tests/ini)"
+fi
+}
+
+sec_26() {
+echo "== 26. The preferences file: precedence, isolation, and writing on change (T97)"
+# Four layers decide every presentation setting - defaults, the file,
+# P2500_DISPLAY, the flags - and the front-end's own `settings:` line names
+# the value AND the layer it came from, which is what makes the precedence
+# testable rather than merely documented.
+if [ ! -x ./p2500-gui ]; then
+    echo "  (skipped: no ./p2500-gui)"
+    return
+fi
+CFG="$TMP/cfg/settings.ini"
+# Every run below names its own config file. None of them may touch the
+# developer's: that is what the first check is about.
+gset() { sed -n "s/^settings: .*$1 \([^ ]*\) (\([a-z]*\)).*/\1 \2/p" "$2" | head -1; }
+
+# --- the isolation, which is the one that must not be a happy path -------
+# A POISON file: every value set to the opposite of its default, with
+# P2500_CONFIG=none. If the override leaks, every one of these comes back
+# instead of the defaults, and the whole suite would quietly be running on
+# whatever a developer last clicked.
+mkdir -p "$TMP/cfg"
+cat >"$TMP/poison.ini" <<'POISON'
+[display]
+aspect = "square"
+snap = true
+phosphor = "white"
+theme = "paper"
+
+[machine]
+speed = 0.25
+caps_lock = false
+
+[panels]
+system = true
+devices = true
+memory = true
+disasm = true
+log = true
+POISON
+P2500_CONFIG=none SDL_VIDEODRIVER=dummy env -u P2500_DISPLAY ./p2500-gui \
+    --frames 3 >"$TMP/poison.log" 2>&1
+if grep -q '^config: off (P2500_CONFIG=none)' "$TMP/poison.log"; then
+    pass "P2500_CONFIG=none reports the file as off"
+else fail "P2500_CONFIG=none did not report the file as off"; fi
+if grep -q '^settings: aspect 4:3 (default), snap off (default), phosphor green (default), theme dark (default), speed 1x (default), caps-lock on (default), panels - (default)$' "$TMP/poison.log"; then
+    pass "and a file setting every value wrong changes nothing: all seven are defaults"
+else
+    fail "P2500_CONFIG=none did not hold every setting at its default"
+    grep '^settings:' "$TMP/poison.log"
+fi
+# The poison file must be POISON - i.e. it has to be capable of changing
+# things, or the check above proves nothing at all.
+P2500_CONFIG="$TMP/poison.ini" SDL_VIDEODRIVER=dummy env -u P2500_DISPLAY ./p2500-gui \
+    --frames 3 >"$TMP/poison-on.log" 2>&1
+if grep -q '^settings: aspect square (file), snap on (file), phosphor white (file), theme paper (file), speed 0.25x (file), caps-lock off (file), panels system,devices,memory,disasm,log (file)$' "$TMP/poison-on.log"; then
+    pass "...and that same file DOES change all seven when it is not suppressed"
+else
+    fail "the poison file changed nothing, so the isolation check proves nothing"
+    grep '^settings:' "$TMP/poison-on.log"
+fi
+
+# --- precedence: defaults < file < P2500_DISPLAY < flags -----------------
+cat >"$CFG" <<'PREFS'
+[display]
+aspect = "square"
+theme = "paper"
+PREFS
+P2500_CONFIG="$CFG" P2500_DISPLAY=aspect=4:3 SDL_VIDEODRIVER=dummy ./p2500-gui \
+    --frames 3 --theme dark >"$TMP/prec.log" 2>&1
+if [ "$(gset aspect "$TMP/prec.log")" = "4:3 env" ]; then
+    pass "P2500_DISPLAY beats the file"
+else fail "P2500_DISPLAY did not beat the file (got '$(gset aspect "$TMP/prec.log")')"; fi
+if [ "$(gset theme "$TMP/prec.log")" = "dark flag" ]; then
+    pass "a flag beats the file"
+else fail "a flag did not beat the file (got '$(gset theme "$TMP/prec.log")')"; fi
+if [ "$(gset snap "$TMP/prec.log")" = "off default" ]; then
+    pass "and a setting nobody mentioned stays at its default"
+else fail "an unmentioned setting did not stay at its default"; fi
+# A flag must beat P2500_DISPLAY too - the two top layers, which no single
+# run above distinguishes.
+P2500_CONFIG=none P2500_DISPLAY=aspect=square SDL_VIDEODRIVER=dummy ./p2500-gui \
+    --frames 3 --aspect 4:3 >"$TMP/prec2.log" 2>&1
+if [ "$(gset aspect "$TMP/prec2.log")" = "4:3 flag" ]; then
+    pass "a flag beats P2500_DISPLAY"
+else fail "a flag did not beat P2500_DISPLAY"; fi
+
+# --- surviving a hand-edit ----------------------------------------------
+# The property the profiles and the media metadata will depend on: a file
+# someone edited by hand, carrying a section this build has never heard of,
+# must come back out of a save with everything it arrived with.
+cat >"$TMP/hand.ini" <<'HAND'
+# My settings. Do not reformat.
+[display]
+phosphor  = "white"    # easier on my eyes
+
+[from-a-later-version]
+cards = ["fdc2", "sio"]
+HAND
+cp "$TMP/hand.ini" "$TMP/hand-before.ini"
+gui_report
+L_SPEED=$(sed -n 's/.*lamps: .*speed \([0-9]*\).*/\1/p' "$TMP/gui_report.log" | head -1)
+if [ -z "$L_SPEED" ]; then
+    fail "the front-end did not report the speed cell's column"
+else
+    # Clicking the speed cell changes a setting, which is what triggers a
+    # write - no separate "save" action exists, by design.
+    P2500_CONFIG="$TMP/hand.ini" SDL_VIDEODRIVER=dummy ./p2500-gui \
+        --disk "$DISK" --frames 30 --mouse "$L_SPEED,11,left" \
+        >"$TMP/hand.log" 2>&1
+    if grep -q 'speed = "unlimited"' "$TMP/hand.ini"; then
+        pass "changing a setting writes the file, with no save action"
+    else fail "changing a setting did not write the file"; fi
+    if grep -q '^# My settings. Do not reformat.$' "$TMP/hand.ini" &&
+       grep -q '^phosphor  = "white"    # easier on my eyes$' "$TMP/hand.ini"; then
+        pass "a hand-edited line this version did not change is byte-identical afterwards"
+    else
+        fail "a hand-edited line was reformatted or lost"
+        diff "$TMP/hand-before.ini" "$TMP/hand.ini"
+    fi
+    if grep -q '^\[from-a-later-version\]$' "$TMP/hand.ini" &&
+       grep -q '^cards = \["fdc2", "sio"\]$' "$TMP/hand.ini"; then
+        pass "and a section this version does not understand survives the write"
+    else fail "an unknown section was dropped on write"; fi
+    # And the file it wrote must load back as itself.
+    P2500_CONFIG="$TMP/hand.ini" SDL_VIDEODRIVER=dummy env -u P2500_DISPLAY \
+        ./p2500-gui --frames 3 >"$TMP/hand2.log" 2>&1
+    if [ "$(gset phosphor "$TMP/hand2.log")" = "white file" ] &&
+       [ "$(gset speed "$TMP/hand2.log")" = "unlimited file" ]; then
+        pass "the written file loads back as itself"
+    else
+        fail "the written file did not load back"
+        grep '^settings:' "$TMP/hand2.log"
+    fi
+fi
+
+# --- a broken file must not stop the emulator ---------------------------
+# A settings file is hand-editable, so it WILL be mis-typed. One bad line
+# costs that line; the rest of the file still loads and the machine starts.
+cat >"$TMP/bad.ini" <<'BAD'
+[display]
+phosphor = white
+theme = "paper"
+BAD
+P2500_CONFIG="$TMP/bad.ini" SDL_VIDEODRIVER=dummy env -u P2500_DISPLAY ./p2500-gui \
+    --frames 3 >"$TMP/bad.log" 2>&1
+rc=$?
+if [ "$rc" -eq 0 ] && [ "$(gset theme "$TMP/bad.log")" = "paper file" ]; then
+    pass "a line that does not parse costs that line and nothing else"
+else fail "a bad line in the settings file broke the run (exit $rc)"; fi
+if grep -q 'not understood' "$TMP/bad.log"; then
+    pass "and the file says so rather than failing silently"
+else fail "a bad line was not reported"; fi
+
+# --- refusing a file whose meaning changed ------------------------------
+# `requires` is the half that "ignore unknown keys" cannot do: a file naming
+# a feature this build has never heard of must be refused outright, not
+# half-loaded - and must be left alone so a newer build still reads it.
+cat >"$TMP/req.ini" <<'REQ'
+requires = ["prefs1", "something-from-2027"]
+[display]
+theme = "paper"
+REQ
+cp "$TMP/req.ini" "$TMP/req-before.ini"
+P2500_CONFIG="$TMP/req.ini" SDL_VIDEODRIVER=dummy env -u P2500_DISPLAY ./p2500-gui \
+    --frames 3 >"$TMP/req.log" 2>&1
+if [ "$(gset theme "$TMP/req.log")" = "dark default" ]; then
+    pass "a file requiring an unknown feature is refused, not half-loaded"
+else fail "a file with an unmet requires was loaded anyway"; fi
+if cmp -s "$TMP/req.ini" "$TMP/req-before.ini"; then
+    pass "and is left untouched, so a newer build can still read it"
+else fail "a refused settings file was overwritten"; fi
 }
 
 ran=0

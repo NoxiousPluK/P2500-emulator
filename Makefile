@@ -88,10 +88,13 @@ DEPS = $(CORE_OBJ:.o=.d) $(CLI_OBJ:.o=.d) $(GUI_OBJ:.o=.d) $(IMGUI_OBJ:.o=.d)
 
 # Core-level test binaries: these link libp2500.a directly, because what
 # they check cannot be reached through any guest program this project has -
-# a read bounded by EOT, and the write paths no surviving software takes
-# (FORMAT TRACK, the write-protect tab, a DMA programmed the wrong way).
+# a read bounded by EOT, the write paths no surviving software takes
+# (FORMAT TRACK, the write-protect tab, a DMA programmed the wrong way), and
+# the configuration syntax, whose load-bearing claim is about bytes in a
+# file rather than about anything the machine does.
 # Built by `make test`, not part of `all`.
-TEST_BIN = tests/fdc_eot$(EXE_SUFFIX) tests/fdc_write$(EXE_SUFFIX)
+TEST_BIN = tests/fdc_eot$(EXE_SUFFIX) tests/fdc_write$(EXE_SUFFIX) \
+           tests/ini$(EXE_SUFFIX)
 
 .PHONY: all clean run test gui demos
 
