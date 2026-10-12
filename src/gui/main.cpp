@@ -693,7 +693,7 @@ static void save_disk(App *app, unsigned unit, const char *path)
     const char *base = SDL_strrchr(path, '/');
     set_status(app, "%c: saved to %s (%lu sector(s) written)", 'A' + (int)unit,
                base ? base + 1 : path, app->m.fdc.sectors_written[unit]);
-    SDL_Log("drive %c: %zu bytes written to %s", 'A' + (int)unit, n, path);
+    SDL_Log("drive %c: %llu bytes written to %s", 'A' + (int)unit, (unsigned long long)n, path);
 }
 
 /* Deliberately not the default ImGui look: square, dark, and on the same
