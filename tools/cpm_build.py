@@ -27,8 +27,17 @@ directory files - SYSCPM.PHI, SYSCBI.PHI, SYSPBI.PHI, SYSLOAD.PHI - so a
 disk with the loader but no SYS*.PHI boots no further than the loader does.
 --boot-from copies both from a donor image.
 
+The two halves can also be supplied separately. --loader-from takes the
+reserved tracks alone and leaves the SYS*.PHI to the caller, which is what
+builds a disk around a system set the project holds loose rather than on any
+disk. The loader is generic - it looks SYSLOAD.PHI up through the directory
+by FCB - so it does not have to come from the same build, or even the same
+BIOS generation, as the modules it ends up loading: measured, a disk made
+this way prints the banner of its own modules, not its loader's.
+
 usage:
-    tools/cpm_build.py OUT.raw FILE [FILE ...] [--boot-from DONOR.raw]
+    tools/cpm_build.py OUT.raw FILE [FILE ...]
+                       [--boot-from DONOR.raw | --loader-from DONOR.raw]
 
     FILE may be HOSTPATH or HOSTPATH:NAME.EXT to rename it on the disk.
 
@@ -39,6 +48,11 @@ examples:
     # A disk that boots CP/M on its own, with one program added.
     tools/cpm_build.py othello.raw OTHELLO.COM \\
         --boot-from disks/P25K_B.raw
+
+    # A disk whose CP/M is a system set held loose, not the donor's.
+    tools/cpm_build.py loose58.raw \\
+        SYSCPM.PHI SYSCBI.PHI SYSPBI.PHI SYSLOAD.PHI \\
+        --loader-from disks/P25K_B.raw
 """
 
 import argparse
@@ -232,6 +246,8 @@ def main():
     ap.add_argument("files", nargs="*", help="HOSTPATH or HOSTPATH:NAME.EXT")
     ap.add_argument("--boot-from", metavar="DONOR",
                     help="copy the reserved tracks and SYS*.PHI from a bootable image")
+    ap.add_argument("--loader-from", metavar="DONOR",
+                    help="copy only the reserved tracks; the caller supplies SYS*.PHI")
     ap.add_argument("--tracks", type=int, default=TRACKS,
                     help=f"total tracks (default {TRACKS})")
     ap.add_argument("--user", type=int, default=0, help="CP/M user number (default 0)")
@@ -239,8 +255,20 @@ def main():
                     help="skip reading the result back (do not)")
     args = ap.parse_args()
 
+    if args.boot_from and args.loader_from:
+        raise SystemExit("--boot-from and --loader-from do the same job two "
+                         "different ways; pass one")
+
     b = Builder(args.tracks)
     expected = {}
+
+    if args.loader_from:
+        donor = Path(args.loader_from)
+        if not donor.exists():
+            raise SystemExit(f"{donor}: not found")
+        b.copy_reserved(donor.read_bytes())
+        print(f"Loader     : reserved tracks from {donor.name}, "
+              "SYS*.PHI from the command line")
 
     if args.boot_from:
         donor = Path(args.boot_from)
@@ -268,6 +296,13 @@ def main():
 
     if not b.entries:
         raise SystemExit("nothing to put on the disk")
+
+    if args.loader_from:
+        have = {n.upper() for n, *_ in b.added}
+        missing = [f for f in SYSTEM_FILES if f not in have]
+        if missing:
+            print(f"WARNING    : no {', '.join(missing)} on this disk - the "
+                  "loader will not get past looking for them")
 
     image = b.finish()
     Path(args.out).write_bytes(image)
