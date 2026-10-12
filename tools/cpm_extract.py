@@ -370,17 +370,24 @@ def verify(blob: bytes, ext: str, bls: int):
         # Microsoft BASIC saves tokenised by default; $FF is its marker.
         return None, f"tokenised BASIC, {ratio:.0%} printable"
     if ext.upper() in TEXT_EXTS:
+        # Judge the text, not the fill. With keep_padding the last record
+        # still carries its CP/M ^Z (or NUL) padding, and a text reader stops
+        # at the first ^Z - so counting the fill as content makes a short file
+        # look binary: 434 bytes padded to 512 scores 84.8%, well under the
+        # threshold, for a file that is entirely text.
+        body = blob.rstrip(b"\x1a\x00")
+        ratio = printable_ratio(body)
         if ratio < 0.99:
             return f"NOT TEXT ({ratio:.1%} printable)", ""
         bad = []
-        for k in range(1, -(-len(blob) // bls)):
+        for k in range(1, -(-len(body) // bls)):
             o = k * bls
-            if printable_ratio(blob[o - 32:o]) < 0.9 or printable_ratio(blob[o:o + 32]) < 0.9:
+            if printable_ratio(body[o - 32:o]) < 0.9 or printable_ratio(body[o:o + 32]) < 0.9:
                 bad.append(k)
         if bad:
-            return f"BAD BLOCK BOUNDARY at block {bad[0]} of {-(-len(blob)//bls)}", ""
-        lines = len(re.findall(rb"(?m)^\s*\d{1,5}[ \t]", blob))
-        nb = -(-len(blob) // bls) - 1
+            return f"BAD BLOCK BOUNDARY at block {bad[0]} of {-(-len(body)//bls)}", ""
+        lines = len(re.findall(rb"(?m)^\s*\d{1,5}[ \t]", body))
+        nb = -(-len(body) // bls) - 1
         return None, f"text, {lines} numbered lines, {nb} clean boundaries"
     if ext.upper() == "COM":
         return None, f"binary, {ratio:.0%} printable"

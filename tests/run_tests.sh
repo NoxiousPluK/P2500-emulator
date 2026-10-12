@@ -51,6 +51,10 @@
 #               mapped / attached-but-unmapped / empty as three distinct
 #               brightnesses.
 #   22.Cart   - the cartridge slot's stream and traffic in the report.
+#   24.Cartpath- and the whole path end to end: the manufacturer's own
+#               P2490 BASIC probe must print back the exact key fed in
+#               through --cartridge, say NO SESAM for an empty slot, and
+#               leave on/reset/3 bytes/off on the port in that order (T93).
 #
 # usage: tests/run_tests.sh [SECTION...]   (or: make test, make test T="7 21")
 #
@@ -107,7 +111,7 @@ gui_report() {
 SECTIONS='1:sesam 1b:banner 1c:reset 2:ipl 3:cpm 4:dir 4a:driveb 4b:swap 4c:game
 5:banktrip 6:render 7:gui 8:debug 9:log 10:cpmbuild 11:graphics 12:demos
 13:speed 14:eot 15:rewind 16:symbols 17:drives 18:derived 19:images
-20:sysinfo 21:lamps 22:cart 23:write'
+20:sysinfo 21:lamps 22:cart 23:write 24:cartpath'
 
 usage() {
     cat <<USAGE
@@ -2300,6 +2304,116 @@ if [ -x ./tests/fdc_write ]; then
     fi
 else
     fail "tests/fdc_write is not built (make tests/fdc_write)"
+fi
+}
+
+sec_24() {
+echo "== 24. The cartridge path end to end: a real P2490 probe reads the key back (T93)"
+# Sections 1 and 22 drive port $0F from the IPL and from the report. What
+# neither does is run a *guest program* that deliberately works the
+# protocol - and the IPL's own baseline never issues the final OUT 0, so
+# the power-down half of the sequence had no coverage at all.
+#
+# SESAMTST.BAS is the manufacturer's own BASIC probe for the P2490 module
+# (SESAM-module-photos): OUT 15,1 / OUT 15,3 / three INP(15) / OUT 15,0,
+# then it prints the three bytes as a serial number. So the test is a
+# mirror: feed a known key in through --cartridge and require the guest to
+# print those exact bytes back. Nothing here can recover anything - the
+# point is that the day a real module's bytes turn up, nobody is debugging
+# the emulator and the key at the same time.
+#
+# The fixture is the archive copy with CP/M line endings: the held file is
+# LF-only, and MBASIC's ASCII loader needs CR LF or it reads the whole
+# program as one line and stops with "Line buffer overflow in 140".
+CARTBAS="tests/fixtures/sesamtst.bas"
+if [ ! -f "$DISK" ] || [ ! -f disks/P25TEST.raw ] || [ ! -f "$CARTBAS" ]; then
+    echo "  SKIP  needs $DISK, disks/P25TEST.raw and $CARTBAS"
+else
+    # MBASIC comes off P25TEST rather than being carried here twice.
+    mkdir -p "$TMP/cartp"
+    python3 tools/cpm_extract.py disks/P25TEST.raw "$TMP/cartp" --quiet \
+        >"$TMP/cartp_extract.log" 2>&1
+    if [ ! -f "$TMP/cartp/MBASIC.COM" ]; then
+        fail "no MBASIC.COM on disks/P25TEST.raw to build the probe disk with"
+    elif ! python3 tools/cpm_build.py "$TMP/sesamtst.raw" \
+            "$TMP/cartp/MBASIC.COM" "$CARTBAS:SESAMTST.BAS" \
+            --boot-from "$DISK" >"$TMP/cartp_build.log" 2>&1; then
+        fail "could not build the SESAMTST probe disk"
+        sed -n '$p' "$TMP/cartp_build.log"
+    else
+        # Three keys, one run each. Two real ones differing in every byte -
+        # so a hard-coded or stale answer cannot pass both - and the empty
+        # slot, which must take the program's other branch.
+        printf '\001\030\061' >"$TMP/cart_1831.bin"   # $01 $18 $31
+        printf '\001\017\007' >"$TMP/cart_0f07.bin"   # $01 $0F $07
+        cartrun() { # NAME [CARTFILE]
+            if [ -n "${2-}" ]; then set -- "$1" --cartridge "$2"; else set -- "$1"; fi
+            n=$1; shift
+            $EMU --disk "$TMP/sesamtst.raw" "$@" --max-steps 20000000 \
+                 --speed unlimited --type-at '4000:MBASIC SESAMTST\r' \
+                 --sysinfo --dump-vram "$TMP/cart_$n.vram" \
+                 >"$TMP/cart_$n.log" 2>&1
+            screen "$TMP/cart_$n.vram" | tr -s ' ' >"$TMP/cart_$n.screen"
+        }
+        cartrun 1831 "$TMP/cart_1831.bin"
+        cartrun 0f07 "$TMP/cart_0f07.bin"
+        cartrun none
+
+        # The program must have run to completion in all three, or a blank
+        # screen would read as whatever the grep below wants it to.
+        for n in 1831 0f07 none; do
+            if grep -q '\*\*\* END \*\*\*' "$TMP/cart_$n.screen"; then
+                pass "SESAMTST ran to completion ($n)"
+            else fail "SESAMTST did not finish ($n) - MBASIC or the build is broken"; fi
+        done
+        # $18/$31 and $0F/$07 also cover both sides of the program's own
+        # zero-padding: HEX$ gives one digit for a byte under $10.
+        if grep -q 'SESAM P2490 NR.: 1831' "$TMP/cart_1831.screen"; then
+            pass "the guest reads \$01 \$18 \$31 back as NR.: 1831"
+        else fail "the key did not come back through INP(15)"; fi
+        if grep -q 'SESAM P2490 NR.: 0F07' "$TMP/cart_0f07.screen"; then
+            pass "a second key reads back as NR.: 0F07, so the answer is the stream"
+        else fail "the second key did not come back - a stale or fixed answer"; fi
+        if grep -q 'NO SESAM !!!' "$TMP/cart_none.screen" &&
+           ! grep -q 'SESAM P2490' "$TMP/cart_none.screen"; then
+            pass "an empty slot reads \$FF and the guest says NO SESAM"
+        else fail "the empty slot did not take the program's other branch"; fi
+
+        # Traffic, which is the part the counters are for. Booting this disk
+        # costs 35 reads / 9 writes - the IPL's 32/6 plus the CBIOS's own
+        # three-byte gate - and the program must add exactly its own 3 and 3
+        # on top. Asserted exactly: an extra read is a double-fetch bug and a
+        # missing write is the power-down half going unissued.
+        python3 - "$TMP/cart_1831.log" "$TMP/cart_0f07.log" "$TMP/cart_none.log" <<'CARTPATH' && pass "each run adds exactly SESAMTST's 3 reads and 3 writes to the boot's 35/9" || fail "the \$0F traffic is not boot 35/9 + the program's 3/3"
+import re, sys
+ok = True
+for p in sys.argv[1:]:
+    m = re.search(r'traffic\s+(\d+) reads, (\d+) writes', open(p).read())
+    if not m:
+        print("    %s: no traffic line" % p); ok = False; continue
+    r, w = int(m.group(1)), int(m.group(2))
+    print("    %s: %d reads, %d writes" % (p.split('/')[-1], r, w))
+    if (r, w) != (38, 12): ok = False
+sys.exit(0 if ok else 1)
+CARTPATH
+        # And the sequence itself, in order, from the device's own trace:
+        # power on, reset the address counter, three bytes, power off.
+        $EMU --disk "$TMP/sesamtst.raw" --cartridge "$TMP/cart_1831.bin" \
+             --max-steps 20000000 --speed unlimited --verbose-io \
+             --type-at '4000:MBASIC SESAMTST\r' >"$TMP/cart_trace.log" 2>&1
+        # The last six accesses, reduced to direction and byte, so the
+        # comparison is against the sequence and not against log wording.
+        grep '\[cartridge\]' "$TMP/cart_trace.log" | tail -6 |
+            sed -e 's/.*OUT (\$0F) <- \(\$..\).*/OUT \1/' \
+                -e 's/.*IN (\$0F) -> \(\$..\).*/IN \1/' >"$TMP/cart_tail"
+        printf 'OUT $01\nOUT $03\nIN $01\nIN $18\nIN $31\nOUT $00\n' >"$TMP/cart_want"
+        if cmp -s "$TMP/cart_tail" "$TMP/cart_want"; then
+            pass "the last sequence on the port is on/reset/3 bytes/off, in that order"
+        else
+            fail "SESAMTST's \$0F sequence is not on/reset/3 bytes/off"
+            diff "$TMP/cart_want" "$TMP/cart_tail"
+        fi
+    fi
 fi
 }
 
