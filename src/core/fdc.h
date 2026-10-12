@@ -25,7 +25,8 @@ extern "C" {
  *
  * Ports $14 (Main Status Register, read-only) and $15 (Data Register,
  * read/write) are the real P2500 ports, confirmed independently against
- * the CP/M-era CBIOS disassembly.
+ * the CP/M-era PBIOS disassembly - PBIOS and not CBIOS, which on both
+ * bootable generations contains no port access at all.
  *
  * READ DATA's and WRITE DATA's sector bytes move through the real Z80A-DMA
  * model (dma.{c,h}, port $16) in one shot (the moment the command's
@@ -42,7 +43,7 @@ extern "C" {
  * Register's "execution phase in progress" bit. EXM is set only during a
  * NON-DMA execution phase, and this machine never has one: every SPECIFY
  * this project has traced - $03 $30 $24 from the IPL, $03 $F0 $0A from
- * CBIOS, identical on all four bootable disks - carries ND=0 in bit 0 of
+ * PBIOS, identical on all four bootable disks - carries ND=0 in bit 0 of
  * its second parameter byte, selecting DMA mode. So EXM reads 0 on real
  * hardware here too, and modelling it would mean modelling a mode no
  * P2500 firmware selects.
@@ -83,6 +84,11 @@ typedef void (*P2500FdcInterruptCallback)(void *userdata);
 
 #define P2500_FDC_MAX_DRIVES 4
 
+/* How many unsolicited post-reset attention interrupts the model hands out
+ * per release of the controller's RESET line. Measured in both directions
+ * against the IPL: see p2500_fdc_reset_line_released(). */
+#define P2500_FDC_POST_RESET_INTERRUPTS 2
+
 typedef struct {
     P2500FdcPhase phase;
     uint8_t command[16];
@@ -120,9 +126,9 @@ typedef struct {
      *
      * Refilled by p2500_fdc_reset_line_released() on every release of the
      * controller's RESET line, not just the cold-boot one: a second
-     * driver taking the card over after the IPL (P25K_G's CBIOS does
-     * exactly this) resets it again and waits for its own post-reset
-     * attention interrupt. */
+     * driver taking the card over after the IPL (the disk driver in
+     * P25K_G's PBIOS does exactly this) resets it again and waits for its
+     * own post-reset attention interrupt. */
     int startup_interrupts_remaining;
     bool real_operation_started;
 
@@ -223,15 +229,51 @@ bool p2500_fdc_raise_startup_interrupt(P2500Fdc *fdc);
  * unsolicited interrupt from it - not only the first time.
  *
  * This matters for any driver that takes the card over after the IPL has
- * already spent the cold-boot budget. P25K_G's CBIOS resets the controller
- * at $FA1A, then arms "port B = $42, enable PIO-A interrupts, wait" at
- * $FB1C and needs exactly one attention interrupt to get going; once it
- * arrives, the CBIOS sets its own "already bootstrapped" flag ($FD24) and
- * every later transfer runs the synchronous path instead. Without this it
+ * already spent the cold-boot budget. The driver that does is in PBIOS,
+ * not CBIOS: neither bootable generation's CBIOS contains a single port
+ * access. P25K_G's PBIOS resets the controller at $FA1A ($56 -> $52, a
+ * settle delay, then "IN A,($14) / CP $80" to confirm it came back idle),
+ * and its disk driver at $FB20 then arms one asynchronous operation -
+ * "port B = $42, patch the continuation, OUT ($12),$F3, arm PA3, RET"
+ * ($FB2B-$FB3C) - which needs exactly one attention interrupt to get
+ * going. Once it arrives the driver sets its post-reset flag and every
+ * later transfer runs the handler inline instead. Without this refill it
  * waited forever and the disk never reached the CP/M prompt.
- * (P25K_B's newer CBIOS has an extra "IN A,($11) / AND $80" escape at
- * $FABA that skips the wait entirely, which is why it booted regardless
- * and hid this gap for so long.)
+ *
+ * That flag is the firmware's own evidence for the mechanism, and it is
+ * written in exactly two places: set to $FF at the tail of the
+ * asynchronous completion, and cleared to 0 immediately after a RESET
+ * release. So the driver arms the interrupt for ONE operation after each
+ * controller reset and drives the handler inline ever after - which is
+ * the shape this refill models. It is $FD24 on P25K_G, $FCF3 on P25K_B.
+ *
+ * Both paths are exercised, and the counts are asserted (section 1c of
+ * tests/run_tests.sh). P25K_G takes the arm-and-return path exactly once
+ * per boot ($FB2D: 1 of its driver's 8 calls). P25K_B never does: its
+ * newer driver at $FAB7 has an extra "IN A,($11) / AND $80" escape at
+ * $FABA - PB7, read as a card-capability strap and modelled as 0 until
+ * someone measures it - which sends all 8 calls down the inline path
+ * ($FAC8: never). That is why P25K_B booted regardless and hid this gap
+ * for so long.
+ *
+ * Two is measured rather than chosen, and the IPL brackets it from both
+ * sides - diskless and on both bootable disks alike:
+ *
+ *   1 - hangs in the busy-wait on $FED5 at $06C6 (symbols/ipl.sym's
+ *       BUSYWAIT1). It is the SECOND synthetic interrupt that reaches the
+ *       ISR which sets that flag, so one is not enough.
+ *   2 - boots.
+ *   3 - derails, and exactly where the field comment on
+ *       startup_interrupts_remaining says it would: the third PIO-arm
+ *       event is $0786's "enable interrupt, then immediately stream
+ *       RECALIBRATE", so a synthetic attention there hijacks a command
+ *       instead of standing in for one. Traced, the spare interrupt
+ *       fires at PC=$0793, the IPL walks into a transfer it never
+ *       completes, and it spins at $0AC3 ("IN A,($14) / AND $10 / JR NZ")
+ *       on a CB bit that never clears.
+ *
+ * So the one free parameter in this stand-in is pinned, and section 1b
+ * catches a change to it with no disk image at all.
  */
 void p2500_fdc_reset_line_released(P2500Fdc *fdc);
 

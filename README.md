@@ -450,11 +450,9 @@ make test
 ```
 
 runs `tests/run_tests.sh`: checks covering the cartridge-slot (SESAM)
-boot path, the IPL and CP/M boot sequence, disk I/O (including mid-run swaps),
-the video renderer (checked as pixels, not just state), the debugger
-panels, the disassembler (`tests/disasm_crosscheck.py`, cross-checked
-against `z80dasm` over ~34,000 instructions), the speed control, and
-rewind. Exit code 1 on any failure.
+boot path, the IPL and CP/M boot sequence, disk I/O, the video renderer
+the debugger panels, the disassembler, the speed control, and rewind.
+Exit code 1 on any failure.
 
 The suite takes a few minutes, most of it GUI runs of hundreds of emulated
 fields, so it also runs in parts:

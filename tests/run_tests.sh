@@ -8,6 +8,9 @@
 #   1b.Banner - with no disk and no cartridge the IPL must come back out of
 #               the drive-ready path, print its banner and halt at $014D -
 #               what a real P2500 does.
+#   1c.Reset  - the FDC's post-reset attention budget: who refills it, who
+#               spends it, and how often. Both BIOS generations, because
+#               they take different paths through the same driver.
 #   2. IPL    - Phase 1: a real disk boot must reach $4A00, plus the four
 #               sector-0 landmarks.
 #   3. CP/M   - Phase 2: page zero must hold CP/M's real vectors, CBIOS's
@@ -101,7 +104,7 @@ gui_report() {
 # No section reads a file another section wrote: where one used to (the speed
 # cell's column, a plain CLI run), the consumer now produces it itself, via
 # gui_report() or its own run. So any subset is a valid run.
-SECTIONS='1:sesam 1b:banner 2:ipl 3:cpm 4:dir 4a:driveb 4b:swap 4c:game
+SECTIONS='1:sesam 1b:banner 1c:reset 2:ipl 3:cpm 4:dir 4a:driveb 4b:swap 4c:game
 5:banktrip 6:render 7:gui 8:debug 9:log 10:cpmbuild 11:graphics 12:demos
 13:speed 14:eot 15:rewind 16:symbols 17:drives 18:derived 19:images
 20:sysinfo 21:lamps 22:cart 23:write'
@@ -251,6 +254,81 @@ if cell00(sys.argv[2]):
     print("    after the banner: cell (0,0) is lit - the $9F did not cancel it"); ok = False
 sys.exit(0 if ok else 1)
 PY
+}
+
+sec_1c() {
+echo "== 1c. The post-reset attention budget, and who spends it"
+# The FDC model hands out a fixed number of unsolicited post-reset
+# attention interrupts per release of the uPD765's RESET line, standing in
+# for the drive-polling sweep a real controller runs after every reset
+# (fdc.h). Section 1b already brackets the budget's SIZE - at 1 the
+# diskless IPL hangs at $06C9, at 3 it derails to $0AC7, and only 2 reaches
+# the banner. What is asserted here is the SHAPE: who refills it, who
+# spends it, and how often. It drifted once with nothing watching it.
+#
+# The spender is the disk driver in PBIOS, not CBIOS - neither bootable
+# generation's CBIOS contains a port access - and the two generations take
+# different paths through it, so both are checked.
+budget() { grep -c 'post-reset unsolicited interrupt' "$1"; }
+refills() { grep -c 'RESET released' "$1"; }
+
+# The IPL alone, with no disk and no driver: two refills back-to-back at
+# $0AE5, both slots spent, then a third refill when it re-pulses RESET on
+# its way out of the drive-ready path, and one more spent.
+$EMU --rom roms/ipl.bin --max-steps 2000000 --break 0x014D --verbose-io \
+     >"$TMP/rst-nodisk.log" 2>&1
+if [ "$(refills "$TMP/rst-nodisk.log")" = 3 ] && [ "$(budget "$TMP/rst-nodisk.log")" = 3 ]; then
+    pass "diskless: the IPL refills the budget 3x and spends 3 attentions"
+else
+    fail "diskless: $(refills "$TMP/rst-nodisk.log") refills / $(budget "$TMP/rst-nodisk.log") attentions, expected 3/3"
+fi
+
+# P25K_G, the older PHILIPS P2000B generation: its driver at $FB20 has no
+# PB7 escape, so it reaches the decision purely on its own post-reset flag
+# ($FD24, cleared after each RESET release and set at the tail of the
+# asynchronous completion). It therefore arms one operation and returns
+# exactly once per controller reset - $FB2D, the "port B = $42" on that
+# path - and drives the handler inline for the other 7 calls.
+if [ -f disks/P25K_G.raw ]; then
+    $EMU --disk disks/P25K_G.raw --max-steps 60000000 --verbose-io \
+         --count 0xFB20 --count 0xFB2D >"$TMP/rst-g.log" 2>&1
+    if grep -q -- '--count \$FB20: 8 execution(s)' "$TMP/rst-g.log" &&
+       grep -q -- '--count \$FB2D: 1 execution(s)' "$TMP/rst-g.log"; then
+        pass "P25K_G: the PBIOS driver runs 8x and arms the interrupt exactly once"
+    else
+        fail "P25K_G: the arm-and-return path no longer runs once per boot"
+    fi
+    # One more refill than the IPL's own (its $FA1A reset) and one more
+    # attention spent (the one that gets that armed operation going).
+    if [ "$(refills "$TMP/rst-g.log")" = 3 ] && [ "$(budget "$TMP/rst-g.log")" = 3 ]; then
+        pass "P25K_G: 3 refills, 3 attentions - the driver spends the IPL's leftover"
+    else
+        fail "P25K_G: $(refills "$TMP/rst-g.log") refills / $(budget "$TMP/rst-g.log") attentions, expected 3/3"
+    fi
+else
+    fail "disk image missing: disks/P25K_G.raw"
+fi
+
+# P25K_B, the newer generation: its driver at $FAB7 asks PB7 first
+# ("IN A,($11) / AND $80" at $FABA, read as a card-capability strap and
+# modelled as 0 until someone measures it on real hardware), so it never
+# reaches the arm-and-return path at $FAC8 at all. All 8 calls run the
+# handler inline, and the budget its own resets refill is never touched -
+# which is exactly why this generation booted while P25K_G hung, and hid
+# the missing refill for so long.
+$EMU --disk "$DISK" --max-steps 60000000 --verbose-io \
+     --count 0xFAB7 --count 0xFAC8 >"$TMP/rst-b.log" 2>&1
+if grep -q -- '--count \$FAB7: 8 execution(s)' "$TMP/rst-b.log" &&
+   grep -q -- '--count \$FAC8: never executed' "$TMP/rst-b.log"; then
+    pass "P25K_B: all 8 driver calls take the inline path (PB7 reads 0)"
+else
+    fail "P25K_B: the PB7 escape no longer sends every call inline"
+fi
+if [ "$(refills "$TMP/rst-b.log")" = 4 ] && [ "$(budget "$TMP/rst-b.log")" = 2 ]; then
+    pass "P25K_B: 4 refills, 2 attentions - its driver refills and spends none"
+else
+    fail "P25K_B: $(refills "$TMP/rst-b.log") refills / $(budget "$TMP/rst-b.log") attentions, expected 4/2"
+fi
 }
 
 sec_2() {

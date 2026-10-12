@@ -69,7 +69,7 @@ void p2500_fdc_init(P2500Fdc *fdc, const uint8_t *disk, size_t disk_size) {
     fdc->last_seek_ok = true;
     fdc->disk[0] = disk;
     fdc->disk_size[0] = disk_size;
-    fdc->startup_interrupts_remaining = 2; /* see fdc.h - pinned down by tracing, not a guess */
+    fdc->startup_interrupts_remaining = P2500_FDC_POST_RESET_INTERRUPTS;
 }
 
 uint8_t p2500_fdc_read_status(P2500Fdc *fdc) {
@@ -84,7 +84,7 @@ uint8_t p2500_fdc_read_status(P2500Fdc *fdc) {
      * this model's. The datasheet sets EXM only during a NON-DMA execution
      * phase, and no P2500 firmware ever selects one: every SPECIFY traced
      * here carries ND=0 (bit 0 of its second parameter byte) - $30 $24
-     * from the IPL, $F0 $0A from CBIOS, the same on all four bootable
+     * from the IPL, $F0 $0A from PBIOS, the same on all four bootable
      * disks. A real controller in this machine therefore never raises EXM
      * either, so the one-shot DMA transfer below costs no CPU-visible
      * state. (This comment used to claim the opposite.) */
@@ -98,15 +98,17 @@ static void fire_interrupt(P2500Fdc *fdc) {
 }
 
 void p2500_fdc_reset_line_released(P2500Fdc *fdc) {
-    /* See fdc.h. The budget goes back to its full cold-boot value rather
-     * than to 1: the IPL pulses RESET twice back-to-back at $0AE5 before
-     * drawing on it at all, so anything smaller would hand the IPL a
-     * shorter budget than it has today. */
+    /* See fdc.h for the size of this budget, what brackets it, and what
+     * the firmware on either side of it does. It goes back to its full
+     * cold-boot value rather than to 1: the IPL pulses RESET twice
+     * back-to-back at $0AE5 before drawing on it at all, so anything
+     * smaller would hand the IPL a shorter budget than it has today. */
     fdc->real_operation_started = false;
-    fdc->startup_interrupts_remaining = 2;
+    fdc->startup_interrupts_remaining = P2500_FDC_POST_RESET_INTERRUPTS;
     if (fdc->verbose)
         p2500_logf(fdc->log, P2500_LOG_TRACE, "fdc",
-                   "RESET released - post-reset interrupt budget refilled to 2");
+                   "RESET released - post-reset interrupt budget refilled to %d",
+                   P2500_FDC_POST_RESET_INTERRUPTS);
 }
 
 bool p2500_fdc_raise_startup_interrupt(P2500Fdc *fdc) {

@@ -260,9 +260,11 @@ static void port_out(z80 *cpu, uint8_t port, uint8_t value) {
         /* PIO port B bit 2 is the FDD card's uPD765 RESET line. Both
          * drivers pulse it the same way before touching the controller:
          * the IPL at $0AE5 ("LD A,$46 / OUT ($11) / LD A,$42 / OUT ($11)"
-         * followed by a settle delay), and P25K_G's CBIOS at $FA1A
-         * ($56 -> $52, then "IN A,($14) / CP $80" to confirm the
-         * controller came back idle). A release of that line is what
+         * followed by a settle delay), and the disk driver in P25K_G's
+         * PBIOS at $FA1A ($56 -> $52, then "IN A,($14) / CP $80" to
+         * confirm the controller came back idle). It is PBIOS and not
+         * CBIOS on both bootable generations: neither one's CBIOS
+         * contains a single port access. A release of that line is what
          * re-arms the uPD765's unsolicited post-reset attention
          * interrupt - see p2500_fdc_reset_line_released. */
         uint8_t prev = m->pio.output_latch[P2500_PIO_PORT_B];
