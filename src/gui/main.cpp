@@ -39,6 +39,7 @@
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_main.h>
 
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -61,6 +62,42 @@
 #define SCALE_DEFAULT 2
 #define MAX_PUSHES 8
 
+/* Height reserved for the menu bar when sizing the default window, before
+ * ImGui has measured the real one. */
+#define MENU_RESERVE 24
+
+/* The emulated screen is 640x288 but the real machine drove a 4:3 monitor,
+ * so its dots are not square: fitting 640x288 into 4:3 gives a pixel aspect
+ * of (640/288)/(4/3) = 1.667. That is the user-visible definition of "the
+ * image is 4:3" and is what ASPECT_43 draws.
+ *
+ * It assumes the active area fills the glass, which it does not. The CRTC
+ * raster is 98 char-times x 311 scanlines (TODO.md T29), of which 80x288 is
+ * active - 82% of the raster width and 93% of its height - so the true dot
+ * aspect is 1.89. Deliberately not modelled: filling the raster would put a
+ * permanent border inside the render area, and usability on a modern display
+ * was chosen over that.
+#define DISPLAY_ASPECT_W 4
+#define DISPLAY_ASPECT_H 3
+
+/* How far a snapped 4:3 rect may stray from 4:3 before snapping is simply
+ * not applied. The exact integer answer is the dot pair 3:5 - (640*3)/(288*5)
+ * is 4:3 to the pixel - but that only fits a window 1920 dots wide, so
+ * smaller windows have to settle for the nearest pair that does fit. 2x3 is
+ * the realistic one and is 1/9 out, which sets the floor for this number.
+ * Below the tolerance the exact (unsnapped) rect is drawn instead: the user
+ * asked for 4:3, and snapping is a refinement on top of it rather than a
+ * licence to abandon it. */
+#define SNAP_ASPECT_TOLERANCE 0.12f
+
+/* Bound on the integer prescale multiple, so a huge window cannot ask for an
+ * unreasonable intermediate texture. 8 covers 640x288 -> 5120x2304. */
+#define PRESCALE_MAX 8
+
+/* Pixel aspect. 4:3 is the default: it is what the machine looked like, and
+ * what anyone who used one remembers. */
+enum { ASPECT_43 = 0, ASPECT_SQUARE = 1 };
+
 /* Named rather than an anonymous typedef: it holds C++ members with
  * default initialisers now, which an anonymous struct cannot carry across a
  * typedef without tripping -Wnon-c-typedef-for-linkage. */
@@ -69,6 +106,14 @@ struct App {
     SDL_Window *window;
     SDL_Renderer *renderer;
     SDL_Texture *screen;
+    /* Integer-multiple intermediate for the two-pass scaler; NULL until a
+     * non-integer destination rect first needs one. */
+    SDL_Texture *prescale;
+    int prescale_w, prescale_h;
+    int aspect;                  /* ASPECT_43 | ASPECT_SQUARE */
+    P2500PhosphorId phosphor;    /* screen colours, from the core's table */
+    int theme;                   /* THEME_DARK | THEME_PAPER (the UI, not the screen) */
+    bool snap;                   /* snap the screen rect to whole dots */
     P2500VideoInfo info;
     uint32_t *fb;
     uint8_t *disk[P2500_FDC_MAX_DRIVES];
@@ -190,14 +235,8 @@ struct App {
     char cart_path[1024];
 };
 
-static const P2500Palette PALETTE = {
-    0xFF46FF00u,     /* fg: green phosphor, matching tests/render_vram.py */
-    0xFF080C08u,     /* bg */
-    0xFF288C00u,     /* fg_dim */
-};
-
-/* What the window is cleared to around the emulated screen. */
-static const uint8_t LETTERBOX[3] = { 4, 4, 4 };
+/* The screen colours live in the core (src/core/video.c) so this and
+ * p2500-emu share one definition; `phosphor` selects which preset. */
 
 static void set_status(App *app, const char *fmt, ...)
 {
@@ -456,14 +495,44 @@ static void toggle_cartridge(App *app)
     else set_status(app, "cartridge: ID 0x%02X%02X", app->cart_buf[1], app->cart_buf[2]);
 }
 
+/* Where a file dialog should start looking.
+ *
+ * Both the development tree and a published release keep disks/ and roms/
+ * beside the executable (publish.sh copies them), so "next to the binary" is
+ * the useful default, with the working directory as a fallback for an
+ * unusual layout. Returning NULL means "let the platform decide", which is
+ * what SDL does when given no default location - the right answer when
+ * neither directory is there, rather than opening somewhere arbitrary.
+ *
+ * The caller owns the buffer on purpose. A static one looks tidier and is a
+ * trap: two calls in one expression alias, and C does not define which runs
+ * first, so `f(dir("roms"), dir("disks"))` silently passes the same path
+ * twice. That is not hypothetical - it happened while testing this. */
+static const char *resource_dir(const char *name, char *buf, size_t n)
+{
+    SDL_PathInfo info;
+    const char *base = SDL_GetBasePath();
+    if (base) {
+        SDL_snprintf(buf, n, "%s%s", base, name);
+        if (SDL_GetPathInfo(buf, &info) && info.type == SDL_PATHTYPE_DIRECTORY)
+            return buf;
+    }
+    SDL_snprintf(buf, n, "%s", name);
+    if (SDL_GetPathInfo(buf, &info) && info.type == SDL_PATHTYPE_DIRECTORY)
+        return buf;
+    return NULL;
+}
+
 static void open_cartridge_dialog(App *app)
 {
     static const SDL_DialogFileFilter filters[] = {
         { "Cartridge images", "rom;bin" },
         { "All files", "*" },
     };
+    char dir[1024];
     SDL_ShowOpenFileDialog(cartridge_chosen, app, app->window,
-                           filters, SDL_arraysize(filters), NULL, false);
+                           filters, SDL_arraysize(filters),
+                           resource_dir("roms", dir, sizeof dir), false);
 }
 
 /* One place, because three things reach it: the File menu, F12, and the
@@ -650,8 +719,10 @@ static void open_disk_dialog(App *app, unsigned unit)
         { "All files", "*" },
     };
     app->pending_unit = unit;
+    char dir[1024];
     SDL_ShowOpenFileDialog(disk_chosen, app, app->window,
-                           filters, SDL_arraysize(filters), NULL, false);
+                           filters, SDL_arraysize(filters),
+                           resource_dir("disks", dir, sizeof dir), false);
 }
 
 /* Another thread, same discipline as disk_chosen(): park the path, raise a
@@ -696,10 +767,150 @@ static void save_disk(App *app, unsigned unit, const char *path)
     SDL_Log("drive %c: %llu bytes written to %s", 'A' + (int)unit, (unsigned long long)n, path);
 }
 
-/* Deliberately not the default ImGui look: square, dark, and on the same
- * phosphor palette as the emulated screen, so the bar reads as part of the
- * machine's bezel rather than as a debug overlay. */
-static void apply_style()
+/* The interface theme: the chrome around the emulated screen, which is not
+ * an emulated artifact and so is free to be whatever reads best.
+ *
+ * Two explicit tables rather than one palette with colours derived from it.
+ * These values were hand-tuned, not computed, and pretending otherwise would
+ * mean a formula that moves the shipped look to fit itself - DARK below is a
+ * verbatim transcription of what the front-end has always drawn.
+ *
+ * PAPER exists for the same reason the white phosphor does: dark-on-light is
+ * what some people can actually read. It is deliberately a *separate* setting
+ * from the screen's phosphor, so either can be changed without the other. */
+enum { THEME_DARK = 0, THEME_PAPER = 1 };
+
+struct ThemeColour { ImGuiCol_ idx; ImVec4 c; };
+
+/* Green on near-black, so the bar reads as part of the machine's bezel
+ * rather than as a debug overlay. */
+static const ThemeColour THEME_DARK_COLOURS[] = {
+    { ImGuiCol_Text, ImVec4(0.27f, 1.00f, 0.00f, 1.00f) },
+    { ImGuiCol_TextDisabled, ImVec4(0.16f, 0.55f, 0.00f, 1.00f) },
+    { ImGuiCol_WindowBg, ImVec4(0.031f, 0.047f, 0.031f, 1.00f) },
+    { ImGuiCol_ChildBg, ImVec4(0.02f, 0.031f, 0.02f, 1.00f) },
+    { ImGuiCol_PopupBg, ImVec4(0.031f, 0.047f, 0.031f, 1.00f) },
+    { ImGuiCol_MenuBarBg, ImVec4(0.055f, 0.086f, 0.055f, 1.00f) },
+    { ImGuiCol_Border, ImVec4(0.12f, 0.35f, 0.08f, 1.00f) },
+    { ImGuiCol_BorderShadow, ImVec4(0.00f, 0.00f, 0.00f, 0.00f) },
+    { ImGuiCol_Header, ImVec4(0.08f, 0.22f, 0.06f, 1.00f) },
+    { ImGuiCol_HeaderHovered, ImVec4(0.13f, 0.34f, 0.09f, 1.00f) },
+    { ImGuiCol_HeaderActive, ImVec4(0.18f, 0.46f, 0.12f, 1.00f) },
+    { ImGuiCol_FrameBg, ImVec4(0.08f, 0.16f, 0.08f, 1.00f) },
+    { ImGuiCol_FrameBgHovered, ImVec4(0.12f, 0.28f, 0.10f, 1.00f) },
+    { ImGuiCol_FrameBgActive, ImVec4(0.16f, 0.40f, 0.12f, 1.00f) },
+    { ImGuiCol_Separator, ImVec4(0.12f, 0.35f, 0.08f, 1.00f) },
+    { ImGuiCol_SeparatorHovered, ImVec4(0.20f, 0.60f, 0.14f, 1.00f) },
+    { ImGuiCol_SeparatorActive, ImVec4(0.27f, 1.00f, 0.00f, 1.00f) },
+    { ImGuiCol_CheckMark, ImVec4(0.27f, 1.00f, 0.00f, 1.00f) },
+    { ImGuiCol_TitleBg, ImVec4(0.043f, 0.071f, 0.043f, 1.00f) },
+    { ImGuiCol_TitleBgActive, ImVec4(0.075f, 0.16f, 0.06f, 1.00f) },
+    { ImGuiCol_TitleBgCollapsed, ImVec4(0.043f, 0.071f, 0.043f, 0.85f) },
+    { ImGuiCol_Button, ImVec4(0.09f, 0.22f, 0.07f, 1.00f) },
+    { ImGuiCol_ButtonHovered, ImVec4(0.14f, 0.36f, 0.10f, 1.00f) },
+    { ImGuiCol_ButtonActive, ImVec4(0.20f, 0.52f, 0.14f, 1.00f) },
+    { ImGuiCol_ScrollbarBg, ImVec4(0.02f, 0.031f, 0.02f, 1.00f) },
+    { ImGuiCol_ScrollbarGrab, ImVec4(0.10f, 0.26f, 0.08f, 1.00f) },
+    { ImGuiCol_ScrollbarGrabHovered, ImVec4(0.16f, 0.40f, 0.12f, 1.00f) },
+    { ImGuiCol_ScrollbarGrabActive, ImVec4(0.22f, 0.58f, 0.16f, 1.00f) },
+    { ImGuiCol_SliderGrab, ImVec4(0.16f, 0.55f, 0.00f, 1.00f) },
+    { ImGuiCol_SliderGrabActive, ImVec4(0.27f, 1.00f, 0.00f, 1.00f) },
+    { ImGuiCol_ResizeGrip, ImVec4(0.12f, 0.35f, 0.08f, 0.60f) },
+    { ImGuiCol_ResizeGripHovered, ImVec4(0.20f, 0.60f, 0.14f, 0.80f) },
+    { ImGuiCol_ResizeGripActive, ImVec4(0.27f, 1.00f, 0.00f, 1.00f) },
+    { ImGuiCol_Tab, ImVec4(0.06f, 0.13f, 0.05f, 1.00f) },
+    { ImGuiCol_TabHovered, ImVec4(0.16f, 0.40f, 0.12f, 1.00f) },
+    { ImGuiCol_TableHeaderBg, ImVec4(0.06f, 0.13f, 0.05f, 1.00f) },
+    { ImGuiCol_TableBorderStrong, ImVec4(0.12f, 0.35f, 0.08f, 1.00f) },
+    { ImGuiCol_TableBorderLight, ImVec4(0.08f, 0.20f, 0.06f, 1.00f) },
+    { ImGuiCol_TableRowBg, ImVec4(0.00f, 0.00f, 0.00f, 0.00f) },
+    { ImGuiCol_TableRowBgAlt, ImVec4(0.27f, 1.00f, 0.00f, 0.035f) },
+    { ImGuiCol_NavCursor, ImVec4(0.27f, 1.00f, 0.00f, 1.00f) },
+    { ImGuiCol_DragDropTarget, ImVec4(0.27f, 1.00f, 0.00f, 1.00f) },
+};
+
+/* Ink on paper. The accent stays a green, which keeps the checkmarks and
+ * the active slider tied to the machine without lighting the whole UI up. */
+static const ThemeColour THEME_PAPER_COLOURS[] = {
+    { ImGuiCol_Text, ImVec4(0.11f, 0.12f, 0.11f, 1.00f) },
+    /* Dark enough to read. At 0.45 this sat about 3.6:1 against the menu
+     * bar, which is under the 4.5:1 normal-text threshold - and the bar is
+     * exactly where it is used, for the cartridge and the unlit lamps. */
+    { ImGuiCol_TextDisabled, ImVec4(0.32f, 0.34f, 0.32f, 1.00f) },
+    { ImGuiCol_WindowBg, ImVec4(0.94f, 0.94f, 0.92f, 1.00f) },
+    { ImGuiCol_ChildBg, ImVec4(0.90f, 0.90f, 0.88f, 1.00f) },
+    { ImGuiCol_PopupBg, ImVec4(0.97f, 0.97f, 0.95f, 1.00f) },
+    { ImGuiCol_MenuBarBg, ImVec4(0.88f, 0.88f, 0.86f, 1.00f) },
+    { ImGuiCol_Border, ImVec4(0.70f, 0.72f, 0.68f, 1.00f) },
+    { ImGuiCol_BorderShadow, ImVec4(0.00f, 0.00f, 0.00f, 0.00f) },
+    { ImGuiCol_Header, ImVec4(0.80f, 0.84f, 0.78f, 1.00f) },
+    { ImGuiCol_HeaderHovered, ImVec4(0.72f, 0.78f, 0.70f, 1.00f) },
+    { ImGuiCol_HeaderActive, ImVec4(0.64f, 0.72f, 0.62f, 1.00f) },
+    { ImGuiCol_FrameBg, ImVec4(0.88f, 0.89f, 0.86f, 1.00f) },
+    { ImGuiCol_FrameBgHovered, ImVec4(0.82f, 0.84f, 0.80f, 1.00f) },
+    { ImGuiCol_FrameBgActive, ImVec4(0.76f, 0.79f, 0.74f, 1.00f) },
+    { ImGuiCol_Separator, ImVec4(0.70f, 0.72f, 0.68f, 1.00f) },
+    { ImGuiCol_SeparatorHovered, ImVec4(0.55f, 0.60f, 0.52f, 1.00f) },
+    { ImGuiCol_SeparatorActive, ImVec4(0.18f, 0.42f, 0.12f, 1.00f) },
+    { ImGuiCol_CheckMark, ImVec4(0.18f, 0.42f, 0.12f, 1.00f) },
+    { ImGuiCol_TitleBg, ImVec4(0.86f, 0.87f, 0.84f, 1.00f) },
+    { ImGuiCol_TitleBgActive, ImVec4(0.78f, 0.82f, 0.76f, 1.00f) },
+    { ImGuiCol_TitleBgCollapsed, ImVec4(0.86f, 0.87f, 0.84f, 0.85f) },
+    { ImGuiCol_Button, ImVec4(0.85f, 0.87f, 0.83f, 1.00f) },
+    { ImGuiCol_ButtonHovered, ImVec4(0.78f, 0.82f, 0.76f, 1.00f) },
+    { ImGuiCol_ButtonActive, ImVec4(0.70f, 0.76f, 0.68f, 1.00f) },
+    { ImGuiCol_ScrollbarBg, ImVec4(0.90f, 0.90f, 0.88f, 1.00f) },
+    { ImGuiCol_ScrollbarGrab, ImVec4(0.74f, 0.76f, 0.72f, 1.00f) },
+    { ImGuiCol_ScrollbarGrabHovered, ImVec4(0.65f, 0.68f, 0.63f, 1.00f) },
+    { ImGuiCol_ScrollbarGrabActive, ImVec4(0.55f, 0.60f, 0.53f, 1.00f) },
+    { ImGuiCol_SliderGrab, ImVec4(0.55f, 0.60f, 0.52f, 1.00f) },
+    { ImGuiCol_SliderGrabActive, ImVec4(0.18f, 0.42f, 0.12f, 1.00f) },
+    { ImGuiCol_ResizeGrip, ImVec4(0.70f, 0.72f, 0.68f, 0.60f) },
+    { ImGuiCol_ResizeGripHovered, ImVec4(0.55f, 0.60f, 0.52f, 0.80f) },
+    { ImGuiCol_ResizeGripActive, ImVec4(0.18f, 0.42f, 0.12f, 1.00f) },
+    { ImGuiCol_Tab, ImVec4(0.86f, 0.87f, 0.84f, 1.00f) },
+    { ImGuiCol_TabHovered, ImVec4(0.76f, 0.80f, 0.74f, 1.00f) },
+    { ImGuiCol_TableHeaderBg, ImVec4(0.86f, 0.87f, 0.84f, 1.00f) },
+    { ImGuiCol_TableBorderStrong, ImVec4(0.70f, 0.72f, 0.68f, 1.00f) },
+    { ImGuiCol_TableBorderLight, ImVec4(0.82f, 0.83f, 0.80f, 1.00f) },
+    { ImGuiCol_TableRowBg, ImVec4(0.00f, 0.00f, 0.00f, 0.00f) },
+    { ImGuiCol_TableRowBgAlt, ImVec4(0.18f, 0.42f, 0.12f, 0.035f) },
+    { ImGuiCol_NavCursor, ImVec4(0.11f, 0.12f, 0.11f, 1.00f) },
+    { ImGuiCol_DragDropTarget, ImVec4(0.18f, 0.42f, 0.12f, 1.00f) },
+};
+
+/* What the window is cleared to around the emulated screen.
+ *
+ * Dark in every theme, deliberately. It was briefly tied to the interface
+ * theme, which made the surround light in Paper - and that reads wrong:
+ * this area is the dead space around a picture tube, not part of the
+ * chrome, so it belongs to the machine however the UI is themed.
+ *
+ * It must never be the screen's own background, or the viewport has no
+ * visible edge and no capture can say where the screen was drawn. Kept
+ * clear of every phosphor's background for that reason. */
+static void letterbox_rgb(int theme, uint8_t out[3])
+{
+    (void)theme;
+    out[0] = 4; out[1] = 4; out[2] = 4;
+}
+
+static bool parse_theme(const char *v, int *out)
+{
+    if (!SDL_strcasecmp(v, "dark"))  { *out = THEME_DARK;  return true; }
+    if (!SDL_strcasecmp(v, "paper") || !SDL_strcasecmp(v, "light")) { *out = THEME_PAPER; return true; }
+    return false;
+}
+
+static const char *theme_name(int theme)
+{
+    return theme == THEME_PAPER ? "paper" : "dark";
+}
+
+/* Square corners and roomy padding in both themes: the metrics are not what
+ * the theme is about, and keeping them shared stops the two drifting into
+ * different layouts - which would move every geometry the suite asserts. */
+static void apply_style(int theme)
 {
     ImGuiStyle &st = ImGui::GetStyle();
     st.WindowRounding = st.ChildRounding = st.FrameRounding = 0.0f;
@@ -710,61 +921,13 @@ static void apply_style()
     st.ItemSpacing = ImVec2(12.0f, 6.0f);
     st.WindowPadding = ImVec2(8.0f, 8.0f);
 
-    ImVec4 *c = st.Colors;
-    const ImVec4 green      = ImVec4(0.27f, 1.00f, 0.00f, 1.00f);
-    const ImVec4 green_dim  = ImVec4(0.16f, 0.55f, 0.00f, 1.00f);
-    const ImVec4 bezel      = ImVec4(0.031f, 0.047f, 0.031f, 1.00f);
-    const ImVec4 bar        = ImVec4(0.055f, 0.086f, 0.055f, 1.00f);
-    const ImVec4 edge       = ImVec4(0.12f, 0.35f, 0.08f, 1.00f);
-
-    c[ImGuiCol_Text]            = green;
-    c[ImGuiCol_TextDisabled]    = green_dim;
-    c[ImGuiCol_WindowBg]        = bezel;
-    c[ImGuiCol_ChildBg]         = ImVec4(0.02f, 0.031f, 0.02f, 1.00f);
-    c[ImGuiCol_PopupBg]         = bezel;
-    c[ImGuiCol_MenuBarBg]       = bar;
-    c[ImGuiCol_Border]          = edge;
-    c[ImGuiCol_BorderShadow]    = ImVec4(0.00f, 0.00f, 0.00f, 0.00f);
-    /* Section bands, not highlights: bright enough to group, dark enough
-     * that the green text on top of them stays the brightest thing. */
-    c[ImGuiCol_Header]          = ImVec4(0.08f, 0.22f, 0.06f, 1.00f);
-    c[ImGuiCol_HeaderHovered]   = ImVec4(0.13f, 0.34f, 0.09f, 1.00f);
-    c[ImGuiCol_HeaderActive]    = ImVec4(0.18f, 0.46f, 0.12f, 1.00f);
-    c[ImGuiCol_FrameBg]         = ImVec4(0.08f, 0.16f, 0.08f, 1.00f);
-    c[ImGuiCol_FrameBgHovered]  = ImVec4(0.12f, 0.28f, 0.10f, 1.00f);
-    c[ImGuiCol_FrameBgActive]   = ImVec4(0.16f, 0.40f, 0.12f, 1.00f);
-    c[ImGuiCol_Separator]       = edge;
-    c[ImGuiCol_SeparatorHovered]= ImVec4(0.20f, 0.60f, 0.14f, 1.00f);
-    c[ImGuiCol_SeparatorActive] = green;
-    c[ImGuiCol_CheckMark]       = green;
-    /* The debugger panels are ordinary ImGui windows, so every remaining
-     * default - title bars, buttons, scrollbars, tabs - would arrive in
-     * ImGui's blue. Set the whole palette rather than the handful the menu
-     * bar happened to need. */
-    c[ImGuiCol_TitleBg]         = ImVec4(0.043f, 0.071f, 0.043f, 1.00f);
-    c[ImGuiCol_TitleBgActive]   = ImVec4(0.075f, 0.16f, 0.06f, 1.00f);
-    c[ImGuiCol_TitleBgCollapsed]= ImVec4(0.043f, 0.071f, 0.043f, 0.85f);
-    c[ImGuiCol_Button]          = ImVec4(0.09f, 0.22f, 0.07f, 1.00f);
-    c[ImGuiCol_ButtonHovered]   = ImVec4(0.14f, 0.36f, 0.10f, 1.00f);
-    c[ImGuiCol_ButtonActive]    = ImVec4(0.20f, 0.52f, 0.14f, 1.00f);
-    c[ImGuiCol_ScrollbarBg]     = ImVec4(0.02f, 0.031f, 0.02f, 1.00f);
-    c[ImGuiCol_ScrollbarGrab]   = ImVec4(0.10f, 0.26f, 0.08f, 1.00f);
-    c[ImGuiCol_ScrollbarGrabHovered] = ImVec4(0.16f, 0.40f, 0.12f, 1.00f);
-    c[ImGuiCol_ScrollbarGrabActive]  = ImVec4(0.22f, 0.58f, 0.16f, 1.00f);
-    c[ImGuiCol_SliderGrab]      = green_dim;
-    c[ImGuiCol_SliderGrabActive]= green;
-    c[ImGuiCol_ResizeGrip]      = ImVec4(0.12f, 0.35f, 0.08f, 0.60f);
-    c[ImGuiCol_ResizeGripHovered] = ImVec4(0.20f, 0.60f, 0.14f, 0.80f);
-    c[ImGuiCol_ResizeGripActive]  = green;
-    c[ImGuiCol_Tab]             = ImVec4(0.06f, 0.13f, 0.05f, 1.00f);
-    c[ImGuiCol_TabHovered]      = ImVec4(0.16f, 0.40f, 0.12f, 1.00f);
-    c[ImGuiCol_TableHeaderBg]   = ImVec4(0.06f, 0.13f, 0.05f, 1.00f);
-    c[ImGuiCol_TableBorderStrong] = edge;
-    c[ImGuiCol_TableBorderLight]  = ImVec4(0.08f, 0.20f, 0.06f, 1.00f);
-    c[ImGuiCol_TableRowBg]      = ImVec4(0.00f, 0.00f, 0.00f, 0.00f);
-    c[ImGuiCol_TableRowBgAlt]   = ImVec4(0.27f, 1.00f, 0.00f, 0.035f);
-    c[ImGuiCol_NavCursor]       = green;
-    c[ImGuiCol_DragDropTarget]  = green;
+    const ThemeColour *tbl = theme == THEME_PAPER ? THEME_PAPER_COLOURS
+                                                  : THEME_DARK_COLOURS;
+    const size_t n = theme == THEME_PAPER ? SDL_arraysize(THEME_PAPER_COLOURS)
+                                          : SDL_arraysize(THEME_DARK_COLOURS);
+    /* Every slot the other theme sets, both themes set - otherwise switching
+     * leaves one colour behind from the theme before it. */
+    for (size_t i = 0; i < n; i++) st.Colors[tbl[i].idx] = tbl[i].c;
 }
 
 /*
@@ -1021,6 +1184,59 @@ static void draw_menu_bar(App *app)
         if (ImGui::MenuItem("Screenshot", "F10")) save_screenshot(app);
         ImGui::Separator();
         if (ImGui::MenuItem("Quit", "Ctrl+Q")) app->quit = true;
+        ImGui::EndMenu();
+    }
+
+    /* After File, deliberately: File is the one menu whose x coordinate the
+     * test suite hard-codes (it clicks it at x=20 to reach Save Disk As...),
+     * and keeping it first leaves that valid. */
+    if (ImGui::BeginMenu("View")) {
+        /* Two groups, because they answer different questions: how the
+         * machine's picture is shaped, and what the chrome around it looks
+         * like. The screen's phosphor sits with the first - it is the
+         * machine's own colour - and the interface theme with the second. */
+        ImGui::SeparatorText("Screen");
+        if (ImGui::MenuItem("4:3 display", NULL, app->aspect == ASPECT_43)) {
+            app->aspect = ASPECT_43;
+            set_status(app, "4:3 display (as the machine's monitor)");
+        }
+        if (ImGui::MenuItem("Square pixels", NULL, app->aspect == ASPECT_SQUARE)) {
+            app->aspect = ASPECT_SQUARE;
+            set_status(app, "square pixels (1:1 dots)");
+        }
+        if (ImGui::MenuItem("Snap to whole pixels", NULL, app->snap)) {
+            app->snap = !app->snap;
+            set_status(app, "whole-pixel snapping %s", app->snap ? "on" : "off");
+        }
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Every dot the same size, at the cost of an exact aspect");
+
+        ImGui::SeparatorText("Phosphor");
+        for (int i = 0; i < P2500_PHOSPHOR_COUNT; i++) {
+            const P2500PhosphorId id = (P2500PhosphorId)i;
+            /* Green is labelled as the machine's own, so nothing learned off
+             * a different one gets mistaken for a fact about the hardware. */
+            char label[32];
+            SDL_snprintf(label, sizeof label, "%s%s", p2500_phosphor_name(id),
+                         id == P2500_PHOSPHOR_GREEN ? " (as shipped)" : "");
+            label[0] = (char)SDL_toupper(label[0]);
+            if (ImGui::MenuItem(label, NULL, app->phosphor == id)) {
+                app->phosphor = id;
+                set_status(app, "screen phosphor: %s", p2500_phosphor_name(id));
+            }
+        }
+
+        ImGui::SeparatorText("Interface");
+        if (ImGui::MenuItem("Dark", NULL, app->theme == THEME_DARK)) {
+            app->theme = THEME_DARK;
+            apply_style(app->theme);
+            set_status(app, "interface theme: dark");
+        }
+        if (ImGui::MenuItem("Paper", NULL, app->theme == THEME_PAPER)) {
+            app->theme = THEME_PAPER;
+            apply_style(app->theme);
+            set_status(app, "interface theme: paper");
+        }
         ImGui::EndMenu();
     }
 
@@ -1463,6 +1679,154 @@ static void pace_field(App *app)
     }
 }
 
+/* Where the emulated screen is drawn, and how the pixels get there.
+ *
+ * Pulled out of the frame callback because it is the one piece of the
+ * front-end whose output is a claim about pixels: --shot-window reports it,
+ * and the test suite holds a capture against the numbers.
+ *
+ * The four combinations of aspect x snap are all meaningful:
+ *
+ *            |  snap on                      |  snap off
+ *   square   |  uniform integer scale        |  fills at the native 2.22:1
+ *   4:3      |  per-axis integer multiples   |  exact 4:3  (the default)
+ *
+ * so snapping is one flag against two aspects rather than a four-way list.
+ * Square+snap is the pre-2026-10 behaviour exactly, which is what the test
+ * suite pins itself to - see P2500_DISPLAY. */
+typedef struct {
+    SDL_FRect dst;        /* the screen rect, in window pixels */
+    int pre_mx, pre_my;   /* integer prescale multiples */
+    bool two_pass;        /* false when dst is already an exact multiple */
+    bool direct_linear;   /* dst is smaller than native: filter in one pass */
+    int snap_x, snap_y;   /* whole-dot multiples actually used; 0 = none fit */
+} ScreenLayout;
+
+static ScreenLayout screen_layout(const App *app, int win_w, int win_h, int top)
+{
+    ScreenLayout L;
+    SDL_zero(L);
+    L.pre_mx = L.pre_my = 1;
+    const int nw = app->info.width, nh = app->info.height;
+    const int avail = win_h - top;
+    if (nw <= 0 || nh <= 0 || win_w <= 0 || avail <= 0) {
+        L.dst.y = (float)top;
+        return L;
+    }
+
+    /* The largest rect of the wanted shape that fits below the menu bar. */
+    float rw, rh;
+    if (app->aspect == ASPECT_SQUARE) {
+        const float s = SDL_min((float)win_w / (float)nw, (float)avail / (float)nh);
+        rw = (float)nw * s; rh = (float)nh * s;
+    } else {
+        const float s = SDL_min((float)win_w / (float)DISPLAY_ASPECT_W,
+                                (float)avail / (float)DISPLAY_ASPECT_H);
+        rw = (float)DISPLAY_ASPECT_W * s; rh = (float)DISPLAY_ASPECT_H * s;
+    }
+
+    if (app->snap) {
+        const int max_sx = (int)floorf(rw / (float)nw);
+        const int max_sy = (int)floorf(rh / (float)nh);
+        if (app->aspect == ASPECT_SQUARE) {
+            /* One multiple for both axes, so every dot stays exactly square
+             * and the rect keeps the framebuffer's own proportions. */
+            int sc = SDL_min(max_sx, max_sy);
+            if (sc < 1) sc = 1;
+            rw = (float)(nw * sc); rh = (float)(nh * sc);
+            L.snap_x = L.snap_y = sc;
+        } else {
+            /* 4:3 cannot be hit by flooring each axis on its own, and the
+             * failure is not subtle: a 1600x900 window floors to 1x3, which
+             * is a rect of aspect 0.74 - a portrait picture in 4:3 mode.
+             * (It used to, and this is the bug that reading fixed.)
+             *
+             * Search the pairs instead and keep the largest whose aspect is
+             * actually close to 4:3. The pairs are few - no window holds
+             * more than a handful of whole 640x288 screens - so an exhaustive
+             * search is cheaper than being clever about it. */
+            const float target = (float)DISPLAY_ASPECT_W / (float)DISPLAY_ASPECT_H;
+            long best_area = 0;
+            for (int sy = 1; sy <= max_sy; sy++) {
+                for (int sx = 1; sx <= max_sx; sx++) {
+                    const float a = (float)(nw * sx) / (float)(nh * sy);
+                    if (SDL_fabsf(a / target - 1.0f) > SNAP_ASPECT_TOLERANCE) continue;
+                    const long area = (long)nw * sx * nh * sy;
+                    if (area > best_area) { best_area = area; L.snap_x = sx; L.snap_y = sy; }
+                }
+            }
+            /* Nothing close enough: keep the exact 4:3 rect and let the
+             * filter deal with it. Reported, so "snapping did nothing" is
+             * visible rather than mysterious. */
+            if (best_area) {
+                rw = (float)(nw * L.snap_x); rh = (float)(nh * L.snap_y);
+            }
+        }
+    }
+
+    L.dst.w = rw;
+    L.dst.h = rh;
+    L.dst.x = ((float)win_w - rw) * 0.5f;
+    L.dst.y = (float)top + ((float)avail - rh) * 0.5f;
+    if (L.dst.y < (float)top) L.dst.y = (float)top;
+
+    /* The filter, and the reason it is two passes rather than one.
+     *
+     * Plain nearest at a non-integer scale is the defect being fixed, not a
+     * theoretical worry: at 1.37x some dot columns land 1 px wide and others
+     * 2 px, so glyph stems visibly alternate thick and thin across a row and
+     * the whole screen shimmers while the window edge is dragged. Plain
+     * linear from 640x288 straight to the window blurs an 8x12 glyph into
+     * mush. Edge-interpolating filters (2xSaI, HQ2x, Scale2x) are worse than
+     * either here: they are integer 2x/3x only - the case that needs no help
+     * - and they round the corners of glyphs that came out of a hardware
+     * character ROM as square-cornered dot columns.
+     *
+     * What works is sharp bilinear: nearest to an integer multiple at least
+     * the target size, then one linear pass that therefore only ever
+     * downscales, so each output pixel averages about two source samples.
+     * Edges stay crisp and the dot widths come out even rather than lumpy.
+     *
+     * SDL 3.4 has this as SDL_SCALEMODE_PIXELART and it is NOT used, on
+     * purpose: measured with tools/sdl_scalemode_probe.c, it degrades to
+     * plain nearest on the software renderer, which is what
+     * SDL_VIDEODRIVER=dummy gives the test suite. Headless captures would
+     * then stop matching what a user sees on a GPU - unacceptable in a
+     * project that asserts on pixels. Two blits behave identically
+     * everywhere. */
+    int mx = (int)ceilf(rw / (float)nw), my = (int)ceilf(rh / (float)nh);
+    L.pre_mx = SDL_clamp(mx, 1, PRESCALE_MAX);
+    L.pre_my = SDL_clamp(my, 1, PRESCALE_MAX);
+    L.two_pass = rw != (float)(nw * L.pre_mx) || rh != (float)(nh * L.pre_my);
+    /* A window smaller than the screen itself needs no prescale: both
+     * multiples are already 1, so the intermediate would be a pixel-for-pixel
+     * copy of the framebuffer and the linear pass can read it directly. */
+    L.direct_linear = L.two_pass && L.pre_mx == 1 && L.pre_my == 1;
+    return L;
+}
+
+/* The intermediate target for the second pass, grown on demand. Keyed on the
+ * size it needs to be, so a mode change (graphics mode is 512x256) or a
+ * resize replaces it without any explicit invalidation. */
+static bool ensure_prescale(App *app, int mx, int my)
+{
+    const int w = app->info.width * mx, h = app->info.height * my;
+    if (app->prescale && app->prescale_w == w && app->prescale_h == h) return true;
+    SDL_Texture *t = SDL_CreateTexture(app->renderer, SDL_PIXELFORMAT_ARGB8888,
+                                       SDL_TEXTUREACCESS_TARGET, w, h);
+    if (!t) {
+        SDL_Log("prescale target %dx%d: %s - falling back to one pass", w, h,
+                SDL_GetError());
+        return false;
+    }
+    SDL_SetTextureScaleMode(t, SDL_SCALEMODE_LINEAR);
+    if (app->prescale) SDL_DestroyTexture(app->prescale);
+    app->prescale = t;
+    app->prescale_w = w;
+    app->prescale_h = h;
+    return true;
+}
+
 static bool make_screen_texture(App *app)
 {
     p2500_video_info(&app->m, &app->info);
@@ -1481,6 +1845,69 @@ static bool make_screen_texture(App *app)
     return app->fb != NULL;
 }
 
+/* Display settings come from two places: P2500_DISPLAY in the environment,
+ * and --aspect / --snap on the command line, with the flags winning.
+ *
+ * The env var exists for the test suite. It has 54 p2500-gui invocations,
+ * and threading two new flags through all of them is a bug factory;
+ * run_tests.sh exports P2500_DISPLAY=aspect=square,snap=on once at the top
+ * instead, which pins the whole suite to the pre-2026-10 geometry so no
+ * existing capture moves. It is also the override a config file would need,
+ * if one is ever added, to keep a developer's saved settings out of the
+ * suite. Both are parsed into sentinels first so "not given" stays
+ * distinguishable from "given the default".
+ *
+ * Returns false on a value it does not recognise: a typo in an environment
+ * variable that silently changed how the screen was rendered would be a
+ * miserable thing to debug. */
+static bool parse_aspect(const char *v, int *out)
+{
+    if (!SDL_strcasecmp(v, "43") || !SDL_strcasecmp(v, "4:3")) { *out = ASPECT_43; return true; }
+    if (!SDL_strcasecmp(v, "square") || !SDL_strcasecmp(v, "1:1")) { *out = ASPECT_SQUARE; return true; }
+    return false;
+}
+
+static bool parse_onoff(const char *v, int *out)
+{
+    if (!SDL_strcasecmp(v, "on") || !SDL_strcasecmp(v, "1") ||
+        !SDL_strcasecmp(v, "yes") || !SDL_strcasecmp(v, "true")) { *out = 1; return true; }
+    if (!SDL_strcasecmp(v, "off") || !SDL_strcasecmp(v, "0") ||
+        !SDL_strcasecmp(v, "no") || !SDL_strcasecmp(v, "false")) { *out = 0; return true; }
+    return false;
+}
+
+/* P2500_DISPLAY is a comma-separated list of key=value pairs. Unknown keys
+ * are rejected rather than ignored, for the same reason as above. */
+static bool parse_display_env(const char *env, int *aspect, int *snap, int *phosphor,
+                              int *theme)
+{
+    char buf[256];
+    SDL_strlcpy(buf, env, sizeof buf);
+    bool ok = true;
+    char *save = NULL;
+    for (char *tok = SDL_strtok_r(buf, ",", &save); tok; tok = SDL_strtok_r(NULL, ",", &save)) {
+        char *eq = SDL_strchr(tok, '=');
+        if (!eq) { SDL_Log("P2500_DISPLAY: expected key=value, got '%s'", tok); ok = false; continue; }
+        *eq = '\0';
+        const char *key = tok, *val = eq + 1;
+        if (!SDL_strcasecmp(key, "aspect")) {
+            if (!parse_aspect(val, aspect)) { SDL_Log("P2500_DISPLAY aspect: '%s' is not 4:3 or square", val); ok = false; }
+        } else if (!SDL_strcasecmp(key, "snap")) {
+            if (!parse_onoff(val, snap)) { SDL_Log("P2500_DISPLAY snap: '%s' is not on or off", val); ok = false; }
+        } else if (!SDL_strcasecmp(key, "theme")) {
+            if (!parse_theme(val, theme)) { SDL_Log("P2500_DISPLAY theme: '%s' is not dark or paper", val); ok = false; }
+        } else if (!SDL_strcasecmp(key, "phosphor")) {
+            P2500PhosphorId id;
+            if (p2500_phosphor_by_name(val, &id)) *phosphor = (int)id;
+            else { SDL_Log("P2500_DISPLAY phosphor: no such screen colour '%s'", val); ok = false; }
+        } else {
+            SDL_Log("P2500_DISPLAY: unknown setting '%s'", key);
+            ok = false;
+        }
+    }
+    return ok;
+}
+
 /* One usage text for both callers: --help prints it to stdout and exits 0,
  * a bad argument prints it to stderr and exits 1. */
 static void usage(FILE *out)
@@ -1490,7 +1917,8 @@ static void usage(FILE *out)
                  "                 [--disk path] [--disk-b path] [--disk-c path]\n"
                  "                 [--disk-d path]\n"
                  "                 [--write-protect LETTERS]\n"
-                 "                 [--window WxH]\n"
+                 "                 [--window WxH] [--aspect 4:3|square] [--snap on|off]\n"
+                 "                 [--phosphor green|white] [--theme dark|paper]\n"
                  "                 [--frames N] [--screenshot out.ppm] [--shot-window out.ppm]\n"
                  "                 [--push-at MS:STRING ...] [--no-caps-lock]\n"
                  "                 [--panels system,devices,memory,disasm,log] [--verbose-io]\n"
@@ -1500,6 +1928,13 @@ static void usage(FILE *out)
                  "                 [--break ADDR ...] [--watch ADDR ...]\n"
                  "                 [--watch-break ADDR ...]\n"
                  "                 [--symbols FILE ...] [--help]\n"
+                 "\nThe screen is drawn 4:3 with smooth scaling by default, which is\n"
+                 "what the machine's own monitor looked like; --aspect square gives\n"
+                 "1:1 dots and --snap on holds every dot to a whole number of\n"
+                 "pixels. P2500_DISPLAY=aspect=square,snap=on sets both from the\n"
+                 "environment, and the flags override it. --phosphor white\n"
+                 "swaps the green screen for a neutral grey one, which is not\n"
+                 "what the machine had but is easier on some eyes.\n"
                  "\nA mounted disk is writable in memory and never written back to\n"
                  "the file it came from: File > Save Disk As... keeps the changes,\n"
                  "and --write-protect ab mounts those drives read-only.\n"
@@ -1517,6 +1952,14 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[])
     int scale = SCALE_DEFAULT;
     /* An explicit window size, overriding the one --scale implies. */
     int win_w_arg = 0, win_h_arg = 0;
+    /* -1 = not given, so P2500_DISPLAY and the flags can be told apart. */
+    int aspect = -1, snap = -1, phosphor = -1, theme = -1;
+    if (const char *env = SDL_getenv("P2500_DISPLAY")) {
+        if (!parse_display_env(env, &aspect, &snap, &phosphor, &theme)) {
+            usage(stderr);
+            return SDL_APP_FAILURE;
+        }
+    }
     unsigned long frame_limit = 0;
     const char *shot_path = NULL;
     const char *win_shot_path = NULL;
@@ -1594,6 +2037,36 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[])
             }
         }
         else if (!strcmp(argv[i], "--frames") && i + 1 < argc) frame_limit = strtoul(argv[++i], NULL, 0);
+        else if (!strcmp(argv[i], "--aspect") && i + 1 < argc) {
+            if (!parse_aspect(argv[++i], &aspect)) {
+                SDL_Log("--aspect: expected 4:3 or square, got %s", argv[i]);
+                usage(stderr);
+                return SDL_APP_FAILURE;
+            }
+        }
+        else if (!strcmp(argv[i], "--snap") && i + 1 < argc) {
+            if (!parse_onoff(argv[++i], &snap)) {
+                SDL_Log("--snap: expected on or off, got %s", argv[i]);
+                usage(stderr);
+                return SDL_APP_FAILURE;
+            }
+        }
+        else if (!strcmp(argv[i], "--phosphor") && i + 1 < argc) {
+            P2500PhosphorId id;
+            if (!p2500_phosphor_by_name(argv[++i], &id)) {
+                SDL_Log("--phosphor: no such screen colour: %s", argv[i]);
+                usage(stderr);
+                return SDL_APP_FAILURE;
+            }
+            phosphor = (int)id;
+        }
+        else if (!strcmp(argv[i], "--theme") && i + 1 < argc) {
+            if (!parse_theme(argv[++i], &theme)) {
+                SDL_Log("--theme: expected dark or paper, got %s", argv[i]);
+                usage(stderr);
+                return SDL_APP_FAILURE;
+            }
+        }
         else if (!strcmp(argv[i], "--screenshot") && i + 1 < argc) shot_path = argv[++i];
         else if (!strcmp(argv[i], "--shot-window") && i + 1 < argc) win_shot_path = argv[++i];
         else if (!strcmp(argv[i], "--no-caps-lock")) caps_lock = false;
@@ -1675,6 +2148,10 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[])
     app->shot_path = shot_path;
     app->win_shot_path = win_shot_path;
     app->caps_lock = caps_lock;
+    app->aspect = aspect < 0 ? ASPECT_43 : aspect;
+    app->snap = snap > 0;
+    app->phosphor = phosphor < 0 ? P2500_PHOSPHOR_GREEN : (P2500PhosphorId)phosphor;
+    app->theme = theme < 0 ? THEME_DARK : theme;
     app->write_protect = write_protect;
     app->force_pacing = force_pacing;
     app->speed = speed;
@@ -1728,8 +2205,45 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[])
     p2500_video_info(&app->m, &app->info);
     char window_title[64];
     SDL_snprintf(window_title, sizeof window_title, "Philips P2500 v%s", P2500_VERSION_STR);
-    const int win_w = win_w_arg ? win_w_arg : app->info.width * scale;
-    const int win_h = win_h_arg ? win_h_arg : app->info.height * scale + 24;
+    /* The default window is sized so the screen rect fills it exactly, which
+     * in 4:3 means growing vertically: the width stays an exact multiple of
+     * the framebuffer's, so no horizontal dot detail is ever discarded, and
+     * the height follows from the aspect. --scale therefore means "N window
+     * pixels per dot horizontally"; under --aspect square it means what it
+     * always did. At scale 2 that is 1280x984 rather than 1280x600.
+     *
+     * Then clamped to the display's usable bounds, dropping a scale step at a
+     * time: 984 px plus a title bar does not fit a 1080p laptop, and a window
+     * that opens taller than the screen is worse than a smaller one. An
+     * explicit --window is honoured exactly and never clamped - the test
+     * suite depends on getting the size it asked for.
+     *
+     * The clamp is skipped under the dummy video driver, and that is not a
+     * detail: dummy reports a fixed 1024x768 stub display, so clamping to it
+     * would shrink the default window headlessly - a scale step smaller than
+     * what a user with a real monitor gets, and a different size from what
+     * every pre-existing --shot-window capture was taken at. There is no
+     * display to fit, so --scale is trusted instead. */
+    int win_w = win_w_arg, win_h = win_h_arg;
+    if (!win_w || !win_h) {
+        SDL_Rect usable;
+        SDL_zero(usable);
+        const char *drv = SDL_GetCurrentVideoDriver();
+        const SDL_DisplayID did = SDL_GetPrimaryDisplay();
+        const bool have_display = drv && SDL_strcmp(drv, "dummy") != 0 && did != 0;
+        if (!have_display || !SDL_GetDisplayUsableBounds(did, &usable))
+            SDL_zero(usable);
+        for (; scale >= 1; scale--) {
+            win_w = app->info.width * scale;
+            win_h = (app->aspect == ASPECT_SQUARE
+                     ? app->info.height * scale
+                     : win_w * DISPLAY_ASPECT_H / DISPLAY_ASPECT_W) + MENU_RESERVE;
+            if (scale == 1) break;
+            if (usable.w <= 0 || usable.h <= 0) break;   /* unknown: trust --scale */
+            if (win_w <= usable.w && win_h <= usable.h) break;
+        }
+        if (scale < 1) scale = 1;
+    }
     if (!SDL_CreateWindowAndRenderer(window_title, win_w, win_h,
                                      SDL_WINDOW_RESIZABLE,
                                      &app->window, &app->renderer)) {
@@ -1747,7 +2261,7 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[])
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
     ImGui::GetIO().IniFilename = NULL; /* do not litter the working dir */
-    apply_style();
+    apply_style(app->theme);
     app->has_ui = ImGui_ImplSDL3_InitForSDLRenderer(app->window, app->renderer) &&
                   ImGui_ImplSDLRenderer3_Init(app->renderer);
     if (!app->has_ui) SDL_Log("ImGui backend init failed; running without a UI");
@@ -1936,7 +2450,8 @@ SDL_AppResult SDL_AppIterate(void *appstate)
 
     /* ~3 Hz blink, which is the usual rate for a text cursor. */
     bool blink_on = ((app->frames / 8) & 1) == 0;
-    p2500_video_render(&app->m, &PALETTE, blink_on, app->fb, app->info.width);
+    p2500_video_render(&app->m, p2500_phosphor(app->phosphor), blink_on,
+                       app->fb, app->info.width);
     SDL_UpdateTexture(app->screen, NULL, app->fb,
                       app->info.width * (int)sizeof(uint32_t));
 
@@ -2026,26 +2541,14 @@ SDL_AppResult SDL_AppIterate(void *appstate)
         if (act.back || act.back_to_break) do_rewind(app, act);
     }
 
-    /* Integer-scale the screen into whatever is left below the menu bar and
-     * centre it. Done by hand rather than with SDL_SetRenderLogicalPresentation
+    /* Scale the screen into whatever is left below the menu bar and centre
+     * it. Done by hand rather than with SDL_SetRenderLogicalPresentation
      * because that would scale the UI too. */
     int win_w = 0, win_h = 0;
     SDL_GetRenderOutputSize(app->renderer, &win_w, &win_h);
     const int top = (int)(app->menu_h + 0.5f);
-    const int avail_h = win_h - top;
-    int scale = 1;
-    if (app->info.width > 0 && app->info.height > 0 && avail_h > 0) {
-        int sx = win_w / app->info.width;
-        int sy = avail_h / app->info.height;
-        scale = sx < sy ? sx : sy;
-        if (scale < 1) scale = 1;
-    }
-    SDL_FRect dst;
-    dst.w = (float)(app->info.width * scale);
-    dst.h = (float)(app->info.height * scale);
-    dst.x = ((float)win_w - dst.w) * 0.5f;
-    dst.y = (float)top + ((float)avail_h - dst.h) * 0.5f;
-    if (dst.y < (float)top) dst.y = (float)top;
+    const ScreenLayout lay = screen_layout(app, win_w, win_h, top);
+    const SDL_FRect dst = lay.dst;
 
     /* Reported so a headless run can assert the layout directly - and, now
      * that the letterbox is a different black from the screen's own
@@ -2056,6 +2559,26 @@ SDL_AppResult SDL_AppIterate(void *appstate)
     if (app->win_shot_path && app->frames == 2) {
         SDL_Log("layout: menu %d px, screen at y=%.0f x=%.0f, %.0fx%.0f",
                 top, dst.y, dst.x, dst.w, dst.h);
+        /* Everything the screen rect was derived from, so a capture can be
+         * held against the settings that produced it rather than against
+         * literals that go stale the moment a setting is switchable. */
+        const uint32_t bg = p2500_phosphor(app->phosphor)->bg;
+        uint8_t lb[3];
+        letterbox_rgb(app->theme, lb);
+        char snapped[16];
+        if (!app->snap) SDL_strlcpy(snapped, "off", sizeof snapped);
+        else if (lay.snap_x) SDL_snprintf(snapped, sizeof snapped, "%dx%d",
+                                          lay.snap_x, lay.snap_y);
+        else SDL_strlcpy(snapped, "nofit", sizeof snapped);
+        SDL_Log("display: aspect %s, snap %s, snapped %s, filter %s %dx%d,"
+                " phosphor %s, theme %s, letterbox %u,%u,%u, screen-bg %u,%u,%u",
+                app->aspect == ASPECT_SQUARE ? "square" : "4:3",
+                app->snap ? "on" : "off", snapped,
+                lay.direct_linear ? "linear" : lay.two_pass ? "two-pass" : "nearest",
+                lay.pre_mx, lay.pre_my,
+                p2500_phosphor_name(app->phosphor), theme_name(app->theme),
+                lb[0], lb[1], lb[2],
+                (bg >> 16) & 0xFF, (bg >> 8) & 0xFF, bg & 0xFF);
         if (app->panels.goto_geom.field_x >= 0.0f)
             SDL_Log("memory panel: goto field %.0f,%.0f button %.0f,%.0f;"
                     " watch field %.0f,%.0f button %.0f,%.0f",
@@ -2070,10 +2593,24 @@ SDL_AppResult SDL_AppIterate(void *appstate)
                     app->panels.rewind_geom.field_x, app->panels.rewind_geom.field_y);
     }
 
-    SDL_SetRenderDrawColor(app->renderer, LETTERBOX[0], LETTERBOX[1],
-                           LETTERBOX[2], 255);
+    uint8_t lbox[3];
+    letterbox_rgb(app->theme, lbox);
+    SDL_SetRenderDrawColor(app->renderer, lbox[0], lbox[1], lbox[2], 255);
     SDL_RenderClear(app->renderer);
-    SDL_RenderTexture(app->renderer, app->screen, NULL, &dst);
+    /* The scale mode is set every frame rather than once at creation: which
+     * filter belongs on the screen texture depends on the layout, and the
+     * layout changes with the window. */
+    SDL_SetTextureScaleMode(app->screen, lay.direct_linear ? SDL_SCALEMODE_LINEAR
+                                                           : SDL_SCALEMODE_NEAREST);
+    if (lay.two_pass && !lay.direct_linear &&
+        ensure_prescale(app, lay.pre_mx, lay.pre_my)) {
+        SDL_SetRenderTarget(app->renderer, app->prescale);
+        SDL_RenderTexture(app->renderer, app->screen, NULL, NULL);
+        SDL_SetRenderTarget(app->renderer, NULL);
+        SDL_RenderTexture(app->renderer, app->prescale, NULL, &dst);
+    } else {
+        SDL_RenderTexture(app->renderer, app->screen, NULL, &dst);
+    }
     if (app->has_ui)
         ImGui_ImplSDLRenderer3_RenderDrawData(ImGui::GetDrawData(), app->renderer);
     SDL_RenderPresent(app->renderer);

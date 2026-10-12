@@ -70,6 +70,34 @@ typedef struct {
     uint32_t fg, bg, fg_dim; /* 0xAARRGGBB */
 } P2500Palette;
 
+/* Screen colours, named so both front-ends share one definition instead of
+ * each carrying its own copy of the same literals.
+ *
+ * GREEN is the machine's own phosphor and is what ships. WHITE is not: it is
+ * there because green on black is hard for some people to read, and nothing
+ * learned from a run in it is a fact about the hardware. Adding one is three
+ * literals in the table in video.c - amber would go here if wanted.
+ *
+ * The dim entry is hand-authored per phosphor rather than derived. Green's
+ * shipped pair is 0.57x on red and 0.55x on green - not one ratio - so a
+ * formula would either move the shipped colour or need a fudge factor. */
+typedef enum {
+    P2500_PHOSPHOR_GREEN = 0,
+    P2500_PHOSPHOR_WHITE,
+    P2500_PHOSPHOR_COUNT
+} P2500PhosphorId;
+
+/* The palette for a preset. Out-of-range ids give GREEN, so a caller that
+ * never checks still renders the machine's own colours. */
+const P2500Palette *p2500_phosphor(P2500PhosphorId id);
+
+/* Its name, as the command line and the menu spell it ("green", "white"). */
+const char *p2500_phosphor_name(P2500PhosphorId id);
+
+/* Name -> id, case-insensitive. False if nothing matches, so a typo on the
+ * command line is an error rather than a silent fall back to green. */
+bool p2500_phosphor_by_name(const char *name, P2500PhosphorId *out);
+
 /* Render the visible screen into `fb`, which must hold at least
  * info.height rows of `pitch_px` pixels. `blink_on` is the caller's blink
  * phase, used for the cursor (R10 bits 6-5) and the flash attribute; pass

@@ -1,5 +1,49 @@
 #include "video.h"
 
+#include <string.h>
+
+/* One definition of the screen colours for both front-ends. Green's three
+ * values are the ones the emulator has always rendered and are not to be
+ * touched: tests/fixtures and every shipped screenshot are in them. */
+static const struct {
+    const char *name;
+    P2500Palette pal;
+} PHOSPHORS[P2500_PHOSPHOR_COUNT] = {
+    /* The machine's own: a green phosphor on an almost-black screen. */
+    [P2500_PHOSPHOR_GREEN] = { "green",
+        { 0xFF46FF00u, 0xFF080C08u, 0xFF288C00u } },
+    /* Not authentic, and not pretending to be: a neutral grey at the same
+     * luminance relationships, for readers who find green on black hard
+     * going. The background keeps a trace of the phosphor's darkness rather
+     * than being pure black, so the screen still reads as a screen. */
+    [P2500_PHOSPHOR_WHITE] = { "white",
+        { 0xFFE6E6E6u, 0xFF0A0A0Au, 0xFF8C8C8Cu } },
+};
+
+const P2500Palette *p2500_phosphor(P2500PhosphorId id) {
+    if (id < 0 || id >= P2500_PHOSPHOR_COUNT) id = P2500_PHOSPHOR_GREEN;
+    return &PHOSPHORS[id].pal;
+}
+
+const char *p2500_phosphor_name(P2500PhosphorId id) {
+    if (id < 0 || id >= P2500_PHOSPHOR_COUNT) id = P2500_PHOSPHOR_GREEN;
+    return PHOSPHORS[id].name;
+}
+
+bool p2500_phosphor_by_name(const char *name, P2500PhosphorId *out) {
+    if (!name) return false;
+    for (int i = 0; i < P2500_PHOSPHOR_COUNT; i++) {
+        const char *a = name, *b = PHOSPHORS[i].name;
+        while (*a && *b) {
+            int ca = *a >= 'A' && *a <= 'Z' ? *a + 32 : *a;
+            if (ca != *b) break;
+            a++; b++;
+        }
+        if (!*a && !*b) { *out = (P2500PhosphorId)i; return true; }
+    }
+    return false;
+}
+
 void p2500_video_info(const P2500Machine *m, P2500VideoInfo *info) {
     int cols = m->crtc_regs[1];
     int rows = m->crtc_regs[6] & 0x7F;

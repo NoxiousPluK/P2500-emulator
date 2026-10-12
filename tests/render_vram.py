@@ -34,9 +34,13 @@ CELL_W, CELL_H = 8, 12  # confirmed CRTC cell: 8 pixels wide, 12 scanlines tall
 ROM_STRIDE = 16         # bytes per code in the character ROM; rows 12-15 unused
 PX = 6  # upscale factor for a legible PNG
 
-FG = (0, 255, 70)   # green phosphor - period-plausible for this class of terminal
+# Kept in step with the core's own phosphor table (src/core/video.c): these
+# are P2500_PHOSPHOR_GREEN's 0x46FF00 / 0x080C08 / 0x288C00 as RGB triples.
+# They used to have red and blue swapped, which nothing caught because this
+# script is a standalone dev tool and run_tests.sh does not drive it.
+FG = (70, 255, 0)
 BG = (8, 12, 8)
-FG_DIM = (0, 140, 40)
+FG_DIM = (40, 140, 0)
 
 # Established, not guessed: the P2219 CP/M manual defines the ESC 0 parameter
 # bits (0 low intensity, 1 flash, 4 reverse, 5 underline) and CBIOS's handler

@@ -29,6 +29,7 @@ this software or do this research.
 - CP/M 2.2 boot from floppy disk images, including disk swapping
 - Reading and writing (into the image in memory, saved only when you ask) disks
 - MC6845 CRTC-driven text video (80×24, 8×12 cells) and 512×256 high-resolution graphics mode
+- 4:3 output with smooth scaling, or 1:1 pixel mode
 - Cartridge support including SESAM-key emulation
 - Keyboard input
 - Adjustable emulation speed
@@ -101,27 +102,22 @@ are configured — unshifted keys produce capitals.
 
 ### Menu bar
 
-**File**: Load Disk A/B/C, Reset, Pause, Screenshot, Quit.
-**Machine**: capitals lock, Cartridge..., speed.
-**Debug**: the five debugger panels.
-
-At the right of the bar, a row of status lamps doubles as controls:
+Besides the regular menu options, at the right of the bar, a row of status indicators double as clickable controls:
 
 | Lamp | Shows | Click |
 |---|---|---|
-| `A B C D` | a disk is attached in that drive — three brightnesses, see below | load a disk; right-click ejects |
-| `Cartridge: ...` | the port $0F cartridge slot's contents (SESAM key ID / loaded ROM) | opens the Cartridge window; right-click toggles insert/eject |
+| `A B C D` | disk status | load a disk; right-click ejects |
+| `Cartridge: ...` | cartridge slot contents (SESAM key ID / loaded ROM) | opens the Cartridge window; right-click toggles insert/eject |
 | ▶ / ⏸ | running / paused | toggle pause |
 | ⊓⊔ | capitals lock | toggle |
 | `1x` | current speed (lit when not 1×) | toggle unlimited; right-click for the speed list |
 
 **The drive lamps have three readings.** There are four of them
 because the hardware has four drive-select lines (PIO port A bits 4–7),
-but how many drive letters a guest BIOS maps is its own business:
-`P25K_B`'s CBIOS maps three, `P25K_G`'s two. So a lamp is dim for an empty
-slot, mid-bright for a disk the running BIOS will not address, and
-bright for one it will. A mid-bright lamp means the guest will answer
-`Bdos Err On D: Select`.
+but how many drive letters a guest BIOS maps is dependent on its PBIOS/CBIOS.
+A lamp is dim for an empty slot, mid-bright for a disk the running BIOS will
+not address, and bright for one it will. A mid-bright lamp means the guest
+will answer `Bdos Err On D: Select`.
 
 The **Cartridge** window (Machine menu, or click its lamp) covers port
 $0F; a generic plug-in slot whose best-documented use is the SESAM
@@ -137,8 +133,12 @@ against a real key, or load an arbitrary cartridge ROM file.
 | `--disks A[,B[,C[,D]]]` | attach images to the four drives in order; an empty field skips one |
 | `--disk PATH` / `--disk-b` / `--disk-c` / `--disk-d` | the same, one drive at a time |
 | `--rom PATH` / `--charrom PATH` | boot EPROM, character generator |
-| `--scale N` | initial window zoom (the window is resizable and letterboxes with integer scaling) |
+| `--scale N` | initial window zoom |
 | `--window WxH` | an explicit initial window size instead, for a window the screen does not divide evenly |
+| `--aspect 4:3` \| `square` | pixel aspect. `4:3` (realistic default) or `square` gives 1:1 dots |
+| `--snap on` \| `off` | hold every dot to a whole number of window pixels if possible. Off by default |
+| `--phosphor green` \| `white` | screen colours. `green` is the default; `white` is a neutral grey |
+| `--theme dark` \| `paper` | user interface theme |
 | `--write-protect LETTERS` | mount those drives read-only, e.g. `--write-protect ab` |
 | `--speed X` \| `unlimited` | initial emulation speed |
 | `--no-caps-lock` | boot with capitals lock off |
@@ -346,6 +346,7 @@ scripted runs, probing, and disk-image inspection.
 | `--save-disk PATH` / `--save-disk-b` / `--save-disk-c` / `--save-disk-d` | write that drive's image out at exit |
 | `--write-protect LETTERS` | mount those drives read-only, e.g. `--write-protect ab` |
 | `--cartridge PATH` | attach a byte stream to the port $0F cartridge slot (e.g. a SESAM dongle stream) |
+| `--phosphor green` \| `white` | which screen colours `--dump-screen` renders in; the same table the GUI uses |
 | `--type STRING` / `--type-after MS` / `--type-at MS:STRING` | scripted keystrokes via the queue |
 | `--push-at MS:STRING` | keystrokes via the live ring — the same path a GUI keypress takes |
 | `--max-steps N` | instruction budget (default 2,000,000) |
@@ -436,6 +437,25 @@ Other tools in `tools/`:
 | `z80asm.py` | a small Z80 assembler; `--verify` disassembles its own output and compares it against the source |
 | `mk_sprite.py` | converts a PNG to a pre-shifted 1-bit sprite for smooth motion in a byte-addressed framebuffer |
 | `mk_icon.py` | regenerates `src/gui/icon_data.h` (the embedded window icon) from `assets/icon/p2500icon.png` — only needed if the artwork changes |
+| `p2500-headless.sh` | runs the GUI with no window and no focus steal, and hands back a PNG — see below |
+| `sdl_scalemode_probe.c` | measures how SDL's scale modes behave on the renderer in use |
+
+### Driving it without a window
+
+`p2500-gui` has a real headless mode — `SDL_VIDEODRIVER=dummy` renders into
+an offscreen surface and `--frames N` runs a fixed number of video fields
+and exits — which is how the whole GUI test suite runs.
+`tools/p2500-headless.sh` wraps it:
+
+```sh
+tools/p2500-headless.sh shot -o out.png            # the composited window
+tools/p2500-headless.sh screen -o screen.png       # the emulated screen only
+tools/p2500-headless.sh text --type 'dir\r'        # the screen as text, via VRAM
+tools/p2500-headless.sh run --panels devices       # anything else, output on stdout
+```
+
+Options it does not recognise are passed straight through, so `--aspect`,
+`--window`, `--panels` and the rest work unchanged.
 
 See `docs/porting-cpm-software.md` for what porting an existing CP/M
 program to the P2500 involves — the binary runs unmodified; the screen

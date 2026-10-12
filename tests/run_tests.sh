@@ -69,6 +69,19 @@ set -u
 SELF=$(cd "$(dirname "$0")" && pwd)/$(basename "$0")
 cd "$(dirname "$SELF")/.."
 
+# Pin the GUI's display geometry for the whole suite. The front-end now
+# defaults to a 4:3 viewport with smooth scaling, which is what the machine
+# looked like; square pixels snapped to whole dots is the geometry every
+# check below was written against, and the one that leaves a capture's
+# glyph edges hard rather than filtered. Set once here rather than threaded
+# through 54 p2500-gui invocations - and it is the same override a config
+# file would need, so a developer's saved settings cannot reach the suite.
+#
+# Consequence worth knowing: this means the *default* display path is
+# covered only by section 7's own aspect checks, which therefore have to be
+# real comparisons rather than smoke tests.
+export P2500_DISPLAY=aspect=square,snap=on
+
 EMU=./p2500-emu
 DISK="disks/P25K_B.raw"
 REF="tests/fixtures/vram_after_banner.bin"
@@ -630,8 +643,11 @@ check(any(lit(x, y) for x in range(w - 24, w) for y in range(2, 18)),
 # the composite is drawn at 2x), and if the banner has no ink there then the
 # probe could never have failed and is reported as broken. That is the guard
 # a previous version of this check lacked - adding a third menu moved the
-# labels under the old strip and it went on passing.
-PROBE_X, PROBE_Y = range(118, 144), range(2, 22)
+# labels under the old strip and it went on passing. It has now earned its
+# keep twice: adding the View menu moved Machine under the old 118..144 strip
+# and this failed loudly rather than quietly. The strip now sits in the gap
+# between Machine and Debug, which is the widest gap with banner ink under it.
+PROBE_X, PROBE_Y = range(172, 195), range(2, 22)
 check(not any(lit(x, y) for x in PROBE_X for y in PROBE_Y),
       "banner ink inside the menu band - screen was not offset")
 sd = open(sys.argv[2], 'rb').read()
@@ -671,7 +687,14 @@ if not m:
     print("    no layout line in the GUI log"); sys.exit(1)
 menu, ly, lx, lw, lh = (int(g) for g in m.groups())
 
-LETTERBOX, SCREEN_BG = (4, 4, 4), (8, 12, 8)
+# Both blacks come from the front-end's own `display:` line rather than
+# being written here: they are settings now, and a literal would quietly go
+# stale the first time a theme or phosphor changed one of them.
+d = re.search(r'display: .*letterbox (\d+),(\d+),(\d+), screen-bg (\d+),(\d+),(\d+)', log)
+if not d:
+    print("    no display line in the GUI log"); sys.exit(1)
+LETTERBOX = tuple(int(g) for g in d.groups()[:3])
+SCREEN_BG = tuple(int(g) for g in d.groups()[3:])
 def at(x, y):
     o = (y * w + x) * 3
     return (px[o], px[o + 1], px[o + 2])
@@ -704,6 +727,253 @@ check(abs(ys[0] - ly) <= 1 and abs(ys[-1] - (ly + lh - 1)) <= 1,
 check(ys[0] > menu, "viewport starts inside the menu band")
 sys.exit(0 if ok else 1)
 VIEWPORT
+
+    # --- the default display geometry ----------------------------------
+    # Everything above runs under P2500_DISPLAY=aspect=square,snap=on, which
+    # is the pre-2026-10 geometry. That pins the suite, but it also means the
+    # *shipped default* - 4:3, smooth - is covered by nothing unless it is
+    # checked here on purpose. Both runs use the same awkward window, so the
+    # only difference between them is the two settings.
+    for mode in "43:--aspect 4:3 --snap off" "sq:--aspect square --snap on"; do
+        tag=${mode%%:*}
+        SDL_VIDEODRIVER=dummy ./p2500-gui --disk "$DISK" --frames 300 \
+            --speed unlimited --window 1000x700 ${mode#*:} \
+            --screenshot "$TMP/asp-$tag.native.ppm" \
+            --shot-window "$TMP/asp-$tag.ppm" >"$TMP/asp-$tag.log" 2>&1
+    done
+    # And that 4:3 really is what ships. Both runs above name their mode
+    # explicitly, so neither would notice the default being changed; this one
+    # passes no display flags at all and drops the suite's own P2500_DISPLAY,
+    # which is the only run in the suite that sees what a user sees.
+    env -u P2500_DISPLAY SDL_VIDEODRIVER=dummy ./p2500-gui --disk "$DISK" \
+        --frames 10 --shot-window "$TMP/asp-def.ppm" >"$TMP/asp-def.log" 2>&1
+    if grep -q 'display: aspect 4:3, snap off,' "$TMP/asp-def.log"; then
+        pass "with no flags and no P2500_DISPLAY the screen is 4:3, unsnapped"
+    else fail "the shipped default is not 4:3 with snapping off"; fi
+
+    python3 - "$TMP/asp-43.ppm" "$TMP/asp-43.native.ppm" "$TMP/asp-43.log" \
+              "$TMP/asp-sq.ppm" "$TMP/asp-sq.native.ppm" "$TMP/asp-sq.log" \
+        <<'ASPECT' && pass "the 4:3 default fills the window and filters; square+snap neither" || fail "the default display geometry is not 4:3, or is not filtered"
+import re, sys
+
+def ppm(path):
+    d = open(path, 'rb').read()
+    hdr = d.split(b'\n', 3)
+    w, h = (int(v) for v in hdr[1].split())
+    return w, h, d[len(b'\n'.join(hdr[:3])) + 1:]
+
+def layout(path):
+    log = open(path).read()
+    m = re.search(r'layout: menu (\d+) px, screen at y=(\d+) x=(\d+), (\d+)x(\d+)', log)
+    # Matched field-by-field rather than as one fixed sequence: the display
+    # line gains fields as settings are added, and a positional regex breaks
+    # every time one does (it already did once, when `snapped` arrived).
+    f = re.search(r'display: aspect (\S+?), .*\bsnap (\w+), .*\bfilter (\S+)', log)
+    if not m or not f:
+        print("    missing layout/display line in " + path); sys.exit(1)
+    return [int(g) for g in m.groups()], f.groups()
+
+ok = True
+def check(cond, why):
+    global ok
+    if not cond:
+        print("    " + why); ok = False
+
+(w43, h43, p43), (ws, hs, ps) = ppm(sys.argv[1]), ppm(sys.argv[4])
+(m43, l43, x43, cw43, ch43), f43 = layout(sys.argv[3])
+(ms, ls, xs_, cws, chs), fs = layout(sys.argv[6])
+
+# 1. The shapes. 4:3 means the rect really is 4:3 and really does use all the
+#    height available below the menu bar; square+snap is the native 2.22:1 at
+#    a whole multiple, which at this window size is 1x.
+check(abs(cw43 / ch43 - 4 / 3) < 0.02, "default rect %dx%d is not 4:3" % (cw43, ch43))
+check(l43 + ch43 >= h43 - 1, "default rect leaves %d px unused below it" % (h43 - l43 - ch43))
+check((cws, chs) == (640, 288), "square+snap gave %dx%d, not the native 640x288" % (cws, chs))
+check((cw43, ch43) != (cws, chs), "both modes drew the same rectangle")
+
+# 2. The settings actually reached the renderer.
+check(f43[0] == "4:3" and f43[1] == "off", "default reported aspect/snap %s/%s" % f43[:2])
+check(fs[0] == "square" and fs[1] == "on", "square run reported aspect/snap %s/%s" % fs[:2])
+check(f43[2] != "nearest", "the 4:3 default reported filter '%s'" % f43[2])
+check(fs[2] == "nearest", "square+snap reported filter '%s', expected nearest" % fs[2])
+
+# 3. The filter does something, and the unfiltered path does not - checked
+#    against the machine's own output rather than against colours written
+#    here. A nearest blit can only ever emit colours that are already in the
+#    640x288 render; a resampling one must introduce intermediate shades. So
+#    --screenshot (the framebuffer) is the ground truth for both.
+def screen_colours(win, native, rect):
+    w, h, px = win
+    nw, nh, npx = native
+    palette = {npx[i:i+3] for i in range(0, nw * nh * 3, 3)}
+    # Densely, and over the top of the rect where CP/M's banner and prompt
+    # are: a sparse grid over a screen that is mostly background samples no
+    # glyph edges at all, and glyph edges are the entire point.
+    x0, y0, cw, ch = rect
+    seen = set()
+    for y in range(y0 + 1, y0 + int(ch * 0.45)):
+        row = y * w
+        for x in range(x0 + 1, x0 + cw - 1):
+            o = (row + x) * 3
+            seen.add(px[o:o+3])
+    return palette, seen
+
+pal43, saw43 = screen_colours((w43, h43, p43), ppm(sys.argv[2]), (x43, l43, cw43, ch43))
+pals, saws = screen_colours((ws, hs, ps), ppm(sys.argv[5]), (xs_, ls, cws, chs))
+# Discriminating power: with a blank screen there are no glyph edges to
+# filter and the comparison below would pass vacuously either way.
+check(len(pal43) > 1, "the emulated screen rendered a single colour - nothing to filter")
+check(sum(1 for c in saw43 if c not in pal43) >= 0 and len(saws) > 1,
+      "the square+snap capture holds one colour - the screen did not draw")
+check(saws <= pals,
+      "square+snap introduced %d colour(s) the framebuffer never had" % len(saws - pals))
+check(not (saw43 <= pal43),
+      "the 4:3 default introduced no intermediate shades - it did not filter")
+sys.exit(0 if ok else 1)
+ASPECT
+
+    # --- snapping must not abandon the aspect ---------------------------
+    # Flooring each axis to a whole number of dots independently does not
+    # give 4:3, and the failure is not subtle: a 1600x900 window floored to
+    # 1x3, a rect of aspect 0.74 - a portrait picture in 4:3 mode. The sizes
+    # below are the ones that used to break it, so this is a regression test
+    # with a known-failing input rather than a hopeful sweep.
+    : > "$TMP/snap.log"
+    for win in 1280x984 1000x700 1600x900 800x600 1920x1464 900x700; do
+        SDL_VIDEODRIVER=dummy ./p2500-gui --frames 3 --aspect 4:3 --snap on \
+            --window "$win" --shot-window "$TMP/snap.ppm" 2>&1 \
+            | grep -E '^(layout|display):' | sed "s/^/$win /" >>"$TMP/snap.log"
+    done
+    python3 - "$TMP/snap.log" <<'SNAP' && pass "whole-pixel snapping never abandons the 4:3 it is snapping within" || fail "snapping produced a rect that is not 4:3"
+import re, sys
+lines = open(sys.argv[1]).read().splitlines()
+geo = {}
+for l in lines:
+    m = re.match(r'(\S+) layout: menu \d+ px, screen at y=\d+ x=\d+, (\d+)x(\d+)', l)
+    if m: geo.setdefault(m.group(1), {})['rect'] = (int(m.group(2)), int(m.group(3)))
+    m = re.match(r'(\S+) display: .*snapped (\S+?),', l)
+    if m: geo.setdefault(m.group(1), {})['snapped'] = m.group(2)
+ok = True
+if len(geo) < 6:
+    print("    only %d of 6 window sizes reported" % len(geo)); ok = False
+for win, g in sorted(geo.items()):
+    w, h = g['rect']
+    err = abs((w / h) / (4 / 3) - 1)
+    # 1/9 is the 2x3 pair, the best whole-dot fit most windows can offer.
+    if err > 0.12:
+        print("    %s: snapped to %dx%d, aspect %.2f (%.0f%% off 4:3), snapped=%s"
+              % (win, w, h, w / h, err * 100, g['snapped'])); ok = False
+    # And when no pair fits, the exact rect must be kept - not a floored one.
+    if g['snapped'] == 'nofit' and err > 0.01:
+        print("    %s: reported no snap fit but the rect is %.0f%% off 4:3"
+              % (win, err * 100)); ok = False
+# Discriminating power: at least one size must actually snap, or this only
+# proves that falling back to the exact rect works.
+if not any(g['snapped'] not in ('nofit', 'off') for g in geo.values()):
+    print("    no window size snapped at all - the check proves nothing"); ok = False
+sys.exit(0 if ok else 1)
+SNAP
+
+    # --- phosphor and interface theme ----------------------------------
+    # Two settings that change colour, and the thing worth checking about
+    # each is that what the front-end *reports* is what it actually drew:
+    # the report line is what the viewport check above now trusts, so a
+    # report that drifted from the pixels would quietly disarm it.
+    for v in "green dark" "white dark" "green paper"; do
+        set -- $v
+        SDL_VIDEODRIVER=dummy ./p2500-gui --disk "$DISK" --frames 300 \
+            --speed unlimited --window 1000x700 --phosphor "$1" --theme "$2" \
+            --screenshot "$TMP/col-$1-$2.native.ppm" \
+            --shot-window "$TMP/col-$1-$2.ppm" >"$TMP/col-$1-$2.log" 2>&1
+    done
+    python3 - "$TMP" <<'COLOURS' && pass "phosphor and theme change the pixels the front-end says they do" || fail "a reported phosphor or theme does not match what was drawn"
+import re, sys
+T = sys.argv[1]
+
+def ppm(path):
+    d = open(path, 'rb').read()
+    hdr = d.split(b'\n', 3)
+    w, h = (int(v) for v in hdr[1].split())
+    return w, h, d[len(b'\n'.join(hdr[:3])) + 1:]
+
+def report(path):
+    m = re.search(r'display: .*phosphor (\w+), theme (\w+), '
+                  r'letterbox (\d+),(\d+),(\d+), screen-bg (\d+),(\d+),(\d+)',
+                  open(path).read())
+    if not m:
+        print("    no display line in " + path); sys.exit(1)
+    g = m.groups()
+    return g[0], g[1], bytes(int(x) for x in g[2:5]), bytes(int(x) for x in g[5:8])
+
+def colours(path):
+    w, h, px = ppm(path)
+    return {px[i:i+3] for i in range(0, w * h * 3, 3)}
+
+ok = True
+def check(cond, why):
+    global ok
+    if not cond:
+        print("    " + why); ok = False
+
+runs = {}
+for name in ("green-dark", "white-dark", "green-paper"):
+    ph, th, lb, bg = report("%s/col-%s.log" % (T, name))
+    runs[name] = (ph, th, lb, bg, colours("%s/col-%s.ppm" % (T, name)),
+                  colours("%s/col-%s.native.ppm" % (T, name)))
+
+# 1. Each run reports the settings it was given.
+for name in runs:
+    ph, th = name.split("-")
+    check(runs[name][0] == ph and runs[name][1] == th,
+          "%s reported phosphor/theme %s/%s" % (name, runs[name][0], runs[name][1]))
+
+# 2. Green is the machine's own and must not move: these are the three values
+#    every shipped screenshot and every other check in this file is in.
+check(runs["green-dark"][3] == bytes((8, 12, 8)),
+      "the green phosphor's background is now %s, not 8,12,8" % list(runs["green-dark"][3]))
+
+# 3. The reported background is really on the emulated screen, for both
+#    phosphors, and the two are not the same colour.
+for name in ("green-dark", "white-dark"):
+    check(runs[name][3] in runs[name][5],
+          "%s reports screen-bg %s but the render has no such pixel"
+          % (name, list(runs[name][3])))
+check(runs["green-dark"][3] != runs["white-dark"][3],
+      "both phosphors render the same background")
+check(runs["green-dark"][5] != runs["white-dark"][5],
+      "both phosphors produced the same set of screen colours")
+
+# 4. The letterbox is the dead space around a picture tube, not chrome, so it
+#    stays dark whatever the phosphor and whatever the theme - and is really
+#    in each capture.
+check(runs["green-dark"][2] == runs["white-dark"][2] == runs["green-paper"][2],
+      "the letterbox moved with the phosphor or the theme; it should do neither")
+check(max(runs["green-dark"][2]) < 64,
+      "the letterbox is not dark: %s" % list(runs["green-dark"][2]))
+for name in ("green-dark", "green-paper"):
+    check(runs[name][2] in runs[name][4],
+          "%s reports letterbox %s but the window has no such pixel"
+          % (name, list(runs[name][2])))
+    # The invariant the viewport check depends on, asserted per theme rather
+    # than assumed once: a letterbox the colour of the screen is unmeasurable.
+    check(runs[name][2] != runs[name][3],
+          "%s: the letterbox and the screen background are the same colour" % name)
+
+# 5. With the letterbox no longer following the theme, the theme needs its own
+#    evidence: the menu bar is chrome, so Dark and Paper must paint it
+#    differently, and Paper must be the light one.
+def menu_band(path):
+    w, h, px = ppm(path)
+    return [px[(y * w + x) * 3:(y * w + x) * 3 + 3]
+            for y in range(2, 18) for x in range(0, w, 3)]
+dark_bar, paper_bar = menu_band("%s/col-green-dark.ppm" % T), menu_band("%s/col-green-paper.ppm" % T)
+check(set(dark_bar) != set(paper_bar), "both themes painted the same menu bar")
+def mean(b): return sum(sum(p) for p in b) / (3.0 * len(b))
+check(mean(paper_bar) > mean(dark_bar) + 64,
+      "the Paper menu bar (%.0f) is not lighter than the Dark one (%.0f)"
+      % (mean(paper_bar), mean(dark_bar)))
+sys.exit(0 if ok else 1)
+COLOURS
 
     # --- the debugger panels -------------------------------------------
     # Drawn under the dummy driver like the menu bar, so what the panels put

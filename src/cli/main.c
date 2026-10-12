@@ -173,6 +173,7 @@ static void usage(FILE *out, const char *argv0) {
     fprintf(out, "usage: %s [--rom path] [--disk path] [--disk-b path] [--disk-c path]\n"
                  "  [--charrom path] [--cartridge path]\n"
                  "  [--dump-vram path] [--dump-vram-attr path] [--dump-screen file.ppm]\n"
+                 "  [--phosphor green|white]\n"
                  "  [--dump-ram path]\n"
                  "  [--save-disk path] [--save-disk-b path] [--save-disk-c path]\n"
                  "  [--save-disk-d path] [--write-protect LETTERS]\n"
@@ -208,6 +209,7 @@ int main(int argc, char **argv) {
     const char *vram_dump_path = NULL;
     const char *vram_attr_dump_path = NULL;
     const char *screen_dump_path = NULL;
+    P2500PhosphorId phosphor = P2500_PHOSPHOR_GREEN;
     const char *charrom_path = "roms/charrom.bin";
     unsigned long max_steps = 2000000UL;
     /* --type-after MS: emulated milliseconds to wait before the first
@@ -358,6 +360,12 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--dump-vram") && i + 1 < argc) vram_dump_path = argv[++i];
         else if (!strcmp(argv[i], "--dump-vram-attr") && i + 1 < argc) vram_attr_dump_path = argv[++i];
         else if (!strcmp(argv[i], "--dump-screen") && i + 1 < argc) screen_dump_path = argv[++i];
+        else if (!strcmp(argv[i], "--phosphor") && i + 1 < argc) {
+            if (!p2500_phosphor_by_name(argv[++i], &phosphor)) {
+                fprintf(stderr, "--phosphor: no such screen colour: %s\n", argv[i]);
+                return 1;
+            }
+        }
         else if (!strcmp(argv[i], "--charrom") && i + 1 < argc) charrom_path = argv[++i];
         else if (!strcmp(argv[i], "--max-steps") && i + 1 < argc) max_steps = strtoul(argv[++i], NULL, 0);
         else if (!strcmp(argv[i], "--verbose-io")) verbose_io = true;
@@ -1181,10 +1189,9 @@ int main(int argc, char **argv) {
         uint32_t *fb = calloc((size_t)vi.width * vi.height, sizeof(uint32_t));
         FILE *f = fb ? fopen(screen_dump_path, "wb") : NULL;
         if (f) {
-            static const P2500Palette pal = {
-                .fg = 0xFF46FF00u, .bg = 0xFF080C08u, .fg_dim = 0xFF288C00u,
-            };
-            p2500_video_render(&m, &pal, true, fb, vi.width);
+            /* The palette comes out of the core's own table rather than
+             * being repeated here, so this and the GUI cannot drift. */
+            p2500_video_render(&m, p2500_phosphor(phosphor), true, fb, vi.width);
             fprintf(f, "P6\n%d %d\n255\n", vi.width, vi.height);
             for (int py = 0; py < vi.height; py++)
                 for (int px = 0; px < vi.width; px++) {
