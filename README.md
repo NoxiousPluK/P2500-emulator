@@ -160,6 +160,10 @@ devices = false
 memory = false
 disasm = false
 log = false
+
+[window]
+width = 1280          # the size you last left the window at
+height = 984
 ```
 
 **Precedence, lowest to highest:** built-in defaults, this file,
@@ -190,12 +194,13 @@ what `make test` uses. `P2500_CONFIG=PATH` uses a file of your choosing.
 | `--push-at MS:STRING` | scripted keystrokes via the live input ring, at an emulated-time offset |
 | `--mouse [FRAME:]X,Y[,left\|right]` | drive a synthetic pointer click (repeatable) |
 | `--ui-type FRAME:TEXT` | type into whichever panel widget has focus |
+| `--resize [FRAME:]WxH` | resize the window at a specific frame |
 | `--break ADDR` / `--watch ADDR` / `--watch-break ADDR` | stop / trace / stop-on-change |
 | `--symbols FILE` \| `auto` | load names from a symbol file (repeatable), or match the running build — see [Symbol files](#symbol-files) |
 | `--verbose-io` | arm every device's diagnostic log output |
 | `--help` | print the flag list and exit |
 
-The last five make the GUI fully scriptable with no display, which is how
+The last six make the GUI fully scriptable with no display, which is how
 `make test` exercises it.
 
 ## The debugger

@@ -95,6 +95,17 @@
  * unreasonable intermediate texture. 8 covers 640x288 -> 5120x2304. */
 #define PRESCALE_MAX 8
 
+/* How long a resize has to stand still before the new size is remembered.
+ * The window geometry is the first tier-one setting that is not a
+ * value picked from a menu: dragging an edge produces a resize event per
+ * frame, and writing the file on each one would be hundreds of writes for
+ * one gesture. So the size is held pending and only becomes the setting
+ * once it has stopped changing, after which the ordinary write-on-change
+ * path in prefs_sync() does the rest - a resize that is still in progress
+ * when the emulator is closed is simply not remembered, which is the right
+ * answer for a gesture that was never finished. */
+#define WINDOW_SETTLE_MS 400
+
 /* Pixel aspect (ASPECT_43 | ASPECT_SQUARE) and the interface theme
  * (THEME_DARK | THEME_PAPER) are declared in prefs.h, along with every
  * accepted spelling of them: the settings file, P2500_DISPLAY and the flags
@@ -130,6 +141,13 @@ struct App {
     unsigned long frame_limit;   /* 0 = run until the user quits */
     const char *shot_path;       /* emulated screen only, for the CLI comparison */
     const char *win_shot_path;   /* the whole composited window, UI included */
+    /* The window size as a SETTING: the last size that stood still for
+     * WINDOW_SETTLE_MS, which is what prefs_sync() writes. `pend_at` is 0
+     * when no resize is in flight; SDL_GetTicks() is never 0 by the time a
+     * window exists, so that sentinel is safe. */
+    int win_w, win_h;
+    int pend_w, pend_h;
+    Uint64 pend_at;
     /* Scripted keystrokes, identical in effect to a real keypress - they go
      * through p2500_keyboard_push like SDL_EVENT_TEXT_INPUT does. Present so
      * the front-end can be driven to a real application with no display,
@@ -206,6 +224,13 @@ struct App {
      * half of --mouse, and the only way to drive an address field headlessly. */
     struct { unsigned long at_frame; const char *text; } ui_type[MAX_PUSHES];
     int ui_types = 0;
+    /* Scripted window resizes, the same kind of test hook as --mouse and
+     * --ui-type: SDL_SetWindowSize produces a real SDL_EVENT_WINDOW_RESIZED,
+     * so the settle timer and the write path are driven by the event they
+     * will see in a user's hands rather than by a back door into the
+     * setting. Without it nothing headless can resize a window at all. */
+    struct { unsigned long at_frame; int w, h; } resize[MAX_PUSHES];
+    int resizes = 0;
     int watches_was = 0;
     Uint64 next_field_ns;        /* when the next 50 Hz field is due */
     Uint64 start_ns;
@@ -1849,7 +1874,7 @@ static bool make_screen_texture(App *app)
  * the order the `settings:` line reports them in, and that line is what
  * makes the precedence rule testable rather than merely documented. */
 enum { SRC_ASPECT, SRC_SNAP, SRC_PHOSPHOR, SRC_THEME, SRC_SPEED, SRC_CAPS,
-       SRC_PANELS, SRC_COUNT };
+       SRC_PANELS, SRC_WINDOW, SRC_COUNT };
 
 static const char *source_name(P2500PrefSource s)
 {
@@ -1882,7 +1907,7 @@ static const char *source_name(P2500PrefSource s)
 /* P2500_DISPLAY is a comma-separated list of key=value pairs. Unknown keys
  * are rejected rather than ignored, for the same reason as above. */
 static bool parse_display_env(const char *env, int *aspect, int *snap, int *phosphor,
-                              int *theme, P2500PrefSource *src)
+                              int *theme, int *win_w, int *win_h, P2500PrefSource *src)
 {
     char buf[256];
     SDL_strlcpy(buf, env, sizeof buf);
@@ -1906,6 +1931,22 @@ static bool parse_display_env(const char *env, int *aspect, int *snap, int *phos
             P2500PhosphorId id;
             if (p2500_phosphor_by_name(val, &id)) { *phosphor = (int)id; src[SRC_PHOSPHOR] = P2500_PREF_ENV; }
             else { SDL_Log("P2500_DISPLAY phosphor: no such screen colour '%s'", val); ok = false; }
+        } else if (!SDL_strcasecmp(key, "window")) {
+            /* Same spelling as --window, and the same bounds as the file:
+             * the env layer sits between them and must not be the one way
+             * to ask for an unusable window. */
+            int w = 0, h = 0;
+            if (SDL_sscanf(val, "%dx%d", &w, &h) != 2) {
+                SDL_Log("P2500_DISPLAY window: expected WxH, got '%s'", val);
+                ok = false;
+            } else if (w < P2500_WINDOW_MIN_W || h < P2500_WINDOW_MIN_H ||
+                       w > P2500_WINDOW_MAX || h > P2500_WINDOW_MAX) {
+                SDL_Log("P2500_DISPLAY window: %dx%d is outside %dx%d..%d", w, h,
+                        P2500_WINDOW_MIN_W, P2500_WINDOW_MIN_H, P2500_WINDOW_MAX);
+                ok = false;
+            } else {
+                *win_w = w; *win_h = h; src[SRC_WINDOW] = P2500_PREF_ENV;
+            }
         } else {
             SDL_Log("P2500_DISPLAY: unknown setting '%s'", key);
             ok = false;
@@ -1930,6 +1971,7 @@ static void usage(FILE *out)
                  "                 [--panels system,devices,memory,disasm,log] [--verbose-io]\n"
                  "                 [--paced] [--speed X|unlimited]\n"
                  "                 [--mouse [FRAME:]X,Y[,left|right] ...]\n"
+                 "                 [--resize [FRAME:]WxH ...]\n"
                  "                 [--ui-type FRAME:TEXT ...]\n"
                  "                 [--break ADDR ...] [--watch ADDR ...]\n"
                  "                 [--watch-break ADDR ...]\n"
@@ -1977,6 +2019,8 @@ static const char *panel_list(const App *app)
 /* The tier-one settings as they stand right now. */
 static void prefs_snapshot(const App *app, P2500Prefs *out)
 {
+    out->win_w = app->win_w;
+    out->win_h = app->win_h;
     out->aspect = app->aspect;
     out->snap = app->snap ? 1 : 0;
     out->phosphor = (int)app->phosphor;
@@ -1993,7 +2037,8 @@ static void prefs_snapshot(const App *app, P2500Prefs *out)
 static bool prefs_equal(const P2500Prefs &a, const P2500Prefs &b)
 {
     if (a.aspect != b.aspect || a.snap != b.snap || a.phosphor != b.phosphor ||
-        a.theme != b.theme || a.speed != b.speed || a.caps_lock != b.caps_lock)
+        a.theme != b.theme || a.speed != b.speed || a.caps_lock != b.caps_lock ||
+        a.win_w != b.win_w || a.win_h != b.win_h)
         return false;
     for (int i = 0; i < 5; i++) if (a.panel[i] != b.panel[i]) return false;
     return true;
@@ -2005,6 +2050,22 @@ static bool prefs_equal(const P2500Prefs &a, const P2500Prefs &b)
  * a lamp and a panel's own close button are all the same event here, and a
  * setting added later is covered without anyone having to remember to.
  * The cost of the check is seven comparisons. */
+/* Promote a resize that has stopped moving into the setting itself, which
+ * then reaches the file through prefs_sync() like every other change. Kept
+ * separate from prefs_sync so it still runs with the file switched off: the
+ * `settings:` line and the window's own state should not depend on whether
+ * anything is being written. */
+static void window_settle(App *app)
+{
+    if (!app->pend_at) return;
+    if (SDL_GetTicks() - app->pend_at < WINDOW_SETTLE_MS) return;
+    app->pend_at = 0;
+    if (app->pend_w < P2500_WINDOW_MIN_W || app->pend_h < P2500_WINDOW_MIN_H)
+        return;                     /* below the floor: not a size worth keeping */
+    app->win_w = app->pend_w;
+    app->win_h = app->pend_h;
+}
+
 static void prefs_sync(App *app)
 {
     if (!app->prefs_on) return;
@@ -2023,6 +2084,10 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[])
     const char *charrom = "roms/charrom.bin";
     const char *disks[P2500_FDC_MAX_DRIVES] = {0};
     int scale = SCALE_DEFAULT;
+    /* Whether --scale was typed, not just what it resolved to: an explicit
+     * --scale is a flag and so must beat a remembered window size, while the
+     * default value must not. */
+    bool scale_given = false;
     /* An explicit window size, overriding the one --scale implies. */
     int win_w_arg = 0, win_h_arg = 0;
     /* Precedence, bottom up: defaults < the preferences file < P2500_DISPLAY
@@ -2044,9 +2109,15 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[])
     if (snap >= 0) src[SRC_SNAP] = P2500_PREF_FILE;
     if (phosphor >= 0) src[SRC_PHOSPHOR] = P2500_PREF_FILE;
     if (theme >= 0) src[SRC_THEME] = P2500_PREF_FILE;
+    /* The remembered geometry, already bounds-checked by the loader. The
+     * env layer writes over it below, and either is overridden by --window
+     * or an explicit --scale. */
+    int win_w_pref = prefs.win_w, win_h_pref = prefs.win_h;
+    if (win_w_pref > 0 && win_h_pref > 0) src[SRC_WINDOW] = P2500_PREF_FILE;
 
     if (const char *env = SDL_getenv("P2500_DISPLAY")) {
-        if (!parse_display_env(env, &aspect, &snap, &phosphor, &theme, src)) {
+        if (!parse_display_env(env, &aspect, &snap, &phosphor, &theme,
+                               &win_w_pref, &win_h_pref, src)) {
             usage(stderr);
             return SDL_APP_FAILURE;
         }
@@ -2070,6 +2141,8 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[])
     struct { unsigned long at_frame; int x, y, button; } mouse_script[MAX_PUSHES];
     int mouse_steps = 0;
     struct { unsigned long at_frame; const char *text; } ui_type_script[MAX_PUSHES];
+    struct { unsigned long at_frame; int w, h; } resize_script[MAX_PUSHES];
+    int resize_steps = 0;
     int ui_type_steps = 0;
     uint16_t break_at[MAX_PUSHES] = {0};
     int nbreak = 0;
@@ -2123,7 +2196,7 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[])
                 p = comma + 1;
             }
         }
-        else if (!strcmp(argv[i], "--scale") && i + 1 < argc) scale = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--scale") && i + 1 < argc) { scale = atoi(argv[++i]); scale_given = true; }
         else if (!strcmp(argv[i], "--window") && i + 1 < argc) {
             if (SDL_sscanf(argv[++i], "%dx%d", &win_w_arg, &win_h_arg) != 2 ||
                 win_w_arg < 64 || win_h_arg < 64) {
@@ -2193,6 +2266,21 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[])
             ui_type_script[ui_type_steps].at_frame = strtoul(arg, NULL, 0);
             ui_type_script[ui_type_steps].text = colon + 1;
             ui_type_steps++;
+        }
+        else if (!strcmp(argv[i], "--resize") && i + 1 < argc && resize_steps < MAX_PUSHES) {
+            /* [FRAME:]WxH, the frame defaulting to 3 like --mouse's. */
+            char *arg = argv[++i], *colon = strchr(arg, ':');
+            unsigned long at = 3;
+            if (colon) { *colon = '\0'; at = strtoul(arg, NULL, 0); arg = colon + 1; }
+            int w = 0, h = 0;
+            if (SDL_sscanf(arg, "%dx%d", &w, &h) != 2 || w < 1 || h < 1) {
+                SDL_Log("--resize: expected [FRAME:]WxH");
+                return SDL_APP_FAILURE;
+            }
+            resize_script[resize_steps].at_frame = at;
+            resize_script[resize_steps].w = w;
+            resize_script[resize_steps].h = h;
+            resize_steps++;
         }
         else if (!strcmp(argv[i], "--mouse") && i + 1 < argc && mouse_steps < MAX_PUSHES) {
             /* [FRAME:]X,Y[,left|right] - the frame is optional and defaults
@@ -2324,26 +2412,58 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[])
      * what a user with a real monitor gets, and a different size from what
      * every pre-existing --shot-window capture was taken at. There is no
      * display to fit, so --scale is trusted instead. */
+    /*
+     * A remembered size sits between those two: it is the preferences
+     * file's layer, so --window and an explicit --scale both beat it, and
+     * P2500_DISPLAY window=WxH beats it from in between. Unlike --window it
+     * IS bounded at both ends, which is the whole point of remembering it -
+     * a geometry that reopens the emulator unusable is worse than one that
+     * forgets. The floor is P2500_WINDOW_MIN_W/H and is also installed on
+     * the window itself below, so a drag cannot produce one; the ceiling is
+     * the display's usable bounds, so moving to a smaller monitor (or
+     * unplugging the big one) gives back a window that fits rather than one
+     * whose title bar is off-screen.
+     */
     int win_w = win_w_arg, win_h = win_h_arg;
-    if (!win_w || !win_h) {
-        SDL_Rect usable;
-        SDL_zero(usable);
+    P2500PrefSource win_src = P2500_PREF_FLAG;    /* --window, until shown otherwise */
+    SDL_Rect usable;
+    SDL_zero(usable);
+    {
         const char *drv = SDL_GetCurrentVideoDriver();
         const SDL_DisplayID did = SDL_GetPrimaryDisplay();
         const bool have_display = drv && SDL_strcmp(drv, "dummy") != 0 && did != 0;
         if (!have_display || !SDL_GetDisplayUsableBounds(did, &usable))
             SDL_zero(usable);
-        for (; scale >= 1; scale--) {
-            win_w = app->info.width * scale;
-            win_h = (app->aspect == ASPECT_SQUARE
-                     ? app->info.height * scale
-                     : win_w * DISPLAY_ASPECT_H / DISPLAY_ASPECT_W) + MENU_RESERVE;
-            if (scale == 1) break;
-            if (usable.w <= 0 || usable.h <= 0) break;   /* unknown: trust --scale */
-            if (win_w <= usable.w && win_h <= usable.h) break;
-        }
-        if (scale < 1) scale = 1;
     }
+    if (!win_w || !win_h) {
+        if (!scale_given && win_w_pref > 0 && win_h_pref > 0) {
+            win_w = win_w_pref;
+            win_h = win_h_pref;
+            win_src = src[SRC_WINDOW];            /* file or env, set above */
+            if (win_w < P2500_WINDOW_MIN_W) win_w = P2500_WINDOW_MIN_W;
+            if (win_h < P2500_WINDOW_MIN_H) win_h = P2500_WINDOW_MIN_H;
+            if (usable.w > 0 && usable.h > 0) {
+                if (win_w > usable.w) win_w = usable.w;
+                if (win_h > usable.h) win_h = usable.h;
+            }
+            if (win_w != win_w_pref || win_h != win_h_pref)
+                SDL_Log("window: remembered %dx%d does not fit here - using %dx%d",
+                        win_w_pref, win_h_pref, win_w, win_h);
+        } else {
+            win_src = scale_given ? P2500_PREF_FLAG : P2500_PREF_DEFAULT;
+            for (; scale >= 1; scale--) {
+                win_w = app->info.width * scale;
+                win_h = (app->aspect == ASPECT_SQUARE
+                         ? app->info.height * scale
+                         : win_w * DISPLAY_ASPECT_H / DISPLAY_ASPECT_W) + MENU_RESERVE;
+                if (scale == 1) break;
+                if (usable.w <= 0 || usable.h <= 0) break;   /* unknown: trust --scale */
+                if (win_w <= usable.w && win_h <= usable.h) break;
+            }
+            if (scale < 1) scale = 1;
+        }
+    }
+    src[SRC_WINDOW] = win_src;
     if (!SDL_CreateWindowAndRenderer(window_title, win_w, win_h,
                                      SDL_WINDOW_RESIZABLE,
                                      &app->window, &app->renderer)) {
@@ -2351,6 +2471,24 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[])
         return SDL_APP_FAILURE;
     }
     p2500_set_window_icon(app->window);
+    /* The floor, installed on the window so a DRAG cannot get under it
+     * either - checking it only on load would mean the file faithfully
+     * remembering a window the user had already made useless.
+     *
+     * It never shrinks what was asked for: --window is honoured exactly,
+     * including below the floor, so the minimum drops to the requested size
+     * in that case. The user still cannot drag smaller than they asked. */
+    SDL_SetWindowMinimumSize(app->window,
+                             win_w < P2500_WINDOW_MIN_W ? win_w : P2500_WINDOW_MIN_W,
+                             win_h < P2500_WINDOW_MIN_H ? win_h : P2500_WINDOW_MIN_H);
+    /* The baseline for the remembered geometry: what the window actually
+     * opened at, read back rather than assumed, since a window manager is
+     * free to have had its own opinion. Nothing is written until a resize
+     * settles to something different. */
+    if (!SDL_GetWindowSize(app->window, &app->win_w, &app->win_h)) {
+        app->win_w = win_w;
+        app->win_h = win_h;
+    }
     /* Tear-free presentation; the actual speed is pace_field's business. */
     if (!SDL_SetRenderVSync(app->renderer, 1))
         SDL_Log("vsync unavailable (%s) - pacing still holds 50 Hz", SDL_GetError());
@@ -2407,6 +2545,12 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[])
         app->ui_type[i].at_frame = ui_type_script[i].at_frame;
         app->ui_type[i].text = ui_type_script[i].text;
     }
+    app->resizes = resize_steps;
+    for (int i = 0; i < resize_steps; i++) {
+        app->resize[i].at_frame = resize_script[i].at_frame;
+        app->resize[i].w = resize_script[i].w;
+        app->resize[i].h = resize_script[i].h;
+    }
     app->mouse_steps = mouse_steps;
     for (int i = 0; i < mouse_steps; i++) {
         app->mouse[i].at_frame = mouse_script[i].at_frame;
@@ -2433,14 +2577,16 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[])
     char speedlab[16];
     speed_label(app->speed, speedlab, sizeof speedlab);
     SDL_Log("settings: aspect %s (%s), snap %s (%s), phosphor %s (%s),"
-            " theme %s (%s), speed %s (%s), caps-lock %s (%s), panels %s (%s)",
+            " theme %s (%s), speed %s (%s), caps-lock %s (%s), panels %s (%s),"
+            " window %dx%d (%s)",
             p2500_aspect_name(app->aspect), source_name(src[SRC_ASPECT]),
             app->snap ? "on" : "off", source_name(src[SRC_SNAP]),
             p2500_phosphor_name(app->phosphor), source_name(src[SRC_PHOSPHOR]),
             p2500_theme_name(app->theme), source_name(src[SRC_THEME]),
             speedlab, source_name(src[SRC_SPEED]),
             app->caps_lock ? "on" : "off", source_name(src[SRC_CAPS]),
-            panel_list(app), source_name(src[SRC_PANELS]));
+            panel_list(app), source_name(src[SRC_PANELS]),
+            app->win_w, app->win_h, source_name(src[SRC_WINDOW]));
 
     /* The baseline for the write-on-change check below: whatever the four
      * layers resolved to is what the user is looking at, so nothing is
@@ -2461,6 +2607,14 @@ SDL_AppResult SDL_AppEvent(void *appstate, SDL_Event *event)
     switch (event->type) {
     case SDL_EVENT_QUIT:
         return SDL_APP_SUCCESS;
+    case SDL_EVENT_WINDOW_RESIZED:
+        /* Held pending rather than recorded: see WINDOW_SETTLE_MS. A drag
+         * delivers one of these per frame, and only the last one is a size
+         * the user chose. */
+        app->pend_w = event->window.data1;
+        app->pend_h = event->window.data2;
+        app->pend_at = SDL_GetTicks();
+        return SDL_APP_CONTINUE;
     case SDL_EVENT_TEXT_INPUT:
         if (ui_has_keyboard) return SDL_APP_CONTINUE;
         /* One byte per character the platform produced. Anything outside
@@ -2533,6 +2687,10 @@ SDL_AppResult SDL_AppIterate(void *appstate)
         SDL_SetAtomicInt(&app->cart_pending, 0);
         mount_cartridge(app, app->cart_path);
     }
+
+    for (int i = 0; i < app->resizes; i++)
+        if (app->frames == app->resize[i].at_frame)
+            SDL_SetWindowSize(app->window, app->resize[i].w, app->resize[i].h);
 
     for (int i = 0; i < app->pushes; i++) {
         if (app->push[i].done) continue;
@@ -2760,6 +2918,7 @@ SDL_AppResult SDL_AppIterate(void *appstate)
 
     /* On change, not at exit: a crash must not cost a setting, and the file
      * is a few hundred bytes. */
+    window_settle(app);
     prefs_sync(app);
 
     pace_field(app);

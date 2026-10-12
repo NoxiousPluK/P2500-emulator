@@ -110,6 +110,32 @@ enum P2500PrefSource {
     P2500_PREF_FLAG,
 };
 
+/* The floor on a window size, enforced at each of the three ways in so
+ * there is no way round it: SDL_SetWindowMinimumSize stops a DRAG below it,
+ * the loader below refuses a smaller number in the FILE, and
+ * parse_display_env() refuses one in P2500_DISPLAY. The startup sizing
+ * clamps as well, as a backstop rather than as the gate.
+ *
+ * 320x240 is chosen rather than derived. The emulated screen is 640x288, so
+ * this is half its width - at which an 8x12 character cell is 4x6 window
+ * pixels and the text is at the edge of legible - and tall enough that the
+ * menu bar plus a usable strip of screen still fit. Below it the window is
+ * not a smaller view of the machine, it is a window with nothing in it, and
+ * a settings file that reopened the emulator like that would look broken
+ * rather than small.
+ *
+ * It is a floor on the WINDOW, not on --window: an explicit flag is still
+ * honoured exactly, including below this, because the suite depends on
+ * getting the size it asked for. See the sizing comment in main.cpp. */
+#define P2500_WINDOW_MIN_W 320
+#define P2500_WINDOW_MIN_H 240
+
+/* And a ceiling, which exists only to keep a hand-edited file from asking
+ * for a texture the renderer cannot make. The real maximum is the display's
+ * usable bounds and is applied where the display is known; this one just
+ * keeps the arithmetic in range on a machine with no display to ask. */
+#define P2500_WINDOW_MAX 32767
+
 /* What the file said. Every field is a sentinel meaning "the file did not
  * mention this", so a key that is absent, misspelled or of the wrong type
  * all come out the same way: the layer above keeps its default. */
@@ -121,6 +147,13 @@ struct P2500Prefs {
     float speed = -1.0f;
     int caps_lock = -1;
     int panel[5] = { -1, -1, -1, -1, -1 };   /* system, devices, memory, disasm, log */
+    /* The window geometry (T100). Unlike the seven above it is not a value
+     * picked from a menu but a continuous thing that changes on every drag,
+     * so it is written only once a resize has settled - see main.cpp. Both
+     * or neither: a width with no height is not a window size, and the
+     * loader drops a half-pair rather than guessing the other half. */
+    int win_w = -1;
+    int win_h = -1;
 };
 
 /* Read the file. Returns false only when it exists and could not be read;

@@ -58,6 +58,11 @@
 #   26.Prefs  - the preferences file: the four-layer precedence, the
 #               poison-file isolation that keeps a developer's settings out
 #               of this suite, writing on change, and surviving a hand-edit.
+#   27.Geometry- the remembered window size: bounded at both ends (a floor
+#               the file, the env and a drag all answer to, and the
+#               display's usable bounds as the ceiling), the flags that
+#               still beat it, and the settle timer that keeps one drag
+#               from being hundreds of writes.
 #   24.Cartpath- and the whole path end to end: the manufacturer's own
 #               P2490 BASIC probe must print back the exact key fed in
 #               through --cartridge, say NO SESAM for an empty slot, and
@@ -139,7 +144,8 @@ gui_report() {
 SECTIONS='1:sesam 1b:banner 1c:reset 2:ipl 3:cpm 4:dir 4a:driveb 4b:swap 4c:game
 5:banktrip 6:render 7:gui 8:debug 9:log 10:cpmbuild 11:graphics 12:demos
 13:speed 14:eot 15:rewind 16:symbols 17:drives 18:derived 19:images
-20:sysinfo 21:lamps 22:cart 23:write 24:cartpath 25:ini 26:prefs'
+20:sysinfo 21:lamps 22:cart 23:write 24:cartpath 25:ini 26:prefs
+27:geometry'
 
 usage() {
     cat <<USAGE
@@ -2792,14 +2798,18 @@ devices = true
 memory = true
 disasm = true
 log = true
+
+[window]
+width = 900
+height = 650
 POISON
 P2500_CONFIG=none SDL_VIDEODRIVER=dummy env -u P2500_DISPLAY ./p2500-gui \
     --frames 3 >"$TMP/poison.log" 2>&1
 if grep -q '^config: off (P2500_CONFIG=none)' "$TMP/poison.log"; then
     pass "P2500_CONFIG=none reports the file as off"
 else fail "P2500_CONFIG=none did not report the file as off"; fi
-if grep -q '^settings: aspect 4:3 (default), snap off (default), phosphor green (default), theme dark (default), speed 1x (default), caps-lock on (default), panels - (default)$' "$TMP/poison.log"; then
-    pass "and a file setting every value wrong changes nothing: all seven are defaults"
+if grep -q '^settings: aspect 4:3 (default), snap off (default), phosphor green (default), theme dark (default), speed 1x (default), caps-lock on (default), panels - (default), window 1280x984 (default)$' "$TMP/poison.log"; then
+    pass "and a file setting every value wrong changes nothing: all eight are defaults"
 else
     fail "P2500_CONFIG=none did not hold every setting at its default"
     grep '^settings:' "$TMP/poison.log"
@@ -2808,8 +2818,8 @@ fi
 # things, or the check above proves nothing at all.
 P2500_CONFIG="$TMP/poison.ini" SDL_VIDEODRIVER=dummy env -u P2500_DISPLAY ./p2500-gui \
     --frames 3 >"$TMP/poison-on.log" 2>&1
-if grep -q '^settings: aspect square (file), snap on (file), phosphor white (file), theme paper (file), speed 0.25x (file), caps-lock off (file), panels system,devices,memory,disasm,log (file)$' "$TMP/poison-on.log"; then
-    pass "...and that same file DOES change all seven when it is not suppressed"
+if grep -q '^settings: aspect square (file), snap on (file), phosphor white (file), theme paper (file), speed 0.25x (file), caps-lock off (file), panels system,devices,memory,disasm,log (file), window 900x650 (file)$' "$TMP/poison-on.log"; then
+    pass "...and that same file DOES change all eight when it is not suppressed"
 else
     fail "the poison file changed nothing, so the isolation check proves nothing"
     grep '^settings:' "$TMP/poison-on.log"
@@ -2925,6 +2935,155 @@ else fail "a file with an unmet requires was loaded anyway"; fi
 if cmp -s "$TMP/req.ini" "$TMP/req-before.ini"; then
     pass "and is left untouched, so a newer build can still read it"
 else fail "a refused settings file was overwritten"; fi
+}
+
+sec_27() {
+echo "== 27. The remembered window geometry: bounds at both ends, and a settled resize (T100)"
+# The window size is the first tier-one setting that is not a value picked
+# from a menu, which gives it two properties nothing else in section 26 has:
+# it is BOUNDED - a remembered geometry that reopens the emulator unusable
+# is worse than one that forgets - and it is written only once a resize has
+# stopped moving, because a drag produces an event per frame.
+if [ ! -x ./p2500-gui ]; then
+    echo "  (skipped: no ./p2500-gui)"
+    return
+fi
+mkdir -p "$TMP/geo"
+gwin() { sed -n 's/^settings: .*window \([0-9]*x[0-9]*\) (\([a-z]*\)).*/\1 \2/p' "$1" | head -1; }
+
+# --- precedence: default < file < P2500_DISPLAY < flag -------------------
+cat >"$TMP/geo/ok.ini" <<'GEO'
+[window]
+width = 1000
+height = 700
+GEO
+P2500_CONFIG="$TMP/geo/ok.ini" SDL_VIDEODRIVER=dummy env -u P2500_DISPLAY \
+    ./p2500-gui --frames 3 >"$TMP/geo/file.log" 2>&1
+if [ "$(gwin "$TMP/geo/file.log")" = "1000x700 file" ]; then
+    pass "a remembered geometry is used"
+else fail "a remembered geometry was not used (got '$(gwin "$TMP/geo/file.log")')"; fi
+P2500_CONFIG="$TMP/geo/ok.ini" P2500_DISPLAY=window=900x650 SDL_VIDEODRIVER=dummy \
+    ./p2500-gui --frames 3 >"$TMP/geo/env.log" 2>&1
+if [ "$(gwin "$TMP/geo/env.log")" = "900x650 env" ]; then
+    pass "P2500_DISPLAY window beats the file"
+else fail "P2500_DISPLAY window did not beat the file (got '$(gwin "$TMP/geo/env.log")')"; fi
+P2500_CONFIG="$TMP/geo/ok.ini" SDL_VIDEODRIVER=dummy env -u P2500_DISPLAY \
+    ./p2500-gui --frames 3 --window 800x600 >"$TMP/geo/flag.log" 2>&1
+if [ "$(gwin "$TMP/geo/flag.log")" = "800x600 flag" ]; then
+    pass "--window beats the file, and is honoured exactly"
+else fail "--window did not beat the file (got '$(gwin "$TMP/geo/flag.log")')"; fi
+# --scale is the other flag that sizes a window, and it has to win too -
+# otherwise asking for a zoom would silently get last session's drag.
+P2500_CONFIG="$TMP/geo/ok.ini" SDL_VIDEODRIVER=dummy env -u P2500_DISPLAY \
+    ./p2500-gui --frames 3 --scale 1 >"$TMP/geo/scale.log" 2>&1
+if [ "$(gwin "$TMP/geo/scale.log")" = "640x504 flag" ]; then
+    pass "an explicit --scale beats the file too"
+else fail "--scale did not beat the file (got '$(gwin "$TMP/geo/scale.log")')"; fi
+
+# --- the minimum ---------------------------------------------------------
+# The file is hand-editable, so `width = 8` is one keystroke away from
+# `width = 800`. A number under the floor costs the whole pair, because half
+# a geometry is not a window size.
+cat >"$TMP/geo/small.ini" <<'GEO'
+[window]
+width = 8
+height = 700
+GEO
+P2500_CONFIG="$TMP/geo/small.ini" SDL_VIDEODRIVER=dummy env -u P2500_DISPLAY \
+    ./p2500-gui --frames 3 >"$TMP/geo/small.log" 2>&1
+if [ "$(gwin "$TMP/geo/small.log")" = "1280x984 default" ]; then
+    pass "a remembered size below the minimum is refused, not clamped into use"
+else fail "a too-small geometry was used anyway (got '$(gwin "$TMP/geo/small.log")')"; fi
+if grep -q 'below the 320x240 minimum' "$TMP/geo/small.log"; then
+    pass "and says so rather than failing silently"
+else fail "a too-small geometry was dropped with no diagnostic"; fi
+cat >"$TMP/geo/half.ini" <<'GEO'
+[window]
+width = 900
+GEO
+P2500_CONFIG="$TMP/geo/half.ini" SDL_VIDEODRIVER=dummy env -u P2500_DISPLAY \
+    ./p2500-gui --frames 3 >"$TMP/geo/half.log" 2>&1
+if [ "$(gwin "$TMP/geo/half.log")" = "1280x984 default" ] &&
+   grep -q 'needs both width and height' "$TMP/geo/half.log"; then
+    pass "a width with no height is not a geometry"
+else fail "a half-written geometry was accepted"; fi
+# The env layer must not be the way round the floor either.
+P2500_CONFIG=none P2500_DISPLAY=window=8x700 SDL_VIDEODRIVER=dummy \
+    ./p2500-gui --frames 3 >"$TMP/geo/envsmall.log" 2>&1
+rc=$?
+if [ "$rc" -ne 0 ] && grep -q 'P2500_DISPLAY window' "$TMP/geo/envsmall.log"; then
+    pass "and P2500_DISPLAY is held to the same floor"
+else fail "P2500_DISPLAY window=8x700 was accepted (exit $rc)"; fi
+
+# --- the maximum, which needs a driver that reports a display -----------
+# The dummy driver has no usable bounds to clamp against, which is why the
+# default sizing skips the clamp under it. `offscreen` does report a display
+# (1024x768), so it is what makes the ceiling testable at all - without this
+# the "moved to a smaller monitor" case has no check.
+cat >"$TMP/geo/huge.ini" <<'GEO'
+[window]
+width = 9000
+height = 9000
+GEO
+P2500_CONFIG="$TMP/geo/huge.ini" SDL_VIDEODRIVER=offscreen env -u P2500_DISPLAY \
+    ./p2500-gui --frames 3 >"$TMP/geo/huge.log" 2>&1
+if [ "$(gwin "$TMP/geo/huge.log")" = "1024x768 file" ]; then
+    pass "a remembered size larger than the display is clamped to it"
+else fail "an oversized geometry was not clamped (got '$(gwin "$TMP/geo/huge.log")')"; fi
+if grep -q 'does not fit here' "$TMP/geo/huge.log"; then
+    pass "and the clamp is reported"
+else fail "an oversized geometry was clamped silently"; fi
+# ...and the clamp must NOT reach --window, which the suite depends on being
+# honoured exactly. Same driver, same display, a flag instead of a file.
+P2500_CONFIG=none SDL_VIDEODRIVER=offscreen env -u P2500_DISPLAY \
+    ./p2500-gui --frames 3 --window 4000x3000 >"$TMP/geo/exact.log" 2>&1
+if [ "$(gwin "$TMP/geo/exact.log")" = "4000x3000 flag" ]; then
+    pass "...while --window is still never clamped"
+else fail "--window was clamped to the display (got '$(gwin "$TMP/geo/exact.log")')"; fi
+
+# --- writing a resize, once it has settled ------------------------------
+# --resize drives a real SDL_SetWindowSize, so what is under test is the
+# SDL_EVENT_WINDOW_RESIZED path a dragged edge produces, not a back door
+# into the setting.
+: >"$TMP/geo/write.ini"
+P2500_CONFIG="$TMP/geo/write.ini" SDL_VIDEODRIVER=dummy env -u P2500_DISPLAY \
+    ./p2500-gui --frames 120 --resize 5:1100x720 >"$TMP/geo/write.log" 2>&1
+if grep -q '^width = 1100$' "$TMP/geo/write.ini" &&
+   grep -q '^height = 720$' "$TMP/geo/write.ini"; then
+    pass "a resize that settles is written to the file"
+else
+    fail "a settled resize was not written"
+    cat "$TMP/geo/write.ini"
+fi
+P2500_CONFIG="$TMP/geo/write.ini" SDL_VIDEODRIVER=dummy env -u P2500_DISPLAY \
+    ./p2500-gui --frames 3 >"$TMP/geo/back.log" 2>&1
+if [ "$(gwin "$TMP/geo/back.log")" = "1100x720 file" ]; then
+    pass "and comes back on the next run"
+else fail "the written geometry did not load back (got '$(gwin "$TMP/geo/back.log")')"; fi
+# The negative half, without which the one above would pass just as well
+# with no settle timer at all: a resize still in flight when the run ends is
+# a gesture that was never finished, and is not remembered.
+: >"$TMP/geo/unsettled.ini"
+P2500_CONFIG="$TMP/geo/unsettled.ini" SDL_VIDEODRIVER=dummy env -u P2500_DISPLAY \
+    ./p2500-gui --frames 8 --resize 5:1100x720 >"$TMP/geo/unsettled.log" 2>&1
+if ! grep -q '^\[window\]' "$TMP/geo/unsettled.ini"; then
+    pass "a resize that never settles is not written"
+else
+    fail "an unsettled resize was written"
+    cat "$TMP/geo/unsettled.ini"
+fi
+# And the floor holds against a drag as well as against the file: the window
+# itself carries a minimum size, so a resize under it never happens.
+: >"$TMP/geo/tiny.ini"
+P2500_CONFIG="$TMP/geo/tiny.ini" SDL_VIDEODRIVER=dummy env -u P2500_DISPLAY \
+    ./p2500-gui --frames 120 --resize 5:100x100 >"$TMP/geo/tiny.log" 2>&1
+if grep -q '^width = 320$' "$TMP/geo/tiny.ini" &&
+   grep -q '^height = 240$' "$TMP/geo/tiny.ini"; then
+    pass "a resize below the minimum is held at it rather than remembered small"
+else
+    fail "a resize below the minimum was not held at the floor"
+    cat "$TMP/geo/tiny.ini"
+fi
 }
 
 ran=0

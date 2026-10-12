@@ -162,6 +162,28 @@ bool p2500_prefs_load(const char *path, P2500Prefs *out, size_t *bad_lines)
     for (int i = 0; i < 5; i++)
         if (p2500_ini_get_bool(ini, "panels", PANEL_KEY[i], &b)) out->panel[i] = b ? 1 : 0;
 
+    /* The window size, which is the one setting a user can plausibly put an
+     * unusable value in - this file is hand-editable, and `width = 8` is a
+     * typo away from `width = 800`. A number outside the bounds costs the
+     * WHOLE PAIR, with a line saying so, so the geometry falls back to the
+     * layer below rather than opening a window 8 px wide - and a width with
+     * no height costs the pair for the same reason, rather than being
+     * matched to a height nobody wrote down. */
+    long w = 0, h = 0;
+    const bool have_w = p2500_ini_get_int(ini, "window", "width", &w);
+    const bool have_h = p2500_ini_get_int(ini, "window", "height", &h);
+    if (have_w && have_h) {
+        if (w < P2500_WINDOW_MIN_W || h < P2500_WINDOW_MIN_H)
+            SDL_Log("settings: window %ldx%ld is below the %dx%d minimum - ignoring it",
+                    w, h, P2500_WINDOW_MIN_W, P2500_WINDOW_MIN_H);
+        else if (w > P2500_WINDOW_MAX || h > P2500_WINDOW_MAX)
+            SDL_Log("settings: window %ldx%ld is not a window size - ignoring it", w, h);
+        else { out->win_w = (int)w; out->win_h = (int)h; }
+    } else if (have_w || have_h) {
+        SDL_Log("settings: window needs both width and height - ignoring %s",
+                have_w ? "the width" : "the height");
+    }
+
     p2500_ini_free(ini);
     return true;
 }
@@ -199,6 +221,14 @@ bool p2500_prefs_save(const char *path, const P2500Prefs &now)
 
     for (int i = 0; i < 5; i++)
         p2500_ini_set_bool(ini, "panels", PANEL_KEY[i], now.panel[i] > 0);
+
+    /* The same rule as every other setting: what is written is the size the
+     * user is looking at, flags included. The guard is only for a caller
+     * that has no window yet - a size of zero is not a size. */
+    if (now.win_w > 0 && now.win_h > 0) {
+        p2500_ini_set_int(ini, "window", "width", now.win_w);
+        p2500_ini_set_int(ini, "window", "height", now.win_h);
+    }
 
     bool ok = p2500_ini_save(ini, path);
     if (!ok) SDL_Log("settings: cannot write %s", path);
