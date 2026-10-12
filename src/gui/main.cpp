@@ -2569,8 +2569,10 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[])
     if (!app->prefs_on)
         SDL_Log("config: off (P2500_CONFIG=none)");
     else if (prefs_bad)
-        SDL_Log("config: %s (%zu line%s not understood, and kept)", app->prefs_path,
-                prefs_bad, prefs_bad == 1 ? "" : "s");
+        /* %llu with a cast, not %zu: GCC checks SDL's own format strings
+         * against the MS dialect on MinGW, which has no 'z' modifier. */
+        SDL_Log("config: %s (%llu line%s not understood, and kept)", app->prefs_path,
+                (unsigned long long)prefs_bad, prefs_bad == 1 ? "" : "s");
     else
         SDL_Log("config: %s", app->prefs_path);
 

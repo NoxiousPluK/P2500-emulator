@@ -63,6 +63,11 @@
 #               display's usable bounds as the ceiling), the flags that
 #               still beat it, and the settle timer that keeps one drag
 #               from being hundreds of writes.
+#   28.Build  - the build system's own invariant: objects and the library
+#               segregated per toolchain, so a Windows cross build can sit
+#               beside a native one, and -Werror=format on the project's
+#               own code but not on the vendored ImGui. Read out of make's
+#               real recipes, without compiling anything.
 #   24.Cartpath- and the whole path end to end: the manufacturer's own
 #               P2490 BASIC probe must print back the exact key fed in
 #               through --cartridge, say NO SESAM for an empty slot, and
@@ -145,7 +150,7 @@ SECTIONS='1:sesam 1b:banner 1c:reset 2:ipl 3:cpm 4:dir 4a:driveb 4b:swap 4c:game
 5:banktrip 6:render 7:gui 8:debug 9:log 10:cpmbuild 11:graphics 12:demos
 13:speed 14:eot 15:rewind 16:symbols 17:drives 18:derived 19:images
 20:sysinfo 21:lamps 22:cart 23:write 24:cartpath 25:ini 26:prefs
-27:geometry'
+27:geometry 28:build'
 
 usage() {
     cat <<USAGE
@@ -597,7 +602,12 @@ else
     # under it had moved on by hours, so check the binary is actually newer
     # than what it links against. `make test` now depends on the GUI too, but
     # this script can be run on its own.
-    if [ ./p2500-gui -nt libp2500.a ]; then
+    # build/native/, not the top level: objects and the library are
+    # segregated per toolchain, so the native library is what a
+    # native p2500-gui was linked against.
+    if [ ! -f build/native/libp2500.a ]; then
+        fail "build/native/libp2500.a is missing - cannot tell if p2500-gui is stale"
+    elif [ ./p2500-gui -nt build/native/libp2500.a ]; then
         pass "p2500-gui is newer than libp2500.a"
     else fail "p2500-gui is STALE - rebuild it (make gui)"; fi
     if SDL_VIDEODRIVER=dummy ./p2500-gui --disk "$DISK" --frames 400 \
@@ -3084,6 +3094,77 @@ else
     fail "a resize below the minimum was not held at the floor"
     cat "$TMP/geo/tiny.ini"
 fi
+}
+
+sec_28() {
+echo "== 28. Per-toolchain build segregation, and fatal format warnings"
+# This section asks make what it WOULD do and never lets it do it: every
+# call is `make -n` (dry run), which prints recipes without running them.
+# That matters twice over - the suite must not rebuild the binaries it is
+# in the middle of testing, and these checks must hold on a machine with no
+# mingw-w64 toolchain, where the recipes exist but could not be run.
+#
+# Why it is worth a section at all: the native and MinGW compilers used to
+# write the same object and libp2500.a paths, so `MINGW=1 make` after a
+# native `make` linked ELF objects into a PE binary - and never rebuilt
+# them, the stale objects being newer than their sources. The cross build
+# therefore only ever ran inside publish.sh, behind three full cleans,
+# which is why every Windows breakage so far was found at release time.
+recipe() { make -n -B "$@" 2>/dev/null; }
+
+# --- the two toolchains write to different places ------------------------
+nat=$(recipe build/native/src/core/ctc.o)
+mgw=$(recipe MINGW=1 build/mingw/src/core/ctc.o)
+if printf '%s' "$nat" | grep -q -- '-o build/native/src/core/ctc\.o'; then
+    pass "a native object is written under build/native/"
+else fail "the native recipe does not target build/native/: $nat"; fi
+if printf '%s' "$mgw" | grep -q -- '-o build/mingw/src/core/ctc\.o'; then
+    pass "the same object cross-compiles to build/mingw/ instead"
+else fail "the cross recipe does not target build/mingw/: $mgw"; fi
+# The compiler has to differ too, or the paths would be segregating nothing.
+if printf '%s' "$mgw" | grep -q 'x86_64-w64-mingw32-gcc'; then
+    pass "and with the cross compiler, not the host one"
+else fail "the cross recipe does not use x86_64-w64-mingw32-gcc: $mgw"; fi
+
+# The library is the object that actually broke the link, so it is checked
+# by name rather than inferred from the objects above.
+natlib=$(recipe build/native/libp2500.a | grep -c 'ar rcs build/native/libp2500\.a')
+mgwlib=$(recipe MINGW=1 build/mingw/libp2500.a | grep -c 'ar rcs build/mingw/libp2500\.a')
+if [ "$natlib" -ge 1 ] && [ "$mgwlib" -ge 1 ]; then
+    pass "each toolchain archives its own libp2500.a"
+else fail "libp2500.a is not per-toolchain (native $natlib, mingw $mgwlib)"; fi
+# And nothing is left beside the sources, which is where they used to go.
+stray=$(find src -name '*.o' -o -name '*.a' | tr '\n' ' ')
+if [ -z "$stray" ]; then
+    pass "no objects or libraries beside their sources"
+else fail "objects still written into src/: $stray"; fi
+
+# --- format warnings are fatal, for the project's code only --------------
+# The measured reason: a %zu inside an SDL_Log is three warnings and exit 0
+# on MinGW, so without this a cross build that merely succeeds proves
+# nothing. It caught one live breakage the moment it was switched on.
+for want in build/native/src/core/ctc.o build/native/src/gui/main.o; do
+    if printf '%s' "$(recipe "$want")" | grep -q -- '-Werror=format'; then
+        pass "-Werror=format on $(basename "$want" .o) (the project's own code)"
+    else fail "$want compiles without -Werror=format"; fi
+done
+if printf '%s' "$mgw" | grep -q -- '-Werror=format'; then
+    pass "...and on the cross build, which is the one it exists for"
+else fail "the cross recipe compiles without -Werror=format"; fi
+# The negative half: the vendored ImGui is not the project's code and is
+# deliberately compiled without -Wall/-Wextra, so making warnings fatal
+# there would mean carrying patches to somebody else's library.
+imgui=$(recipe build/native/src/gui/vendor/imgui/imgui.o)
+if ! printf '%s' "$imgui" | grep -q -- '-Werror'; then
+    pass "but not on the vendored ImGui, which keeps its own warning level"
+else fail "ImGui is compiled with -Werror: $imgui"; fi
+
+# --- and the cross build actually runs on an ordinary build --------------
+# Segregation is only worth having because it lets this happen outside
+# publish.sh; without it the two parts above guard a build nobody runs.
+if grep -q 'x86_64-w64-mingw32-gcc' build.sh && grep -q 'make MINGW=1' build.sh; then
+    pass "build.sh cross-builds when the mingw toolchain is on PATH"
+else fail "build.sh no longer runs the Windows cross build"; fi
 }
 
 ran=0

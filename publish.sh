@@ -8,10 +8,11 @@
 #                        GUI.
 #
 # Both binaries are built native + Windows PE .exe from the same source,
-# by make's MINGW=1 toggle (see Makefile). Object files are not
-# segregated per toolchain, so each target gets its own full clean and
-# rebuild - this assembles a release, it does not optimise for rebuild
-# speed.
+# by make's MINGW=1 toggle (see Makefile). Objects are segregated per
+# toolchain (build/native, build/mingw), so neither target needs a clean
+# and build.sh has already built both by the time publish_windows runs -
+# which is also what makes the cross build something that happens on every
+# build rather than only here, at release time.
 #
 # Neither p2500-emu link needs anything beyond its own OS's C runtime.
 # p2500-gui additionally needs SDL3, which most machines won't have
@@ -54,14 +55,15 @@ report() {
 }
 
 publish_linux() {
-    make clean >/dev/null
+    # build.sh builds both targets, so publish_windows below has nothing
+    # left to compile unless a source changed under it.
     ./build.sh >/dev/null
 
     OUT=publish/linux-x64
     rm -rf "$OUT"
     mkdir -p "$OUT/lib"
 
-    cp p2500-emu p2500-gui libp2500.a "$OUT/"
+    cp p2500-emu p2500-gui build/native/libp2500.a "$OUT/"
     chmod +x "$OUT/p2500-gui" "$OUT/p2500-emu"
 
     sdl3=$(ldd p2500-gui | awk '/libSDL3\.so/ {print $3; exit}')
@@ -91,19 +93,15 @@ publish_windows() {
 
     # demos/ is Z80 machine code, identical regardless of host toolchain -
     # rebuilding it here would need ./p2500-emu.exe under Wine, which
-    # tools/z80asm.py's --verify does not know how to run. Reuse the
-    # native build's output instead of rebuilding.
-    hold=$(mktemp -d)
-    cp -r demos "$hold/"
-
-    make clean >/dev/null
+    # tools/z80asm.py's --verify does not know how to run. `make MINGW=1`
+    # does not touch it, and no longer has to be protected from a clean.
     make MINGW=1 >/dev/null
 
     OUT=publish/windows-x64
     rm -rf "$OUT"
     mkdir -p "$OUT"
 
-    cp p2500-emu.exe p2500-gui.exe libp2500.a "$OUT/"
+    cp p2500-emu.exe p2500-gui.exe build/mingw/libp2500.a "$OUT/"
 
     # Transitive: a bundled DLL (SDL3.dll) can itself need one from the
     # mingw sysroot (libssp-0.dll) that p2500-gui.exe never mentions
@@ -133,10 +131,9 @@ publish_windows() {
     done
 
     cp README.md "$OUT/"
-    cp -r "$hold/demos" disks docs roms symbols tools "$OUT/"
+    cp -r demos disks docs roms symbols tools "$OUT/"
     rm -f "$OUT"/demos/*.COM
     find "$OUT/tools" -name '__pycache__' -exec rm -rf {} +
-    rm -rf "$hold"
 
     if command -v zip >/dev/null 2>&1; then
         (cd publish && zip -rq "windows-x64-v$VERSION.zip" windows-x64)
@@ -150,8 +147,3 @@ publish_windows() {
 rm -rf publish
 publish_linux
 publish_windows
-
-# Leave the working tree in its normal native-built state - not clean.sh,
-# which would also delete the publish/ output just assembled.
-make clean >/dev/null
-./build.sh >/dev/null

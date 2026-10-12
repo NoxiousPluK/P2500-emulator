@@ -12,6 +12,14 @@
 #
 # Core sources are picked up by wildcard, so adding a device to src/core/
 # needs no edit here.
+#
+# Every object, dependency file and the library itself go under
+# build/<toolchain>/, mirroring the source tree. That is not tidiness: the
+# native and MinGW compilers used to write the same .o and libp2500.a
+# paths, so `MINGW=1 make` after a native `make` linked ELF objects into a
+# PE binary and failed - and, those objects being newer than their sources,
+# never rebuilt them. Only the final binaries sit at the top level, where
+# EXE_SUFFIX already keeps the two apart.
 
 # MINGW=1 cross-compiles for Windows (x86_64-w64-mingw32-gcc/g++, needs the
 # mingw-w64 toolchain and a mingw-w64 SDL3 build for the GUI). Everything
@@ -24,10 +32,11 @@ AR = x86_64-w64-mingw32-ar
 PKG_CONFIG = x86_64-w64-mingw32-pkg-config
 WINDRES = x86_64-w64-mingw32-windres
 EXE_SUFFIX = .exe
+BUILD = build/mingw
 # The PE icon resource. Windows reads the .exe's own icon off this; the
 # SDL window icon is set at runtime from the same artwork (src/gui/icon.cpp).
 # ELF has no equivalent, so this is Windows-only and stays empty elsewhere.
-RES_OBJ = src/win/p2500.res.o
+RES_OBJ = $(BUILD)/src/win/p2500.res.o
 # p2500-emu has no other dependencies, so link it fully static: no
 # MinGW-runtime DLLs to carry, only the Universal CRT forwarder DLLs,
 # which Windows 10+ ships itself.
@@ -47,6 +56,7 @@ CXX = c++
 AR = ar
 PKG_CONFIG = pkg-config
 EXE_SUFFIX =
+BUILD = build/native
 RES_OBJ =
 BIN_LDFLAGS =
 GUI_LDFLAGS = -Wl,-rpath,'$$ORIGIN/lib'
@@ -54,14 +64,19 @@ endif
 
 # -MMD -MP emits a .d per object listing the headers it used, so editing a
 # header rebuilds everything that includes it.
-CFLAGS = -std=c11 -Wall -Wextra -O2 -Isrc -MMD -MP
+# -Werror=format is the only warning made fatal, and it is here for one
+# measured reason: a `%zu` inside an SDL_Log is three warnings and exit 0 on
+# MinGW, so a cross build that merely succeeds proves nothing. It applies to
+# the project's own code, not to the vendored ImGui below - see
+# ../P2500-emulator-LLM-docs/windows-cross-build.md.
+CFLAGS = -std=c11 -Wall -Wextra -Werror=format -O2 -Isrc -MMD -MP
 # The GUI is C++ because Dear ImGui is. It is confined to src/gui/ and the
 # vendored ImGui is compiled without -Wall/-Wextra.
 IMGUI_DIR = src/gui/vendor/imgui
 CXXFLAGS = -std=c++17 -O2 -Isrc -I$(IMGUI_DIR) -I$(IMGUI_DIR)/backends -MMD -MP
-GUI_CXXFLAGS = $(CXXFLAGS) -Wall -Wextra
+GUI_CXXFLAGS = $(CXXFLAGS) -Wall -Wextra -Werror=format
 
-LIB = libp2500.a
+LIB = $(BUILD)/libp2500.a
 BIN = p2500-emu$(EXE_SUFFIX)
 GUI = p2500-gui$(EXE_SUFFIX)
 
@@ -80,10 +95,10 @@ IMGUI_SRC = $(IMGUI_DIR)/imgui.cpp $(IMGUI_DIR)/imgui_draw.cpp \
             $(IMGUI_DIR)/imgui_tables.cpp $(IMGUI_DIR)/imgui_widgets.cpp \
             $(IMGUI_DIR)/backends/imgui_impl_sdl3.cpp \
             $(IMGUI_DIR)/backends/imgui_impl_sdlrenderer3.cpp
-IMGUI_OBJ = $(IMGUI_SRC:.cpp=.o)
-CORE_OBJ = $(CORE_SRC:.c=.o)
-CLI_OBJ = $(CLI_SRC:.c=.o)
-GUI_OBJ = $(GUI_SRC:.cpp=.o)
+IMGUI_OBJ = $(IMGUI_SRC:%.cpp=$(BUILD)/%.o)
+CORE_OBJ = $(CORE_SRC:%.c=$(BUILD)/%.o)
+CLI_OBJ = $(CLI_SRC:%.c=$(BUILD)/%.o)
+GUI_OBJ = $(GUI_SRC:%.cpp=$(BUILD)/%.o)
 DEPS = $(CORE_OBJ:.o=.d) $(CLI_OBJ:.o=.d) $(GUI_OBJ:.o=.d) $(IMGUI_OBJ:.o=.d)
 
 # Core-level test binaries: these link libp2500.a directly, because what
@@ -93,8 +108,8 @@ DEPS = $(CORE_OBJ:.o=.d) $(CLI_OBJ:.o=.d) $(GUI_OBJ:.o=.d) $(IMGUI_OBJ:.o=.d)
 # the configuration syntax, whose load-bearing claim is about bytes in a
 # file rather than about anything the machine does.
 # Built by `make test`, not part of `all`.
-TEST_BIN = tests/fdc_eot$(EXE_SUFFIX) tests/fdc_write$(EXE_SUFFIX) \
-           tests/ini$(EXE_SUFFIX)
+TEST_SRC = tests/fdc_eot tests/fdc_write tests/ini
+TEST_BIN = $(addsuffix $(EXE_SUFFIX),$(TEST_SRC))
 
 .PHONY: all clean run test gui demos
 
@@ -106,6 +121,7 @@ GUI_IF_AVAILABLE = $(if $(HAVE_SDL3),$(GUI))
 all: $(BIN) $(GUI_IF_AVAILABLE)
 
 $(LIB): $(CORE_OBJ)
+	@mkdir -p $(@D)
 	$(AR) rcs $@ $^
 
 $(BIN): $(CLI_OBJ) $(LIB) $(RES_OBJ)
@@ -118,17 +134,24 @@ $(GUI): $(GUI_OBJ) $(IMGUI_OBJ) $(LIB) $(RES_OBJ)
 	$(CXX) $(CXXFLAGS) $(GUI_LDFLAGS) -o $@ $(GUI_OBJ) $(IMGUI_OBJ) $(LIB) $(SDL_LIBS) $(RES_OBJ)
 
 # -I. so the .rc's path to assets/icon/ resolves from the project root.
-src/win/%.res.o: src/win/%.rc assets/icon/p2500icon.ico
+$(BUILD)/src/win/%.res.o: src/win/%.rc assets/icon/p2500icon.ico
+	@mkdir -p $(@D)
 	$(WINDRES) -I. -O coff -i $< -o $@
 
-src/gui/%.o: src/gui/%.cpp
+# Three compile rules, and make picks between them by shortest stem, so the
+# vendored-ImGui rule wins over the src/gui/ one for its own sources and
+# keeps being compiled without -Wall/-Wextra/-Werror.
+$(BUILD)/src/gui/%.o: src/gui/%.cpp
 	@test "$(HAVE_SDL3)" = yes || { echo "sdl3 not found by pkg-config - install it to build the GUI"; exit 1; }
+	@mkdir -p $(@D)
 	$(CXX) $(GUI_CXXFLAGS) $(SDL_CFLAGS) -c -o $@ $<
 
-$(IMGUI_DIR)/%.o: $(IMGUI_DIR)/%.cpp
+$(BUILD)/$(IMGUI_DIR)/%.o: $(IMGUI_DIR)/%.cpp
+	@mkdir -p $(@D)
 	$(CXX) $(CXXFLAGS) $(SDL_CFLAGS) -c -o $@ $<
 
-%.o: %.c
+$(BUILD)/%.o: %.c
+	@mkdir -p $(@D)
 	$(CC) $(CFLAGS) -c -o $@ $<
 
 # The graphics demos. Assembled by tools/z80asm.py, which verifies its own
@@ -152,11 +175,19 @@ $(DEMO_DISK): $(DEMO_COM) tools/cpm_build.py
 tests/%$(EXE_SUFFIX): tests/%.c $(LIB)
 	$(CC) $(CFLAGS) $(BIN_LDFLAGS) -o $@ $< $(LIB)
 
+# Cleans BOTH toolchains whichever one invoked it: build/ holds all the
+# objects, and the binaries are swept under both suffixes. A tree that
+# cannot be fully cleaned from one command is how stale cross objects got
+# linked in the first place.
+CLEAN_BIN = p2500-emu p2500-gui $(TEST_SRC)
 clean:
-	rm -f $(TEST_BIN) $(TEST_BIN:$(EXE_SUFFIX)=.d)
-	rm -f $(BIN) $(GUI) $(LIB) $(CORE_OBJ) $(CLI_OBJ) $(GUI_OBJ) $(IMGUI_OBJ) $(DEPS)
-	rm -f src/win/*.res.o
+	rm -rf build
+	rm -f $(CLEAN_BIN) $(addsuffix .exe,$(CLEAN_BIN)) $(addsuffix .d,$(CLEAN_BIN))
 	rm -f $(DEMO_COM) $(DEMO_DISK)
+#	Objects lived beside their sources until the per-toolchain split, so
+#	sweep those too - a tree built before it then converges on one clean.
+	rm -f libp2500.a src/win/*.res.o
+	find src -name '*.o' -delete -o -name '*.d' -delete
 
 -include $(DEPS)
 

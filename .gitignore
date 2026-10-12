@@ -1,8 +1,7 @@
 p2500-emu
 CLAUDE.md
 shots/
-libp2500.a
-*.o
+build/
 *.d
 p2500-gui
 tools/__pycache__/

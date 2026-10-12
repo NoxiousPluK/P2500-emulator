@@ -53,8 +53,13 @@ not found by `pkg-config`.
 ./clean.sh   # or: make clean
 ```
 
-Removes build artefacts (objects, the library, both binaries, the built
-demo disk) and Python's `__pycache__`.
+Removes build artefacts (`build/`, the binaries, the built demo disk) and
+Python's `__pycache__`.
+
+Objects and `libp2500.a` go under `build/<toolchain>/`, so a Windows
+cross build (`make MINGW=1`, needs mingw-w64 and a mingw-w64 SDL3) can sit
+beside the native one without either disturbing the other. `build.sh` runs
+it automatically whenever that toolchain is on `PATH`.
 
 ```sh
 ./publish.sh
@@ -519,8 +524,9 @@ make test
 
 runs `tests/run_tests.sh`: checks covering the cartridge-slot (SESAM)
 boot path, the IPL and CP/M boot sequence, disk I/O, the video renderer
-the debugger panels, the disassembler, the speed control, rewind, and the
-settings file. Exit code 1 on any failure.
+the debugger panels, the disassembler, the speed control, rewind, the
+settings file, and the build system's per-toolchain object layout. Exit
+code 1 on any failure.
 
 The suite takes a few minutes, most of it GUI runs of hundreds of emulated
 fields, so it also runs in parts:
@@ -542,7 +548,10 @@ because what they check is not reachable from any command line:
 which needs a DMA transfer longer than any real program here requests),
 `tests/fdc_write.c` (the write paths no surviving software takes), and
 `tests/ini.c` (the settings syntax, whose load-bearing claim is about bytes
-in a file).
+in a file). One section drives neither: section 28 reads recipes out of
+`make -n` to check that the native and Windows cross builds still write to
+separate object trees, and that format warnings are fatal for the
+project's own code but not for the vendored ImGui.
 
 The suite runs with `P2500_CONFIG=none` and a pinned `P2500_DISPLAY`, so a
 developer's saved settings can never reach a check and a check can never
@@ -559,6 +568,7 @@ src/core/   machine model (libp2500.a) — C11, no dependencies beyond libc
 src/cli/    headless harness (p2500-emu)
 src/gui/    SDL3 + Dear ImGui front-end (p2500-gui) — the only C++ in the tree
 src/win/    the Windows .exe icon resource, built by windres under MINGW=1
+build/      objects and libp2500.a, one subdirectory per toolchain
 tools/      disk-image and asset build tools (Python)
 assets/     build assets like the application icon
 tests/      the regression suite, its fixtures, the core-level checks

@@ -1,6 +1,7 @@
 #!/bin/sh
-# Removes build artefacts: the library, both binaries, every .o/.d, the
-# built demo disk and its .COM files, Python's __pycache__ caches, and
+# Removes build artefacts: build/ (every object and both toolchains'
+# libp2500.a), the binaries - native and Windows, whichever are present -
+# the built demo disk and its .COM files, Python's __pycache__ caches, and
 # publish/ (publish.sh's output).
 # Does not touch disks/, roms/, tests/fixtures/, or anything else checked in.
 set -eu
