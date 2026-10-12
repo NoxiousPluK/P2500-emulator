@@ -103,6 +103,15 @@ typedef struct {
     uint16_t bdos_entry;  /* page zero $0006 */
     uint16_t bdos_base;   /* the entry's own page */
     uint16_t ccp_base;    /* BDOS base less $800 - CP/M's own layout */
+    /* The build size in K, derived: the CCP base IS the build size, $400
+     * per K, anchored at $CC00 = 58K. Both ends of that rule are read off
+     * the profiles' own banner strings - `CP/M 2.2 - 58K` with a $CC00
+     * base and `CP/M 2.2 - 56K` with a $C400 one (T59) - so this is a
+     * two-point fit, not an extrapolation from one. `build_exact` is false
+     * when the base is not a whole number of K, which no known build is;
+     * the report says so rather than rounding an unexpected base away. */
+    uint16_t build_k;
+    bool build_exact;
 } P2500CpmMap;
 
 /* True when page zero holds CP/M's two vectors and the 17-slot jump table

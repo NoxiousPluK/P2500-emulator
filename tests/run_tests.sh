@@ -2023,6 +2023,30 @@ if grep -q 'device table .*8 devices' "$TMP/sys_b.log" &&
     pass "the device table is found by shape and its known ids named"
 else fail "the device table scan did not find B's eight devices"; fi
 
+# The build size, derived from the CCP base at $400 per K (T59). This is
+# the one line in the report that can be checked against a literal string
+# in the firmware of a running system, so it is checked that way rather
+# than against a constant: both BIOS generations print their own size on
+# screen - "58K CP/M Ver. 2.2" on P25K_B, "CP/M 2.2 - 58K" on P25K_G - and
+# the panel must agree with the banner on each. Two independent reads of
+# one fact, neither of them this suite's own arithmetic.
+for d in P25K_B P25K_G; do
+    [ -f "disks/$d.raw" ] || continue
+    $EMU --disk "disks/$d.raw" --max-steps 3000000 --sysinfo \
+         --dump-vram "$TMP/bk_$d.bin" >"$TMP/bk_$d.log" 2>&1
+    screen "$TMP/bk_$d.bin" | head -2 >"$TMP/bk_$d.screen"
+    said=$(grep -oE '[0-9]+K' "$TMP/bk_$d.screen" | head -1)
+    shown=$(sed -n 's/^  build  *CP\/M 2\.2 - \([0-9]*K\) .*/\1/p' "$TMP/bk_$d.log")
+    # Both halves must be non-empty, or "they agree" would mean nothing.
+    if [ -n "$said" ] && [ -n "$shown" ] && [ "$said" = "$shown" ]; then
+        pass "$d: the reported build size ($shown) is the size its own banner prints"
+    else fail "$d: banner says '${said:-nothing}', the report says '${shown:-nothing}'"; fi
+done
+# ...and the derivation is anchored, not a constant: $400 per K from $CC00.
+if grep -q 'build  *CP/M 2\.2 - 58K   from the CCP base, \$400 per K' "$TMP/sys_b.log"; then
+    pass "the build size names its own derivation from the CCP base"
+else fail "the build size row is not derived from the CCP base"; fi
+
 # The other BIOS generation must come out different in both numbers,
 # which is what makes these reads and not constants.
 if [ -f disks/P25K_G.raw ]; then

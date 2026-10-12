@@ -167,6 +167,7 @@ Everything the panels show comes from `core/debug.c` and
   is in each drive and whether the image is one the shipped rules recognise,
   what the port $0F cartridge slot holds and how much traffic it has seen,
   which symbol file fingerprints the running build, and (once CP/M is up)
+  which CP/M build is running (the size in K, derived from the CCP base),
   the memory map, drive A's DPB decoded, and the device table the BIOS
   publishes. That last one answers how many drive letters are supported by
   the loaded disk's CBIOS/PBIOS: it is read out of the BIOS's own DPH

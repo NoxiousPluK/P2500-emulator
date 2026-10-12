@@ -50,6 +50,14 @@ bool p2500_sysinfo_cpm_map(const P2500Machine *m, P2500CpmMap *out)
     out->bdos_entry = bdos;
     out->bdos_base = (uint16_t)(bdos & 0xFF00);
     out->ccp_base = (uint16_t)((bdos & 0xFF00) - 0x0800);
+    /* $400 per K anchored at $CC00 = 58K, both ends off the profiles' own
+     * banners (T59); $1C00 is that anchor, the fixed distance from the CCP
+     * base to the top of the build. Derived rather than tabled, so an
+     * unexpected base gives an unexpected size instead of no answer at
+     * all, and floored so that the remainder below is always the distance
+     * ABOVE the K figure reported. */
+    out->build_k = (uint16_t)((out->ccp_base + 0x1C00u) / 0x400u);
+    out->build_exact = (out->ccp_base & 0x03FF) == 0;
     return true;
 }
 
@@ -414,14 +422,28 @@ int p2500_sysinfo(const P2500Machine *m, const P2500Debug *d,
     }
 
     HEAD("CP/M");
+    /* The build size is what a user actually wants from the CCP base, and
+     * the firmware says it in words: a booting P25K_G prints
+     * `CP/M 2.2 - 58K` on screen row 1 and has a $CC00 base, so the panel
+     * can be checked against a literal string in a running system.
+     * Deliberately only the K size - the manual's 5-inch/8-inch/hard-disk
+     * pairing with these sizes does not hold for the profiles in the
+     * corpus (T59), so it stays in the research notes. */
+    if (cpm.build_exact)
+        ROW("build", "CP/M 2.2 - %uK   from the CCP base, $400 per K",
+            (unsigned)cpm.build_k);
+    else
+        ROW("build", "not a whole number of K - the CCP base is $%03X past "
+            "%uK at $400 per K",
+            (unsigned)(cpm.ccp_base & 0x03FF), (unsigned)cpm.build_k);
     ROW("CCP base", "$%04X   BDOS base less $800, CP/M's own layout",
         cpm.ccp_base);
     ROW("BDOS", "base $%04X, entry $%04X (from page zero $0006)",
         cpm.bdos_base, cpm.bdos_entry);
     ROW("CBIOS jump table", "$%04X   17 slots, all JP", cpm.jump_table);
-    /* The TPA is what a program actually gets, and it is the number the
-     * P2206 manual disagrees with (T59) - so print it rather than leave it
-     * to arithmetic. The LOADABLE size is one record less than the TPA:
+    /* The TPA is what a program actually gets, and it is not the build
+     * size above - so print it rather than leave it to arithmetic. The
+     * LOADABLE size is one record less than the TPA:
      * the CCP refuses to overwrite itself while loading, measured by
      * bisection at 405 records with 406 giving BAD LOAD. A running program
      * may use that memory afterwards, which is why the two differ. */
